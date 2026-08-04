@@ -2774,6 +2774,43 @@ class Scheduler:
             )
         return ""
 
+    @staticmethod
+    def _running_as_root() -> bool:
+        """CoderFleet 自身进程是否以 root 身份运行 —— 这是宿主机部署方式的属性，不是账号/
+        任务的属性：LocalRuntime 起的子进程直接继承 coderfleet server 自己的 UID，没有像
+        Docker 那样在容器内切到非 root 用户（镜像里跑的是固定的 byclaw 用户）这一层。
+        """
+        return hasattr(os, "geteuid") and os.geteuid() == 0
+
+    def check_local_root_gate(self, acc: Account, auto: bool) -> str:
+        """local + auto + Claude + coderfleet server 本身以 root 运行时拒绝。
+
+        这不是 CoderFleet 自己的限制，是 Claude Code 自己的：它的 --dangerously-skip-
+        permissions 启动时会检测有效 UID，root/sudo 下直接拒绝启动（"cannot be used with
+        root/sudo privileges for security reasons"，实测原文）。container 场景不会撞上这个——
+        镜像里跑的是非 root 的 byclaw 用户；local 场景的子进程直接继承 coderfleet server
+        自己的 UID，如果 server 本身是用 root 启动的，每一次 auto=True 的 Claude 调用都会
+        带着这个旗标一起被拒绝。不尝试静默去掉 --dangerously-skip-permissions 退化成非 auto
+        模式——那样任务会卡在等一个不存在的人工审批上（进程还在但读不到任何审批输入），
+        比在提交阶段就明确拒绝更糟；也不去改 sandbox_confirmed 语义，root 和"有没有沙箱"
+        是两个独立的失败原因，即使已经确认过沙箱，Claude 仍然会在启动时因为 root 被拒绝。
+        返回非空字符串表示拒绝；空字符串表示允许。
+        """
+        if (
+            acc.runtime == AccountRuntime.local
+            and auto
+            and acc.type == AccountType.claude
+            and self._running_as_root()
+        ):
+            return (
+                f"无法为账号 '{acc.name}' 提交 auto 任务：Claude Code 自己拒绝在 root/sudo "
+                "权限下使用 --dangerously-skip-permissions（官方安全限制，不是 CoderFleet 能"
+                "绕过或应该绕过的）。当前 coderfleet server 进程本身是以 root 身份运行的，"
+                "local 账号的子进程会直接继承这个身份。请改用非 root 用户启动 "
+                "coderfleet server（例如新建一个专门的系统用户），而不是尝试绕过这个限制。"
+            )
+        return ""
+
     def local_auth_dir(self, acc: Account) -> Path:
         """local 账号在宿主机上的 CODEX_HOME/CLAUDE_CONFIG_DIR 根目录。
 
@@ -2846,7 +2883,10 @@ class Scheduler:
         proc: Optional[asyncio.subprocess.Process] = None
 
         try:
-            gate_rejection = self.check_local_sandbox_gate(acc, auto)
+            gate_rejection = (
+                self.check_local_sandbox_gate(acc, auto)
+                or self.check_local_root_gate(acc, auto)
+            )
             if gate_rejection:
                 raise RuntimeError(gate_rejection)
 

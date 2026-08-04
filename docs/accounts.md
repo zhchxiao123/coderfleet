@@ -171,6 +171,7 @@ local 账号的凭证隔离靠账号自己的 `accounts/<name>/.claude`（或 `.
   ```
 
   没加这个标志的 local 账号能正常跑非 auto 任务，但提交 `auto` 任务会被明确拒绝（不会静默降级成无沙箱执行）。
+- **`coderfleet server` 不能以 root 身份启动，否则 Claude 的 local + auto 任务全部会失败。** Claude Code 自己的 CLI 会检测有效 UID，`--dangerously-skip-permissions` 在 root/sudo 下直接拒绝启动（"cannot be used with root/sudo privileges for security reasons"，CLI 原话）。container 账号不受影响（镜像里跑的是非 root 的 `byclaw` 用户），但 local 账号的子进程直接继承 `coderfleet server` 自己的 UID——如果 server 进程本身是用 root/sudo 启动的，每一次 local Claude 账号的 `auto` 任务都会撞上这个限制。用非 root 用户启动 `coderfleet server`（例如专门建一个系统用户）。目前没有证据表明 Codex 有同样的检测。
 - **不支持会话复用（keep-container）。** container 场景下可以让一个容器常驻、反复 `exec` 进去；local 场景每次任务都是一次全新的宿主机子进程调用，靠 CLI 自己的 `--resume` 衔接上下文。
 - **不支持持久容器（Interactive 模式）**，`coderfleet enter`/`coderfleet up` 仍然是 container 账号的能力，local 账号只能通过 Task/Conversation 提交任务。
 

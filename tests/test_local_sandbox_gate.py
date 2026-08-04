@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,77 @@ def test_ephemeral_task_local_auto_with_confirmation_runs_and_uses_workspace_wri
     assert "--sandbox workspace-write" in wrapped_cmd
     assert "danger-full-access" not in wrapped_cmd
     assert sched.get_task(task.id).status == TaskStatus.done
+
+
+# ── Scheduler.check_local_root_gate: Claude 自己拒绝 root 下用 --dangerously-skip-permissions ──
+def test_root_gate_blocks_local_auto_claude_when_server_runs_as_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sched = Scheduler(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    acc = Account(name="a", type=AccountType.claude, runtime=AccountRuntime.local, sandbox_confirmed=True)
+
+    msg = sched.check_local_root_gate(acc, auto=True)
+
+    assert msg
+    assert "root" in msg.lower()
+
+
+def test_root_gate_allows_when_not_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sched = Scheduler(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    acc = Account(name="a", type=AccountType.claude, runtime=AccountRuntime.local, sandbox_confirmed=True)
+
+    assert sched.check_local_root_gate(acc, auto=True) == ""
+
+
+def test_root_gate_scoped_to_claude_not_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只针对 Claude —— 目前没有证据表明 Codex 有同样的 root 检测，不替 Codex 编造限制。"""
+    sched = Scheduler(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    acc = Account(name="a", type=AccountType.codex, runtime=AccountRuntime.local, sandbox_confirmed=True)
+
+    assert sched.check_local_root_gate(acc, auto=True) == ""
+
+
+def test_root_gate_ignores_non_auto_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """非 auto 不会拼 --dangerously-skip-permissions，root 检测不适用。"""
+    sched = Scheduler(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    acc = Account(name="a", type=AccountType.claude, runtime=AccountRuntime.local, sandbox_confirmed=True)
+
+    assert sched.check_local_root_gate(acc, auto=False) == ""
+
+
+def test_root_gate_ignores_container_accounts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """container 场景里跑的是镜像里的非 root byclaw 用户，不会真的撞上这个限制。"""
+    sched = Scheduler(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    acc = Account(name="a", type=AccountType.claude, runtime=AccountRuntime.container)
+
+    assert sched.check_local_root_gate(acc, auto=True) == ""
+
+
+def test_ephemeral_task_local_claude_auto_as_root_fails_cleanly_before_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_rt = FakeRuntime()  # 不应该被调用——门禁必须在拼命令、起子进程之前就拦下
+    sched = Scheduler(tmp_path, local_runtime=local_rt)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    task = Task(
+        id="task-root-1", status=TaskStatus.running, account="alice",
+        type=AccountType.claude, prompt="hi", project="",
+    )
+    task.save(sched.tasks_dir)
+    acc = Account(name="alice", type=AccountType.claude, runtime=AccountRuntime.local, sandbox_confirmed=True)
+    log_path = sched.get_log_path(task.id)
+    sched._write_log_header(log_path, task, acc)
+
+    monkeypatch.setattr(sched, "_get_account_image", lambda _acc, _project=None: "unused")
+
+    asyncio.run(sched._run_ephemeral_task(task, acc, log_path, auto=True))
+
+    assert len(local_rt.runs) == 0
+    saved = sched.get_task(task.id)
+    assert saved.status == TaskStatus.failed
+    assert "root" in log_path.read_text().lower()
