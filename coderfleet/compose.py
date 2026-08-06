@@ -15,6 +15,7 @@ import yaml
 from coderfleet.config import container_timezone, ensure_bind_mount_dir, load_config, parse_conf
 from coderfleet.docker_socket import docker_socket_config_for_project, resolve_docker_socket
 from coderfleet.account_type_registry import ACCOUNT_TYPES, duplicate_account_types
+from coderfleet.mounts import parse_mounts
 from coderfleet.ports import allocate_ide_port
 
 
@@ -299,6 +300,28 @@ def generate_compose(ws: Path) -> dict[str, Any]:
             environment["DOCKER_HOST"] = docker_socket.env
             environment["CODERFLEET_HOST_WORKSPACE"] = ppath
             environment["CODERFLEET_DOCKER_SOCKET"] = docker_socket.container_path
+
+        # 用户自定义的额外宿主机目录挂载（EXTRA_MOUNTS=host:container[:ro],...）。
+        # 不对 host 目录调用 ensure_bind_mount_dir——那个函数会 mkdir+chmod 777，
+        # 对项目自己管理的 accounts/ide-data 目录合适，但这里的路径是用户任意指定
+        # 的宿主机目录，静默创建+改权限是意料之外的副作用，交给 Docker 在容器启动
+        # 时报错更安全。
+        try:
+            extra_mounts = parse_mounts(p.get("EXTRA_MOUNTS", ""))
+        except ValueError as e:
+            raise click.ClickException(f"项目 {pname} 的 EXTRA_MOUNTS 配置无效：{e}")
+        reserved_container_paths = {"/workspace", auth_dst}
+        for mount in extra_mounts:
+            if mount.container_path in reserved_container_paths:
+                raise click.ClickException(
+                    f"项目 {pname} 的 EXTRA_MOUNTS 配置无效：容器路径 {mount.container_path} "
+                    "已被项目工作区或账号认证目录占用"
+                )
+            if not Path(mount.host_path).exists():
+                raise click.ClickException(
+                    f"项目 {pname} 的 EXTRA_MOUNTS 配置无效：宿主机路径 {mount.host_path} 不存在"
+                )
+            svc["volumes"].append(mount.volume)
 
         if ide_enabled:
             ide_port = (

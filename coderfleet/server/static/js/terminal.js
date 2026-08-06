@@ -259,6 +259,14 @@ function connectProjectTerminal(projectName) {
     setProjectTerminalStatus('closed', '请选择项目后连接终端');
     return;
   }
+  // 终端是 docker exec -it 到项目容器 —— local 账号没有容器，连了也只会拿到一个连不上
+  // 的报错，不如直接说清楚原因。
+  const proj = (projectsCache || []).find(p => p.name === projectName);
+  const acc  = proj ? (globalAccountsCache || []).find(a => a.name === proj.account) : null;
+  if (acc?.runtime === 'local') {
+    setProjectTerminalStatus('error', `账号 '${acc.name}' 是 runtime=local，没有容器终端可连接`);
+    return;
+  }
   if (terminalContext.projectName === projectName && terminalContext.socket &&
       (terminalContext.socket.readyState === WebSocket.OPEN || terminalContext.socket.readyState === WebSocket.CONNECTING)) {
     resizeProjectTerminal();
@@ -792,6 +800,17 @@ function connectBottomTerminal(projectName) {
     disconnectBottomTerminal({ context });
     context.projectName = '';
     setBottomTerminalStatus('closed', '请选择项目后连接终端');
+    return;
+  }
+  // 终端是 docker exec -it 到项目容器 —— local 账号没有容器，连了也只会拿到一个连不上
+  // 的报错，不如直接说清楚原因，不打开抽屉。
+  const proj = (projectsCache || []).find(p => p.name === projectName);
+  const acc  = proj ? (globalAccountsCache || []).find(a => a.name === proj.account) : null;
+  if (acc?.runtime === 'local') {
+    disconnectBottomTerminal({ context });
+    context.projectName = projectName;
+    updateActiveBottomTerminalTabProject(projectName);
+    setBottomTerminalStatus('error', `账号 '${acc.name}' 是 runtime=local，没有容器终端可连接`);
     return;
   }
   setBottomTerminalOpen(true);

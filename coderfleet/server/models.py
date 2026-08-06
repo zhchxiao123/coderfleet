@@ -211,6 +211,7 @@ class Project(BaseModel):
     ephemeral:   bool = False
     git_url:     str = ""
     secondary_accounts: list[str] = []
+    extra_mounts: list[str] = []
 
     @property
     def mount_path(self) -> str:
@@ -242,6 +243,9 @@ class Project(BaseModel):
             git_url=record.get("GIT_URL", ""),
             secondary_accounts=[
                 name.strip() for name in record.get("SECONDARY_ACCOUNTS", "").split(",") if name.strip()
+            ],
+            extra_mounts=[
+                token.strip() for token in record.get("EXTRA_MOUNTS", "").split(",") if token.strip()
             ],
         )
 
@@ -801,6 +805,7 @@ class ProjectResponse(BaseModel):
     ephemeral:   bool = False
     git_url:     str = ""
     secondary_accounts: list[str] = []
+    extra_mounts: list[str] = []
     container_running: Optional[bool] = None
 
     @classmethod
@@ -821,6 +826,7 @@ class ProjectResponse(BaseModel):
             ephemeral=getattr(p, "ephemeral", False),
             git_url=getattr(p, "git_url", ""),
             secondary_accounts=getattr(p, "secondary_accounts", []),
+            extra_mounts=getattr(p, "extra_mounts", []),
         )
 
 

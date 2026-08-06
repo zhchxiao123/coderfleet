@@ -12,6 +12,7 @@ import click
 
 from coderfleet.config import container_timezone, ensure_bind_mount_dir, ensure_workspace, load_config, parse_conf, remove_conf_entry, set_config, update_conf_field, write_conf_line
 from coderfleet.account_type_registry import ACCOUNT_TYPES, duplicate_account_types, env_auth_type_ids
+from coderfleet.mounts import parse_mounts
 from coderfleet.ports import allocate_ide_port
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9-]+$")
@@ -388,6 +389,8 @@ def project_group() -> None:
               help="项目级 Docker socket 覆盖：off / auto / /path/to/docker.sock")
 @click.option("--secondary", "secondary_accounts", multiple=True, metavar="ACCOUNT",
               help="绑定一个从账号（仅挂载认证目录/env，不参与任务调度），可重复传入以绑定多个")
+@click.option("--mount", "mounts", multiple=True, metavar="HOST_PATH:CONTAINER_PATH[:ro]",
+              help="自定义挂载：将宿主机目录/文件挂载到容器内指定路径，可重复传入以挂载多个")
 @click.pass_context
 def cmd_project_add(
     ctx: click.Context,
@@ -400,12 +403,19 @@ def cmd_project_add(
     image: Optional[str],
     docker_socket: Optional[str],
     secondary_accounts: tuple[str, ...],
+    mounts: tuple[str, ...],
 ) -> None:
     """Add a new project."""
     ws: Path = ctx.obj["workspace"]
 
     if not _NAME_RE.match(name):
         raise click.ClickException("项目名称只能包含字母、数字、连字符")
+
+    if mounts:
+        try:
+            parse_mounts(",".join(mounts))
+        except ValueError as e:
+            raise click.ClickException(str(e))
 
     accounts_conf = ws / "accounts.conf"
     accounts_conf_records = parse_conf(accounts_conf)
@@ -438,6 +448,8 @@ def cmd_project_add(
         tokens["IMAGE"] = image
     if docker_socket:
         tokens["DOCKER_SOCKET"] = docker_socket
+    if mounts:
+        tokens["EXTRA_MOUNTS"] = ",".join(mounts)
     write_conf_line(projects_conf, tokens)
 
     expanded = str(Path(path).expanduser())
@@ -447,6 +459,8 @@ def cmd_project_add(
         click.secho(f"  镜像：{image}", dim=True)
     if docker_socket:
         click.secho(f"  Docker socket：{docker_socket}", dim=True)
+    if mounts:
+        click.secho(f"  额外挂载：{', '.join(mounts)}", dim=True)
     click.secho("  执行 coderfleet apply 使配置生效", fg="yellow")
 
 
@@ -528,6 +542,47 @@ def cmd_project_set_docker_socket(ctx: click.Context, name: str, socket: str) ->
     else:
         update_conf_field(projects_conf, name, "DOCKER_SOCKET", socket)
         click.secho(f"✓ 项目 '{name}' 已设置 DOCKER_SOCKET={socket}", fg="green")
+    click.secho("  执行 coderfleet apply 使配置生效", fg="yellow")
+
+
+@project_group.command("set-mounts")
+@click.argument("name")
+@click.argument("mounts")
+@click.pass_context
+def cmd_project_set_mounts(ctx: click.Context, name: str, mounts: str) -> None:
+    """Set or clear a project's extra host-directory mounts.
+
+    MOUNTS is a comma-separated list of HOST_PATH:CONTAINER_PATH[:ro] entries.
+
+    \b
+    Examples:
+      coderfleet project set-mounts my-project /data:/data,/models:/models:ro
+      coderfleet project set-mounts my-project -     # 清除所有额外挂载
+    """
+    ws: Path = ctx.obj["workspace"]
+    projects_conf = ws / "projects.conf"
+
+    if not any(p.get("NAME") == name for p in parse_conf(projects_conf)):
+        raise click.ClickException(f"项目 '{name}' 不存在")
+
+    if mounts == "-":
+        lines = projects_conf.read_text(encoding="utf-8").splitlines(keepends=True)
+        new_lines = []
+        for line in lines:
+            if re.search(rf"\bNAME={re.escape(name)}(\s|$)", line):
+                tokens = [t for t in line.rstrip("\n").split() if not t.upper().startswith("EXTRA_MOUNTS=")]
+                new_lines.append("  ".join(tokens) + "\n")
+            else:
+                new_lines.append(line)
+        projects_conf.write_text("".join(new_lines), encoding="utf-8")
+        click.secho(f"✓ 项目 '{name}' 已清除所有额外挂载", fg="green")
+    else:
+        try:
+            parse_mounts(mounts)
+        except ValueError as e:
+            raise click.ClickException(str(e))
+        update_conf_field(projects_conf, name, "EXTRA_MOUNTS", mounts)
+        click.secho(f"✓ 项目 '{name}' 已设置 EXTRA_MOUNTS={mounts}", fg="green")
     click.secho("  执行 coderfleet apply 使配置生效", fg="yellow")
 
 

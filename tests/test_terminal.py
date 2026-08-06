@@ -121,6 +121,22 @@ def test_resolve_terminal_target_rejects_missing_account(tmp_path: Path) -> None
         resolve_terminal_target(sched, "repo")
 
 
+def test_resolve_terminal_target_rejects_local_runtime_account(tmp_path: Path) -> None:
+    from coderfleet.server.models import AccountRuntime
+    from coderfleet.server.terminal import resolve_terminal_target
+
+    sched = Scheduler(tmp_path)
+    project = Project(name="repo", account="alice", path=str(tmp_path / "repo"))
+    (tmp_path / "repo").mkdir()
+    sched.find_project_by_name = lambda _name: project  # type: ignore[method-assign]
+    sched.get_accounts = lambda: [  # type: ignore[method-assign]
+        Account(name="alice", type=AccountType.claude, runtime=AccountRuntime.local)
+    ]
+
+    with pytest.raises(ValueError, match="runtime=local"):
+        resolve_terminal_target(sched, "repo")
+
+
 def test_resolve_terminal_target_rejects_stopped_container(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

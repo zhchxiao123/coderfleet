@@ -137,6 +137,105 @@ def test_up_scoped_to_unknown_project_fails(tmp_path: Path) -> None:
     assert "does-not-exist" in result.stderr
 
 
+def _make_mixed_local_and_container_workspace(tmp_path: Path) -> Path:
+    """一个 container 项目（保证 write_compose 不会因为"没有可用项目"整体报错）
+    + 一个 local 项目，用来测试 local 项目本身在容器生命周期命令里被正确单独拒绝。"""
+    workspace = make_workspace(tmp_path)
+    (workspace / "repo").mkdir(exist_ok=True)
+    (workspace / "repo-local").mkdir(exist_ok=True)
+    (workspace / "accounts.conf").write_text(
+        "NAME=api-claude TYPE=claude AUTH=login\n"
+        "NAME=alice TYPE=claude AUTH=login RUNTIME=local\n",
+        encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=api-claude PATH={workspace / 'repo'}\n"
+        f"NAME=repo-local ACCOUNT=alice PATH={workspace / 'repo-local'}\n",
+        encoding="utf-8",
+    )
+    return workspace
+
+
+def test_up_rejects_local_runtime_project_with_clear_message(tmp_path: Path) -> None:
+    workspace = _make_mixed_local_and_container_workspace(tmp_path)
+
+    result = run_coderfleet(workspace, fake_docker_path(tmp_path), "up", "repo-local")
+
+    assert result.returncode != 0
+    assert "RUNTIME=local" in result.stderr
+
+
+def test_down_rejects_local_runtime_project_with_clear_message(tmp_path: Path) -> None:
+    workspace = _make_mixed_local_and_container_workspace(tmp_path)
+
+    result = run_coderfleet(workspace, fake_docker_path(tmp_path), "down", "repo-local")
+
+    assert result.returncode != 0
+    assert "RUNTIME=local" in result.stderr
+
+
+def test_enter_rejects_local_runtime_project_with_clear_message(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=alice TYPE=claude AUTH=login RUNTIME=local\n", encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=alice PATH={workspace / 'repo'}\n", encoding="utf-8",
+    )
+
+    result = run_coderfleet(workspace, fake_docker_path(tmp_path), "enter", "repo")
+
+    assert result.returncode != 0
+    assert "RUNTIME=local" in result.stderr
+
+
+def test_logs_rejects_local_runtime_project_with_clear_message(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=alice TYPE=claude AUTH=login RUNTIME=local\n", encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=alice PATH={workspace / 'repo'}\n", encoding="utf-8",
+    )
+
+    result = run_coderfleet(workspace, fake_docker_path(tmp_path), "logs", "repo")
+
+    assert result.returncode != 0
+    assert "RUNTIME=local" in result.stderr
+
+
+def test_status_shows_local_runtime_project_without_container_status(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=alice TYPE=claude AUTH=login RUNTIME=local\n", encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=alice PATH={workspace / 'repo'}\n", encoding="utf-8",
+    )
+
+    result = run_coderfleet(workspace, fake_docker_path(tmp_path), "status")
+
+    assert result.returncode == 0, result.stderr
+    assert "local" in result.stdout
+    assert "已停止" not in result.stdout
+
+
+def test_check_proxy_skips_local_runtime_projects(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=alice TYPE=claude AUTH=login RUNTIME=local\n", encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=alice PATH={workspace / 'repo'}\n", encoding="utf-8",
+    )
+
+    result = run_coderfleet(workspace, fake_docker_path(tmp_path), "check-proxy")
+
+    assert result.returncode == 0, result.stderr
+    assert "跳过 runtime=local 项目" in result.stdout
+    assert "repo" in result.stdout
+
+
 def test_up_scoped_start_is_same_command_whether_new_or_previously_stopped(tmp_path: Path) -> None:
     workspace = make_two_project_workspace(tmp_path)
     call_log = tmp_path / "docker-calls.log"
@@ -666,6 +765,111 @@ def test_project_set_docker_socket_updates_existing_project(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     projects_conf = (workspace / "projects.conf").read_text(encoding="utf-8")
     assert "DOCKER_SOCKET=off" in projects_conf
+
+
+def test_project_add_accepts_repeated_mount_option(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=api-codex TYPE=codex AUTH=login\n",
+        encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text("", encoding="utf-8")
+    mount_a = tmp_path / "data-a"
+    mount_b = tmp_path / "data-b"
+
+    result = run_coderfleet(
+        workspace,
+        fake_docker_path(tmp_path),
+        "project",
+        "add",
+        "repo",
+        "api-codex",
+        str(workspace / "repo"),
+        "--mount",
+        f"{mount_a}:/data-a",
+        "--mount",
+        f"{mount_b}:/data-b:ro",
+    )
+
+    assert result.returncode == 0, result.stderr
+    projects_conf = (workspace / "projects.conf").read_text(encoding="utf-8")
+    assert f"EXTRA_MOUNTS={mount_a}:/data-a,{mount_b}:/data-b:ro" in projects_conf
+
+
+def test_project_add_rejects_malformed_mount_option(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=api-codex TYPE=codex AUTH=login\n",
+        encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text("", encoding="utf-8")
+
+    result = run_coderfleet(
+        workspace,
+        fake_docker_path(tmp_path),
+        "project",
+        "add",
+        "repo",
+        "api-codex",
+        str(workspace / "repo"),
+        "--mount",
+        "not-a-mount-spec",
+    )
+
+    assert result.returncode != 0
+    assert "挂载格式错误" in result.stderr
+    assert not (workspace / "projects.conf").read_text(encoding="utf-8").strip()
+
+
+def test_project_set_mounts_updates_existing_project(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=api-codex TYPE=codex AUTH=login\n",
+        encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=api-codex PATH={workspace / 'repo'}\n",
+        encoding="utf-8",
+    )
+    mount = tmp_path / "data"
+
+    result = run_coderfleet(
+        workspace,
+        fake_docker_path(tmp_path),
+        "project",
+        "set-mounts",
+        "repo",
+        f"{mount}:/data",
+    )
+
+    assert result.returncode == 0, result.stderr
+    projects_conf = (workspace / "projects.conf").read_text(encoding="utf-8")
+    assert f"EXTRA_MOUNTS={mount}:/data" in projects_conf
+
+
+def test_project_set_mounts_clears_with_dash(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    (workspace / "accounts.conf").write_text(
+        "NAME=api-codex TYPE=codex AUTH=login\n",
+        encoding="utf-8",
+    )
+    (workspace / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=api-codex PATH={workspace / 'repo'} EXTRA_MOUNTS=/host:/data\n",
+        encoding="utf-8",
+    )
+
+    result = run_coderfleet(
+        workspace,
+        fake_docker_path(tmp_path),
+        "project",
+        "set-mounts",
+        "repo",
+        "-",
+    )
+
+    assert result.returncode == 0, result.stderr
+    projects_conf = (workspace / "projects.conf").read_text(encoding="utf-8")
+    assert "EXTRA_MOUNTS" not in projects_conf
 
 
 def test_project_add_rejects_proxy_option(tmp_path: Path) -> None:

@@ -17,7 +17,7 @@ if not _WINDOWS:
     import termios
 
 from coderfleet.server import docker_mgr
-from coderfleet.server.models import Account, Project
+from coderfleet.server.models import Account, AccountRuntime, Project
 from coderfleet.server.scheduler import Scheduler
 
 
@@ -42,6 +42,11 @@ def resolve_terminal_target(scheduler: Scheduler, project_name: str) -> Terminal
     account = next((acc for acc in scheduler.get_accounts() if acc.name == project.account), None)
     if account is None:
         raise ValueError(f"账号 '{project.account}' 不存在")
+
+    if account.runtime == AccountRuntime.local:
+        # docker exec 这套终端机制天然假设有容器 —— local 账号直接跑在宿主机上，没有可以
+        # exec 进去的目标，"容器未运行"这个措辞会让人误以为起个容器就能解决，明确说清楚。
+        raise ValueError(f"账号 '{account.name}' 是 runtime=local，没有容器终端可连接")
 
     container_name = project.container_name(account.type)
     if not docker_mgr.is_container_running(container_name):

@@ -389,7 +389,7 @@
               <!-- 环境变量 -->
               <div class="card" id="project-env-card" style="padding:16px;display:flex;flex-direction:column;gap:12px">
                 <div style="font-weight:600;font-size:13px;color:var(--text-2)">环境变量</div>
-                <div style="font-size:11px;color:var(--text-3)">通过 docker exec -e 注入，无需重启容器</div>
+                <div id="project-env-hint" style="font-size:11px;color:var(--text-3)">通过 docker exec -e 注入，无需重启容器</div>
                 <div id="project-env-rows"><div style="color:var(--text-3);font-size:12px;padding:2px 0">暂无变量</div></div>
                 <div style="display:flex;gap:6px;align-items:center">
                   <input id="project-new-env-key" class="form-input" placeholder="变量名" style="flex:1.4;font-size:12px" autocomplete="off">
@@ -1014,6 +1014,10 @@
           <div class="form-group">
             <label class="form-label">Docker socket <span style="color:var(--text-3);font-size:11px">（留空使用全局设置）</span></label>
             <input id="project-form-docker-socket" class="form-input" placeholder="off | auto | /var/run/docker.sock" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">额外挂载 <span style="color:var(--text-3);font-size:11px">（每行一条：宿主机路径:容器路径[:ro]，需宿主机路径已存在）</span></label>
+            <textarea id="project-form-extra-mounts" class="form-input" rows="3" placeholder="/home/user/data:/data&#10;/home/user/models:/models:ro" autocomplete="off"></textarea>
           </div>
           <div class="form-group">
             <label class="form-label">从账号 <span style="color:var(--text-3);font-size:11px">（仅挂载认证目录，不参与任务调度；同一项目不能绑定两个相同类型的账号）</span></label>

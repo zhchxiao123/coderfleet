@@ -99,7 +99,16 @@ def _service_names_for(ws: Path, project_names: tuple[str, ...]) -> list[str]:
         proj = projects.get(name)
         if proj is None:
             raise click.ClickException(f"项目 '{name}' 不在 projects.conf 中")
-        acc_type = accounts.get(proj.get("ACCOUNT", ""), {}).get("TYPE", "")
+        acc = accounts.get(proj.get("ACCOUNT", ""), {})
+        if acc.get("RUNTIME", "container") == "local":
+            # generate_compose 本来就跳过 local 账号绑定的项目，不会有对应的 compose
+            # service —— 不拦住的话这里会拼出一个 docker compose 根本找不到的服务名，
+            # 报错是 "no such service"，看不出真正原因。
+            raise click.ClickException(
+                f"项目 '{name}' 绑定的账号 '{acc.get('NAME', proj.get('ACCOUNT', ''))}' 是 "
+                "RUNTIME=local，没有容器可以启动/停止/重启。"
+            )
+        acc_type = acc.get("TYPE", "")
         services.append(_service_name(name, acc_type))
         if truthy(proj.get("IDE", "off")):
             services.append(ide_service_name(name))
@@ -461,12 +470,13 @@ def cmd_status(ctx: click.Context) -> None:
         paccount = p.get("ACCOUNT", "")
         acc = accounts.get(paccount, {})
         acc_type = acc.get("TYPE", "")
-        ctr = _container_name(pname, acc_type) if acc_type else pname
 
-        if _is_running(ctr):
-            status = click.style("● 运行中", fg="green")
+        if acc.get("RUNTIME", "container") == "local":
+            # 没有容器可查 —— "已停止" 会让人误以为起个容器就行，local 账号本来就没有。
+            status = click.style("○ local（无容器）", fg="cyan")
         else:
-            status = click.style("○ 已停止", fg="red")
+            ctr = _container_name(pname, acc_type) if acc_type else pname
+            status = click.style("● 运行中", fg="green") if _is_running(ctr) else click.style("○ 已停止", fg="red")
 
         click.echo(f"  {pname:<20} [{acc_type:<6}] {status}  账号：{paccount}")
 
@@ -528,7 +538,13 @@ def cmd_logs(ctx: click.Context, project: Optional[str]) -> None:
         if p["NAME"] != project:
             continue
         paccount = p.get("ACCOUNT", "")
-        acc_type = accounts.get(paccount, {}).get("TYPE", "")
+        acc = accounts.get(paccount, {})
+        if acc.get("RUNTIME", "container") == "local":
+            raise click.ClickException(
+                f"项目 '{project}' 绑定的账号 '{paccount}' 是 RUNTIME=local，没有容器日志可看——"
+                f"用 'coderfleet task list --account {paccount}' 或 'coderfleet task logs <任务ID>' 看任务日志。"
+            )
+        acc_type = acc.get("TYPE", "")
         svc = _service_name(project, acc_type)
         subprocess.run(dc + ["logs", "-f", svc])
         return
@@ -548,7 +564,13 @@ def cmd_enter(ctx: click.Context, project: str) -> None:
         if p["NAME"] != project:
             continue
         paccount = p.get("ACCOUNT", "")
-        acc_type = accounts.get(paccount, {}).get("TYPE", "")
+        acc = accounts.get(paccount, {})
+        if acc.get("RUNTIME", "container") == "local":
+            raise click.ClickException(
+                f"项目 '{project}' 绑定的账号 '{paccount}' 是 RUNTIME=local，没有容器可以进入——"
+                "该账号跑在宿主机上，直接在宿主机 shell 里操作即可。"
+            )
+        acc_type = acc.get("TYPE", "")
         ctr = _container_name(project, acc_type)
 
         if not _is_running(ctr):
@@ -567,7 +589,20 @@ def cmd_check_proxy(ctx: click.Context) -> None:
     ws: Path = ctx.obj["workspace"]
     cfg = load_config(ws)
     accounts = _get_accounts(ws)
-    projects = _get_projects(ws)
+    all_projects = _get_projects(ws)
+    # 这整份报告检查的是 Docker 网络层隔离（容器 join intnet、直连公网被拦、DNS 走 relay）——
+    # local 账号没有容器，这套隔离机制天然不适用（见 docs/network.md），跳过而不是对着一个
+    # 不存在的容器名反复报"容器未运行"。
+    local_names = [
+        p["NAME"] for p in all_projects
+        if accounts.get(p.get("ACCOUNT", ""), {}).get("RUNTIME", "container") == "local"
+    ]
+    projects = [p for p in all_projects if p["NAME"] not in local_names]
+    if local_names:
+        click.secho(
+            f"  跳过 runtime=local 项目（没有容器网络隔离可查）：{', '.join(local_names)}",
+            fg="cyan",
+        )
 
     relay_ip = cfg.get("RELAY_IP", "172.21.0.2")
     relay_port = cfg.get("RELAY_LISTEN_PORT", "7890")

@@ -134,6 +134,15 @@ def test_project_form_exposes_docker_socket_override() -> None:
     assert "docker_socket: dockerSocket" in source
 
 
+def test_project_form_exposes_extra_mounts() -> None:
+    html = read_index()
+    source = read_projects_js()
+
+    assert 'id="project-form-extra-mounts"' in html
+    assert "project-form-extra-mounts" in source
+    assert "extra_mounts: extraMounts" in source
+
+
 def test_project_form_exposes_secondary_accounts() -> None:
     html = read_index()
     source = read_projects_js()

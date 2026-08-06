@@ -39,7 +39,7 @@ function renderProjectCards(projects, tasks, accounts) {
     const latest  = [...projectTasks].sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))[0];
     const account = accountMap.get(project.account);
     const accountBadge = account
-      ? `<span class="badge ${account.type}">${account.type}</span><span class="badge proxy-${account.proxy || 'relay'}">proxy: ${esc(account.proxy || 'relay')}</span>`
+      ? `<span class="badge ${account.type}">${account.type}</span><span class="badge proxy-${account.proxy || 'relay'}">proxy: ${esc(account.proxy || 'relay')}</span>${account.runtime === 'local' ? `<span class="badge runtime-local" title="不经过 Docker，直接调用宿主机 CLI">local</span>` : ''}`
       : `<span class="badge offline">账号缺失</span>`;
     const imageBadge = project.image
       ? `<span class="badge" title="${esc(project.image)}" style="background:var(--bg-2);color:var(--text-2)">专属镜像</span>`
@@ -47,18 +47,22 @@ function renderProjectCards(projects, tasks, accounts) {
   const ideBadge = project.ide_enabled
       ? `<span class="badge running">IDE ${esc(project.ide_port || '')}</span>`
       : '';
-    const activeBadge = project.active === false
+    const isLocal = account?.runtime === 'local';
+    const activeBadge = (project.active === false && !isLocal)
       ? `<span class="badge offline">容器停用</span>`
       : '';
     const containerRunning = project.container_running === true;
-    const statusBadge = project.container_running == null
+    // local 账号没有容器 —— 不显示"已停止/运行中"这套容器状态徽标和启动/停止按钮，
+    // 那是 container 场景才有意义的概念。project.container_running 在 local 场景下
+    // 后端本来就留空（main.py 的 _list_projects_sync），isLocal 这里是双重保险。
+    const statusBadge = (isLocal || project.container_running == null)
       ? ''
       : containerRunning
         ? `<span class="badge running">● 运行中</span>`
         : `<span class="badge offline">○ 已停止</span>`;
-    const containerToggleBtn = containerRunning
+    const containerToggleBtn = isLocal ? '' : (containerRunning
       ? `<button class="btn" style="font-size:12px" onclick="event.stopPropagation();stopProjectContainer('${esc(project.name)}', this)">停止</button>`
-      : `<button class="btn" style="font-size:12px" onclick="event.stopPropagation();startProjectContainer('${esc(project.name)}', this)">启动</button>`;
+      : `<button class="btn" style="font-size:12px" onclick="event.stopPropagation();startProjectContainer('${esc(project.name)}', this)">启动</button>`);
     let latestText = '还没有任务记录';
     if (latest && latest.prompt) {
       const cleanPrompt = String(latest.prompt || '').replace(/\s+/g, ' ');
@@ -113,6 +117,7 @@ function backToProjects() {
 function renderProjectDetail(project) {
   const { tasks, accounts } = projectDashboardData;
   const account = accounts.find(a => a.name === project.account);
+  const isLocal = account?.runtime === 'local';
   const projectTasks = tasks.filter(t => taskBelongsToProject(t, project));
   const running = projectTasks.filter(t => t.status === 'running').length;
   const done    = projectTasks.filter(t => t.status === 'done').length;
@@ -124,9 +129,9 @@ function renderProjectDetail(project) {
 <div class="project-path" title="${esc(project.path)}">${esc(project.path)}</div>
 <div class="account-badges" style="margin-top:12px">
   <span class="chip">账号 ${esc(project.account)}</span>
-  ${account ? `<span class="badge ${account.type}">${account.type}</span><span class="badge proxy-${account.proxy || 'relay'}">proxy: ${esc(account.proxy || 'relay')}</span>` : `<span class="badge offline">账号缺失</span>`}
-  ${project.active === false ? `<span class="badge offline">已停用</span>` : ''}
-  ${project.image ? `<span class="badge" style="background:var(--bg-2);color:var(--text-2)" title="${esc(project.image)}">专属镜像</span>` : ''}
+  ${account ? `<span class="badge ${account.type}">${account.type}</span><span class="badge proxy-${account.proxy || 'relay'}">proxy: ${esc(account.proxy || 'relay')}</span>${isLocal ? `<span class="badge runtime-local" title="不经过 Docker，直接调用宿主机 CLI">local</span>` : ''}` : `<span class="badge offline">账号缺失</span>`}
+  ${(project.active === false && !isLocal) ? `<span class="badge offline">已停用</span>` : ''}
+  ${(project.image && !isLocal) ? `<span class="badge" style="background:var(--bg-2);color:var(--text-2)" title="${esc(project.image)}">专属镜像</span>` : ''}
 </div>
 <div class="project-stats" style="margin-top:16px;margin-bottom:${ideUrl ? '16px' : '0'}">
   <div class="project-stat"><div class="account-stat-label">总任务</div><div class="account-stat-value">${projectTasks.length}</div></div>
@@ -141,6 +146,19 @@ ${ideUrl ? `<div style="border-top:1px solid var(--border);padding-top:14px">
     打开 IDE · :${esc(String(project.ide_port || ''))}
   </a>
 </div>` : ''}`;
+
+  // 镜像管理/构建历史/顶部终端按钮都是 Docker 专属能力，local 账号的项目没有容器、没有
+  // 镜像、也没有 exec 目标 —— 隐藏而不是留着点了报错。环境变量文案改成不预设"容器"。
+  const imageCard = document.getElementById('project-image-card');
+  const buildHistoryCard = document.getElementById('project-build-history-card');
+  if (imageCard) imageCard.style.display = isLocal ? 'none' : '';
+  if (buildHistoryCard) buildHistoryCard.style.display = isLocal ? 'none' : '';
+  const envHint = document.getElementById('project-env-hint');
+  if (envHint) {
+    envHint.textContent = isLocal
+      ? '直接注入 local 账号子进程的环境变量，任务下次运行时生效'
+      : '通过 docker exec -e 注入，无需重启容器';
+  }
 }
 
 function projectIdeUrl(project) {
@@ -223,6 +241,7 @@ async function openProjectFormModal(name) {
       document.getElementById('project-form-ide-auth').value = project.ide_auth || 'none';
       document.getElementById('project-form-ide-remote').checked = !!project.ide_remote;
       document.getElementById('project-form-docker-socket').value = project.docker_socket || '';
+      document.getElementById('project-form-extra-mounts').value = (project.extra_mounts || []).join('\n');
       _selectedSecondaryAccounts = [...(project.secondary_accounts || [])];
     }
   } else {
@@ -235,6 +254,7 @@ async function openProjectFormModal(name) {
     document.getElementById('project-form-ide-auth').value = 'none';
     document.getElementById('project-form-ide-remote').checked = false;
     document.getElementById('project-form-docker-socket').value = '';
+    document.getElementById('project-form-extra-mounts').value = '';
     _selectedSecondaryAccounts = [];
   }
   toggleProjectIdePort();
@@ -327,6 +347,8 @@ async function saveProjectForm() {
   const ideAuth   = document.getElementById('project-form-ide-auth').value || 'none';
   const ideRemote = document.getElementById('project-form-ide-remote').checked;
   const dockerSocket = document.getElementById('project-form-docker-socket').value.trim();
+  const extraMounts = document.getElementById('project-form-extra-mounts').value
+    .split('\n').map(s => s.trim()).filter(Boolean);
   if (!name)    { showProjectFormMsg('请填写项目名', 'error'); return; }
   if (!account) { showProjectFormMsg('请选择账号',   'error'); return; }
   if (!path)    { showProjectFormMsg('请填写路径',   'error'); return; }
@@ -344,8 +366,8 @@ async function saveProjectForm() {
       method: isEdit ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(isEdit
-        ? { account, path, active, ide_enabled: ideEnabled, ide_port: idePort, ide_auth: ideAuth, ide_remote: ideRemote, docker_socket: dockerSocket, secondary_accounts: _selectedSecondaryAccounts }
-        : { name, account, path, active, ide_enabled: ideEnabled, ide_port: idePort, ide_auth: ideAuth, ide_remote: ideRemote, docker_socket: dockerSocket, secondary_accounts: _selectedSecondaryAccounts }),
+        ? { account, path, active, ide_enabled: ideEnabled, ide_port: idePort, ide_auth: ideAuth, ide_remote: ideRemote, docker_socket: dockerSocket, secondary_accounts: _selectedSecondaryAccounts, extra_mounts: extraMounts }
+        : { name, account, path, active, ide_enabled: ideEnabled, ide_port: idePort, ide_auth: ideAuth, ide_remote: ideRemote, docker_socket: dockerSocket, secondary_accounts: _selectedSecondaryAccounts, extra_mounts: extraMounts }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) { showProjectFormMsg(data.detail || '保存失败', 'error'); return; }

@@ -181,6 +181,7 @@ class ProjectCreateRequest(BaseModel):
     image:       str = ""
     docker_socket: str = ""
     secondary_accounts: list[str] = []
+    extra_mounts: list[str] = []
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -194,6 +195,7 @@ class ProjectUpdateRequest(BaseModel):
     image:       Optional[str]  = None
     docker_socket: Optional[str] = None
     secondary_accounts: Optional[list[str]] = None
+    extra_mounts: Optional[list[str]] = None
 
 
 class BoardCreateRequest(BaseModel):
@@ -992,13 +994,16 @@ async def delete_board_card(card_id: str):
 
 def _list_projects_sync() -> list[ProjectResponse]:
     from coderfleet.server import docker_mgr as _dm
+    from coderfleet.server.models import AccountRuntime
 
     accounts_by_name = {a.name: a for a in scheduler.get_accounts()}
     responses = []
     for p in scheduler.list_projects():
         resp = ProjectResponse.from_project(p)
         acc = accounts_by_name.get(p.account)
-        if acc is not None:
+        # local 账号没有容器可 inspect —— container_running 留 None（而不是把从来没存在
+        # 过的容器报成"已停止"），前端据此完全不渲染启动/停止这套容器控件。
+        if acc is not None and acc.runtime != AccountRuntime.local:
             resp.container_running = _dm.is_container_running(p.container_name(acc.type))
         responses.append(resp)
     return responses
@@ -1008,6 +1013,14 @@ def _list_projects_sync() -> list[ProjectResponse]:
 async def list_projects():
     # 每个项目都要调一次 docker inspect（同步子进程），丢进线程池执行，避免卡住事件循环。
     return await run_in_threadpool(_list_projects_sync)
+
+
+def _validate_extra_mounts(extra_mounts: list[str]) -> None:
+    from coderfleet.mounts import parse_mounts
+    try:
+        parse_mounts(",".join(extra_mounts))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 def _validate_secondary_accounts(secondary_accounts: list[str], primary_account: str) -> None:
@@ -1034,8 +1047,9 @@ async def create_project(req: ProjectCreateRequest):
     if not any(a.name == req.account for a in scheduler.get_accounts()):
         raise HTTPException(status_code=404, detail=f"账号 '{req.account}' 不存在")
     _validate_secondary_accounts(req.secondary_accounts, req.account)
+    _validate_extra_mounts(req.extra_mounts)
     try:
-        project = scheduler.save_project(req.name, req.account, req.path, req.active, req.ide_enabled, req.ide_port, req.ide_auth, req.ide_remote, req.image, req.docker_socket, req.secondary_accounts)
+        project = scheduler.save_project(req.name, req.account, req.path, req.active, req.ide_enabled, req.ide_port, req.ide_auth, req.ide_remote, req.image, req.docker_socket, req.secondary_accounts, req.extra_mounts)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return ProjectResponse.from_project(project)
@@ -1056,14 +1070,16 @@ async def update_project(name: str, req: ProjectUpdateRequest):
     new_image = existing.image if req.image is None else req.image
     new_docker_socket = existing.docker_socket if req.docker_socket is None else req.docker_socket
     new_secondary_accounts = existing.secondary_accounts if req.secondary_accounts is None else req.secondary_accounts
+    new_extra_mounts = getattr(existing, "extra_mounts", []) if req.extra_mounts is None else req.extra_mounts
     if not new_ide_enabled:
         new_ide_port = None
     _validate_ide_port(new_ide_enabled, new_ide_port)
     if req.account and not any(a.name == new_account for a in scheduler.get_accounts()):
         raise HTTPException(status_code=404, detail=f"账号 '{new_account}' 不存在")
     _validate_secondary_accounts(new_secondary_accounts, new_account)
+    _validate_extra_mounts(new_extra_mounts)
     try:
-        project = scheduler.save_project(name, new_account, new_path, new_active, new_ide_enabled, new_ide_port, new_ide_auth, new_ide_remote, new_image, new_docker_socket, new_secondary_accounts)
+        project = scheduler.save_project(name, new_account, new_path, new_active, new_ide_enabled, new_ide_port, new_ide_auth, new_ide_remote, new_image, new_docker_socket, new_secondary_accounts, new_extra_mounts)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return ProjectResponse.from_project(project)
@@ -1107,6 +1123,10 @@ def _resolve_project_and_account(name: str):
 @app.get("/api/projects/{name}/container/status")
 async def get_project_container_status(name: str):
     project, acc = _resolve_project_and_account(name)
+    from coderfleet.server.models import AccountRuntime
+    if acc.runtime == AccountRuntime.local:
+        # local 账号没有容器 —— 不查 docker，直接说清楚，不是"已停止"。
+        return {"running": None}
     from coderfleet.server import docker_mgr as _dm
     running = _dm.is_container_running(project.container_name(acc.type))
     return {"running": running}
@@ -1115,6 +1135,12 @@ async def get_project_container_status(name: str):
 @app.post("/api/projects/{name}/container/start")
 async def start_project_container(name: str):
     project, acc = _resolve_project_and_account(name)
+    from coderfleet.server.models import AccountRuntime
+    if acc.runtime == AccountRuntime.local:
+        raise HTTPException(
+            status_code=422,
+            detail=f"账号 '{acc.name}' 是 runtime=local，项目 '{name}' 没有容器可以启动。",
+        )
     from coderfleet.compose import write_compose, ide_service_name
     from coderfleet.docker_ops import start_services
 
@@ -1136,6 +1162,12 @@ async def start_project_container(name: str):
 @app.post("/api/projects/{name}/container/stop")
 async def stop_project_container(name: str):
     project, acc = _resolve_project_and_account(name)
+    from coderfleet.server.models import AccountRuntime
+    if acc.runtime == AccountRuntime.local:
+        raise HTTPException(
+            status_code=422,
+            detail=f"账号 '{acc.name}' 是 runtime=local，项目 '{name}' 没有容器可以停止。",
+        )
     from coderfleet.compose import ide_service_name
     from coderfleet.docker_ops import stop_services
 
@@ -1227,7 +1259,8 @@ async def build_project_image(name: str, req: ImageBuildRequest = None):
                 name, existing.account, existing.path,
                 existing.active, existing.ide_enabled, existing.ide_port,
                 existing.ide_auth, existing.ide_remote, tag,
-                existing.docker_socket,
+                existing.docker_socket, existing.secondary_accounts,
+                getattr(existing, "extra_mounts", []),
             )
             with scheduler.get_build_log_path(build_id).open("a", encoding="utf-8") as f:
                 f.write(f"  已写入 IMAGE={tag} 到 projects.conf\n")
@@ -1382,7 +1415,8 @@ async def clear_project_image(name: str):
         name, existing.account, existing.path,
         existing.active, existing.ide_enabled, existing.ide_port,
         existing.ide_auth, existing.ide_remote, "",
-        existing.docker_socket,
+        existing.docker_socket, existing.secondary_accounts,
+        getattr(existing, "extra_mounts", []),
     )
     return {"ok": True}
 

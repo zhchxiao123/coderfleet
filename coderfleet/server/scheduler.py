@@ -450,9 +450,11 @@ class Scheduler:
         image: str = "",
         docker_socket: str = "",
         secondary_accounts: Optional[list[str]] = None,
+        extra_mounts: Optional[list[str]] = None,
     ) -> Project:
         """新增或修改 projects.conf 中的项目行。"""
         secondary_accounts = secondary_accounts or []
+        extra_mounts = extra_mounts or []
         path_norm = str(Path(path).expanduser())
         if not ide_enabled:
             ide_port = None
@@ -482,6 +484,8 @@ class Scheduler:
             parts.append(f"DOCKER_SOCKET={docker_socket}")
         if secondary_accounts:
             parts.append(f"SECONDARY_ACCOUNTS={','.join(secondary_accounts)}")
+        if extra_mounts:
+            parts.append(f"EXTRA_MOUNTS={','.join(extra_mounts)}")
         self._rewrite_conf(self.projects_conf, name, " ".join(parts))
         return Project(
             name=name,
@@ -495,6 +499,7 @@ class Scheduler:
             image=image,
             docker_socket=docker_socket,
             secondary_accounts=secondary_accounts,
+            extra_mounts=extra_mounts,
         )
 
     def delete_project(self, name: str) -> None:

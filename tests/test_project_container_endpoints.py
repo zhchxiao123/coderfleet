@@ -28,6 +28,22 @@ def _make_workspace(tmp_path: Path) -> Path:
     return ws
 
 
+def _make_local_workspace(tmp_path: Path) -> Path:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "config.conf").write_text(
+        "IMAGE_NAME=coderfleet\nIMAGE_TAG=latest\n", encoding="utf-8",
+    )
+    (ws / "repo").mkdir()
+    (ws / "accounts.conf").write_text(
+        "NAME=local-claude TYPE=claude AUTH=login RUNTIME=local\n", encoding="utf-8",
+    )
+    (ws / "projects.conf").write_text(
+        f"NAME=repo ACCOUNT=local-claude PATH={ws / 'repo'}\n", encoding="utf-8",
+    )
+    return ws
+
+
 def _use_scheduler(monkeypatch: pytest.MonkeyPatch, ws: Path) -> None:
     monkeypatch.setattr(server_main, "scheduler", Scheduler(ws))
     monkeypatch.setattr(server_main, "WORKSPACE_DIR", ws)
@@ -323,3 +339,59 @@ def test_list_accounts_runs_in_threadpool(
     assert calls, "list_accounts 应通过 run_in_threadpool 卸载阻塞 I/O"
     assert len(accounts) == 1
     assert accounts[0].name == "api-claude"
+
+
+# ── runtime=local 项目：没有容器可以查/启动/停止 ──────────────────────
+def test_list_projects_skips_docker_inspect_for_local_runtime_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _make_local_workspace(tmp_path)
+    _use_scheduler(monkeypatch, ws)
+
+    from coderfleet.server import docker_mgr
+
+    def _boom(_name):
+        raise AssertionError("local 账号的项目不应该被拿去 docker inspect")
+    monkeypatch.setattr(docker_mgr, "is_container_running", _boom)
+
+    projects = asyncio.run(server_main.list_projects())
+
+    assert len(projects) == 1
+    assert projects[0].container_running is None
+
+
+def test_get_project_container_status_returns_none_for_local_runtime_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _make_local_workspace(tmp_path)
+    _use_scheduler(monkeypatch, ws)
+
+    status = asyncio.run(server_main.get_project_container_status("repo"))
+
+    assert status == {"running": None}
+
+
+def test_start_project_container_rejects_local_runtime_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _make_local_workspace(tmp_path)
+    _use_scheduler(monkeypatch, ws)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(server_main.start_project_container("repo"))
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    assert "runtime=local" in str(getattr(exc_info.value, "detail", ""))
+
+
+def test_stop_project_container_rejects_local_runtime_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _make_local_workspace(tmp_path)
+    _use_scheduler(monkeypatch, ws)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(server_main.stop_project_container("repo"))
+
+    assert getattr(exc_info.value, "status_code", None) == 422
+    assert "runtime=local" in str(getattr(exc_info.value, "detail", ""))
