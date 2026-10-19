@@ -157,3 +157,14 @@ def test_scheduled_turn_after_checkpoint_is_not_inherited(fork_source):
     later.save(sched.tasks_dir)
     child = sched.fork_conversation(source.id, task.id)
     assert child.fork.inherited_task_ids == [task.id]
+
+
+def test_mobile_page_versions_shared_renderer(monkeypatch):
+    from coderfleet.server import main
+    monkeypatch.setattr(main, "_BUILD_VERSION", "fork-icon-test")
+    response = asyncio.run(main.mobile())
+    html = response.body.decode()
+    assert "/static/js/renderer.js?v=fork-icon-test" in html
+    assert "/static/css/turn-actions.css?v=fork-icon-test" in html
+    assert "__BUILD__" not in html
+    assert response.headers["cache-control"] == "no-cache"

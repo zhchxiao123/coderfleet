@@ -16,6 +16,7 @@
   <link rel="apple-touch-icon" href="/static/icons/logo-mark.png">
   <link rel="manifest" href="/static/manifest.json">
   <link rel="stylesheet" href="/static/css/renderer.css">
+  <link rel="stylesheet" href="/static/css/turn-actions.css?v=__BUILD__">
   <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -906,7 +907,7 @@
 <script src="/static/js/shared/image-upload.js?v=20260528-imagefix"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
-<script src="/static/js/renderer.js?v=20260601-download-auth"></script>
+<script src="/static/js/renderer.js?v=__BUILD__"></script>
 
 <script>
 // ── State ────────────────────────────────────────────────
@@ -914,6 +915,7 @@ let projects  = [];
 let convs     = [];
 let tasks     = [];
 let activeConv    = null;   // Conversation object (ongoing chat)
+let mobileInheritedTasks = [];
 let pendingProj   = null;   // Project selected for new chat (before first send)
 let liveStream    = null;   // Active EventSource
 let mobileUserScrolledUp = false;
@@ -1370,8 +1372,10 @@ function toggleProjectItems(encodedName) {
 }
 
 // ── Open conversation ─────────────────────────────────────
-function openConv(id) {
+async function openConv(id) {
   activeConv  = convs.find(c => c.id === id) || null;
+  mobileInheritedTasks = [];
+  document.getElementById('mobile-fork-origin')?.remove();
   pendingProj = null;
   if (!activeConv) return;
 
@@ -1379,9 +1383,35 @@ function openConv(id) {
   document.getElementById('chat-sub').textContent = activeConv.project_name || activeConv.project || '';
   showChat();
   syncMessages(true);
+  if (activeConv.fork) {
+    const source = activeConv.fork.source_conversation_id;
+    const body = document.getElementById('chat-body');
+    const banner = document.createElement('div');
+    banner.id = 'mobile-fork-origin';
+    banner.className = 'chat-sys-event';
+    banner.textContent = '分叉会话 · 继承历史为只读，共享当前项目文件。';
+    const link = document.createElement('button');
+    link.textContent = '查看来源';
+    link.onclick = () => openConv(source);
+    banner.appendChild(link);
+    body.insertBefore(banner, body.firstChild);
+    try {
+      const inherited = await api(`/api/conversations/${encodeURIComponent(id)}/inherited-tasks`);
+      if (activeConv?.id !== id) return;
+      mobileInheritedTasks = inherited;
+      // Rebuild in chronological order even when own turns were already rendered.
+      if (liveStream) { liveStream.close(); liveStream = null; }
+      body.querySelectorAll('.msg-pair').forEach(el => el.remove());
+      syncMessages(true);
+    } catch (error) {
+      if (activeConv?.id === id) banner.appendChild(document.createTextNode(' 历史加载失败：' + error.message));
+    }
+  }
 }
 
 function openOneOff(id) {
+  mobileInheritedTasks = [];
+  document.getElementById('mobile-fork-origin')?.remove();
   const task = tasks.find(t => t.id === id) || null;
   if (!task) return;
   activeConv = {
@@ -1405,11 +1435,12 @@ function syncMessages(scrollEnd) {
   const body   = document.getElementById('chat-body');
   const empty  = document.getElementById('chat-empty');
   const spacer = document.getElementById('chat-top-spacer');
-  const ct    = tasks
+  const ownTasks = tasks
     .filter(t => activeConv?.isOneOff
       ? `task-${t.id}` === activeConv.id
       : t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id))
     .sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0));
+  const ct = [...mobileInheritedTasks, ...ownTasks];
 
   if (!ct.length) {
     body.querySelectorAll('.msg-pair').forEach(el => el.remove());
@@ -1463,7 +1494,7 @@ function makeMsgPair(task) {
         <span>正在执行…</span>
       </div>
     </div>
-    ${taskActionsHtml(task)}
+    ${activeConv?.isOneOff || task.conversation_id === activeConv?.id ? taskActionsHtml(task) : ''}
   `;
   return div;
 }
@@ -1491,7 +1522,25 @@ async function loadAiContent(task) {
     const txt = await fetch(`/api/tasks/${task.id}/logs`).then(r => r.text());
     const renderer = new ChatLogRenderer(wrap, false, true, task.project_name || null, task.id);
     renderer.render(stripAnsi(txt), task.type);
+    if (task.type === 'claude' && task.status === 'done' && task.conversation_id === activeConv?.id) {
+      renderer.addTurnForkAction(button => forkMobileConversation(task, button));
+    }
   } catch { wrap.textContent = '加载失败'; }
+}
+
+async function forkMobileConversation(task, button) {
+  button.disabled = true;
+  try {
+    const child = await api(`/api/conversations/${encodeURIComponent(task.conversation_id)}/fork`, {
+      method: 'POST', body: { task_id: task.id },
+    });
+    await refresh();
+    await openConv(child.id);
+  } catch (error) {
+    alert('分叉失败：' + error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function _mobileUpdateScrollBtn(show) {
@@ -1890,6 +1939,8 @@ function renderProjSheet(query) {
 }
 
 function startNew(proj) {
+  mobileInheritedTasks = [];
+  document.getElementById('mobile-fork-origin')?.remove();
   closeSheet();
   pendingProj = proj;
   activeConv  = null;

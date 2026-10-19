@@ -1141,6 +1141,24 @@ class ChatLogRenderer {
     this.lastBubbleEl = el;
   }
 
+  // Only the final reply of a completed turn receives the fork action.
+  addTurnForkAction(onFork) {
+    const reply = this.lastBubbleEl;
+    const actions = reply?.querySelector('.bubble-actions');
+    const body = reply?.querySelector('.bubble-body');
+    if (!actions || !body || actions.querySelector('.bubble-fork-btn')) return;
+    actions.classList.add('bubble-turn-actions');
+    body.appendChild(actions);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bubble-fork-btn';
+    button.title = '从这里分叉';
+    button.setAttribute('aria-label', '从这里分叉');
+    button.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h6c4 0 4-7 10-7M15 5h5v5M10 12c4 0 4 7 10 7M15 19h5v-5"/></svg>';
+    button.addEventListener('click', () => { if (!button.disabled) onFork(button); });
+    actions.appendChild(button);
+  }
+
   // ── 思考气泡 ──────────────────────────────────────────────
   _thinking(text) {
     if (!text?.trim()) return;

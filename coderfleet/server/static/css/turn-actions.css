@@ -1,0 +1,21 @@
+/* Turn actions sit below the final reply; touch and keyboard users can always reach them. */
+.bubble-turn-actions { margin-top: 6px; gap: 4px; }
+.bubble-fork-btn { display: flex; }
+.bubble-actions.bubble-turn-actions > button {
+  width: 32px; height: 32px; padding: 6px;
+  align-items: center; justify-content: center;
+  background: none; border: none; border-radius: 6px;
+  color: var(--text-3, var(--text3, #8792a1)); cursor: pointer; opacity: 0;
+  transition: opacity .15s, color .15s, background .15s;
+}
+.ai-reply:hover .bubble-actions.bubble-turn-actions > button,
+.ai-reply:focus-within .bubble-actions.bubble-turn-actions > button { opacity: 1; }
+.bubble-actions.bubble-turn-actions > button:hover { background: var(--surface-2, var(--log-card-soft)); color: var(--text); }
+.bubble-actions.bubble-turn-actions > button:focus-visible { outline: 2px solid var(--accent, #0d9488); outline-offset: 2px; }
+.bubble-actions.bubble-turn-actions > button:disabled { opacity: .45; cursor: wait; }
+@media (hover: none), (pointer: coarse), (max-width: 768px) {
+  .bubble-actions.bubble-turn-actions > button { opacity: 1; width: 44px; height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble-actions.bubble-turn-actions > button { transition: none; }
+}

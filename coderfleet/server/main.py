@@ -339,7 +339,8 @@ async def mobile():
     html = STATIC_DIR / "mobile.html"
     if not html.exists():
         return PlainTextResponse("Mobile UI not found.", status_code=404)
-    return FileResponse(html)
+    content = html.read_text(encoding="utf-8").replace("__BUILD__", _BUILD_VERSION)
+    return HTMLResponse(content=content, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/sw.js", include_in_schema=False)

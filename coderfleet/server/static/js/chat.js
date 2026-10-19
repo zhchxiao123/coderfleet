@@ -1735,6 +1735,7 @@ async function _selfHealStuckToolStatus(task, logWrap) {
   logWrap.innerHTML = '';
   const healedRenderer = new ChatLogRenderer(logWrap, false, true, task.project_name || null, task.id);
   healedRenderer.render(freshText, task.type);
+  attachChatTurnForkAction(healedRenderer, task);
   return healedRenderer;
 }
 
@@ -1763,15 +1764,14 @@ function _renderChatTaskTurn(container, task, logText) {
   // 每一个任务在渲染时，均传入 foldProcess=true，把中间执行步骤折叠起来，把回复直接展现
   const localRenderer = new ChatLogRenderer(logWrap, task.status === 'running', true, task.project_name || null, task.id);
   localRenderer.render(logText, task.type);
-  if (task.type === 'claude' && task.status === 'done' && task.conversation_id === activeConversationId) {
-    const forkButton = document.createElement('button');
-    forkButton.className = 'btn chat-fork-button';
-    forkButton.textContent = '从这里分叉';
-    forkButton.title = '继承到本轮末尾的上下文，新会话共享当前项目文件';
-    forkButton.onclick = () => forkChatConversation(task.conversation_id, task.id, forkButton);
-    logWrap.appendChild(forkButton);
-  }
+  attachChatTurnForkAction(localRenderer, task);
   return localRenderer;
+}
+
+function attachChatTurnForkAction(renderer, task) {
+  if (task.type === 'claude' && task.status === 'done' && task.conversation_id === activeConversationId) {
+    renderer.addTurnForkAction(button => forkChatConversation(task.conversation_id, task.id, button));
+  }
 }
 
 async function forkChatConversation(conversationId, taskId, button) {
