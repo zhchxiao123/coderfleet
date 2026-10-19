@@ -44,6 +44,7 @@ from coderfleet.server.models import (
     BoardCard,
     BoardCardStatus,
     Conversation,
+    ConversationFork,
     ConversationMode,
     ConversationStatus,
     Continuation,
@@ -205,6 +206,7 @@ class Scheduler:
         container_workdir: str = "",
         images: list[str] | None = None,
         model: str = "",
+        fork: Optional[ConversationFork] = None,
     ) -> str:
         """
         构建在容器内执行的 CLI 命令。
@@ -215,9 +217,12 @@ class Scheduler:
         marker   = shlex.quote(Scheduler.task_process_marker(task_id))
         task_env = shlex.quote(task_id)
 
+        fork_kwargs = ({"fork_session_id": fork.target_session_id,
+                        "resume_session_at": fork.message_uuid} if fork else {})
         inner_cmd = spec.build_inner_cmd(
             prompt, auto, task_id, marker, task_env,
             native_session_id, list(images or []), model.strip(),
+            **fork_kwargs,
         )
 
         if container_workdir:
@@ -1760,6 +1765,8 @@ class Scheduler:
         conversation = self.get_conversation(conversation_id)
         if conversation is None:
             return
+        if conversation.fork and native_session_id != conversation.fork.target_session_id:
+            raise ValueError("分叉返回了非目标会话 ID（可能为来源会话 ID），拒绝继续写入")
         conversation.touch(
             self.conversations_dir,
             native_session_id=native_session_id,
@@ -2173,6 +2180,8 @@ class Scheduler:
                 ephemeral or mode == "ephemeral"
                 or (selected_project is not None and selected_project.ephemeral)
             )
+            if conversation and conversation.fork and is_genuinely_ephemeral:
+                raise ValueError("分叉会话必须继续使用原持久项目，不能切换为临时工作区")
             # Resolve conversation. Retained ephemeral containers need a
             # conversation record so later turns can locate the same container.
             if conversation is None and (conversation_name or retention != "release_on_finish"):
@@ -2450,6 +2459,91 @@ class Scheduler:
         return task
 
     # ── 从已有任务创建任务链 ──────────────────────────────
+
+    def _claude_transcript(self, account_name: str, session_id: str) -> Path:
+        # Validate before interpolating an identifier into a glob.
+        uuid.UUID(session_id)
+        account = next((a for a in self.get_accounts() if a.name == account_name), None)
+        if account is None:
+            raise ValueError("来源账号不存在")
+        root = (Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+                if account.runtime == AccountRuntime.local
+                else self.workspace_dir / "accounts" / account_name)
+        paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
+        if len(paths) != 1:
+            raise ValueError("原生会话记录不存在或不唯一，无法安全恢复")
+        return paths[0]
+
+    def conversation_fork_point(self, conversation_id: str, task_id: str) -> dict:
+        from coderfleet.server.conversation_forks import completed_turn_checkpoint, validate_source
+        conversation = self.get_conversation(conversation_id)
+        task = self.get_task(task_id)
+        if conversation is None or task is None:
+            raise ValueError("来源会话或任务不存在")
+        validate_source(conversation, task)
+        checkpoint = completed_turn_checkpoint(task, self.get_log_path(task_id))
+        transcript = self._claude_transcript(task.account, task.native_session_id)
+        found = False
+        with transcript.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and entry.get("uuid") == checkpoint:
+                    found = True
+                    break
+        if not found:
+            raise ValueError("消息 UUID 不在原生会话记录中，无法定位分叉点")
+        return {"task_id": task.id, "message_uuid": checkpoint,
+                "source_session_id": task.native_session_id}
+
+    def fork_conversation(self, conversation_id: str, task_id: str, name: str = "") -> Conversation:
+        point = self.conversation_fork_point(conversation_id, task_id)
+        source = self.get_conversation(conversation_id)
+        task = self.get_task(task_id)
+        assert source is not None and task is not None
+        own_tasks = sorted(
+            (t for t in Task.load_all(self.tasks_dir) if t.conversation_id == source.id),
+            key=lambda t: (t.finished or t.created, t.id),
+        )
+        inherited = list(source.fork.inherited_task_ids) if source.fork else []
+        for item in own_tasks:
+            if item.status not in (TaskStatus.done, TaskStatus.failed, TaskStatus.killed):
+                continue
+            inherited.append(item.id)
+            if item.id == task_id:
+                break
+        child = Conversation(
+            id=self.new_conversation_id(), name=name.strip() or f"{source.name} · 分叉",
+            account=source.account, type=source.type, project=source.project,
+            project_name=source.project_name,
+            fork=ConversationFork(
+                source_conversation_id=source.id, source_task_id=task_id,
+                source_session_id=point["source_session_id"], message_uuid=point["message_uuid"],
+                target_session_id=str(uuid.uuid4()), inherited_task_ids=inherited, model=task.model,
+            ),
+        )
+        child.save(self.conversations_dir)
+        return child
+
+    def _conversation_for_launch(self, conversation: Optional[Conversation]) -> Optional[Conversation]:
+        if conversation is None:
+            return None
+        current = self.get_conversation(conversation.id) or conversation
+        if current.fork and not current.native_session_id:
+            # A crash can happen after Claude creates the fork but before stdout is
+            # captured. The predetermined ID lets us recover instead of forking twice.
+            try:
+                self._claude_transcript(current.account, current.fork.target_session_id)
+            except ValueError:
+                pass
+            else:
+                self.update_conversation_native_session(
+                    current.id, current.fork.target_session_id, current.last_task_id,
+                )
+                current = self.get_conversation(current.id) or current
+        return current
 
     def create_conversation_from_task(
         self,
@@ -2904,14 +2998,18 @@ class Scheduler:
             # 直接读字段即可，不需要重复判断 auto。
             local_sandboxed = is_local and acc.sandbox_confirmed
 
+            conversation = self._conversation_for_launch(conversation)
+            pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
             inner_cmd = spec.build_inner_cmd(
                 self._expand_skill_command(task.prompt, acc.name), auto, task.id,
                 shlex.quote(Scheduler.task_process_marker(task.id)),
                 shlex.quote(task.id),
-                conversation.native_session_id if conversation else "",
+                (pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
                 list(images),
                 getattr(task, "model", ""),
                 local_sandboxed,
+                **({"fork_session_id": pending_fork.target_session_id,
+                    "resume_session_at": pending_fork.message_uuid} if pending_fork else {}),
             )
 
             auth_src = self.workspace_dir / "accounts" / acc.name
@@ -3278,15 +3376,18 @@ class Scheduler:
                     task.git_diff_removed = diff_removed
 
             cli_prompt = self._expand_skill_command(task.prompt, acc.name)
+            conversation = self._conversation_for_launch(conversation)
+            pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
             cmd = self.build_cli_command(
                 acc.type,
                 cli_prompt,
                 auto,
                 task.id,
-                native_session_id=conversation.native_session_id if conversation else "",
+                native_session_id=(pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
                 container_workdir=container_workdir,
                 images=images,
                 model=getattr(task, "model", ""),
+                fork=pending_fork,
             )
 
             project_env = {}

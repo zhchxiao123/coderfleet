@@ -224,7 +224,7 @@ def _claude_mcp_bridge_arg(*, allow_ask_user: bool) -> str:
     return f" --mcp-config {config_json} --allowedTools {allowed}{denied}"
 
 
-def _build_claude(prompt, auto, task_id, marker, task_env, session_id, images, model="", local_sandboxed=False):
+def _build_claude(prompt, auto, task_id, marker, task_env, session_id, images, model="", local_sandboxed=False, *, fork_session_id="", resume_session_at=""):
     # local_sandboxed 对 Claude 是接受但不使用的参数（跟其余非 claude/codex 类型一样只为了
     # InnerCmdFn 签名统一）：--dangerously-skip-permissions 只跳过审批 UI，真正的隔离靠账号
     # 自己在 sandbox_confirmed 门禁下已经手工开启的 Claude Code 自带 OS 级沙箱
@@ -233,6 +233,11 @@ def _build_claude(prompt, auto, task_id, marker, task_env, session_id, images, m
     ep = shlex.quote(p)
     perm   = "--dangerously-skip-permissions" if auto else "--permission-mode acceptEdits"
     resume = f" --resume {shlex.quote(session_id)}" if session_id else ""
+    if fork_session_id:
+        if not session_id or not resume_session_at:
+            raise ValueError("分叉需要来源会话和消息 UUID")
+        resume += (f" --fork-session --session-id {shlex.quote(fork_session_id)}"
+                   f" --resume-session-at {shlex.quote(resume_session_at)}")
     model_arg = f" --model {shlex.quote(model)}" if model else ""
     sys_hint = shlex.quote(_CF_SEND_SYSTEM_HINT)
     # auto 模式只禁止会暂停等人的 ask_user_question；Continuation 是自动编排

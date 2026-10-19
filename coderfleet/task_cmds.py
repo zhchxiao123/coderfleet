@@ -77,6 +77,27 @@ def task_group() -> None:
     pass
 
 
+@task_group.command("fork")
+@click.argument("conversation_id")
+@click.option("--after-task", "task_id", required=True, help="从已完成的 Claude 任务末尾分叉")
+@click.option("--name", default="", help="新会话名称")
+def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
+    """Create an independent conversation sharing the current project files."""
+    api = _require_server()
+    try:
+        response = httpx.post(
+            f"{api}/api/conversations/{conversation_id}/fork",
+            json={"task_id": task_id, "name": name}, timeout=30,
+        )
+    except httpx.RequestError as err:
+        raise click.ClickException(f"请求失败：{err}") from err
+    if response.status_code != 201:
+        raise click.ClickException(f"分叉失败：{_http_error_detail(response)}")
+    child = response.json()
+    click.echo(f"新会话：{child['id']}（共享当前项目文件）")
+    click.echo(f"续聊：coderfleet task run '你的消息' --conversation {child['id']}")
+
+
 # ── task run ──────────────────────────────────────────────
 
 @task_group.command("run")

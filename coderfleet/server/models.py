@@ -252,6 +252,16 @@ class Project(BaseModel):
 
 # ── 任务 ──────────────────────────────────────────────────
 
+class ConversationFork(BaseModel):
+    source_conversation_id: str
+    source_task_id: str
+    source_session_id: str
+    message_uuid: str
+    target_session_id: str
+    inherited_task_ids: list[str] = Field(default_factory=list)
+    model: str = ""
+
+
 class Conversation(BaseModel):
     id:                str
     name:              str
@@ -260,6 +270,7 @@ class Conversation(BaseModel):
     project:           str
     project_name:      str = ""
     native_session_id: str = ""
+    fork: Optional[ConversationFork] = None
     status:            ConversationStatus = ConversationStatus.active
     mode:              ConversationMode   = ConversationMode.chat
     tmux_session:      str = ""
@@ -752,6 +763,7 @@ class ConversationResponse(BaseModel):
     project:           str
     project_name:      str = ""
     native_session_id: str
+    fork: Optional[ConversationFork] = None
     status:            ConversationStatus
     mode:              ConversationMode = ConversationMode.chat
     tmux_session:      str = ""
@@ -775,6 +787,7 @@ class ConversationResponse(BaseModel):
             project           = c.project,
             project_name      = c.project_name,
             native_session_id = c.native_session_id,
+            fork              = c.fork,
             status            = c.status,
             mode              = c.mode,
             tmux_session      = c.tmux_session,

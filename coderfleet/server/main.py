@@ -126,6 +126,11 @@ class ConversationCreateRequest(BaseModel):
     task_id: str  # 用该任务的 native_session_id 初始化任务链
 
 
+class ConversationForkRequest(BaseModel):
+    task_id: str
+    name: str = ""
+
+
 class AccountCreateRequest(BaseModel):
     name:    str
     type:    AccountType
@@ -1862,6 +1867,40 @@ async def create_terminal_conversation(req: TerminalConversationCreateRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return ConversationResponse.from_conversation(conv)
+
+
+@app.get("/api/conversations/{conversation_id}/fork-point/{task_id}")
+async def conversation_fork_point(conversation_id: str, task_id: str):
+    try:
+        return await run_in_threadpool(scheduler.conversation_fork_point, conversation_id, task_id)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
+
+@app.post("/api/conversations/{conversation_id}/fork", response_model=ConversationResponse, status_code=201)
+async def fork_conversation(conversation_id: str, req: ConversationForkRequest):
+    try:
+        # Fork creation performs validation + save without an await inside the mutation.
+        conv = await run_in_threadpool(scheduler.fork_conversation, conversation_id, req.task_id, req.name)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+    return ConversationResponse.from_conversation(conv)
+
+
+@app.get("/api/conversations/{conversation_id}/inherited-tasks", response_model=list[TaskResponse])
+async def inherited_conversation_tasks(conversation_id: str):
+    conv = scheduler.get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    result = []
+    for task_id in conv.fork.inherited_task_ids if conv.fork else []:
+        task = scheduler.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=409, detail="继承的历史任务已删除")
+        if task.account != conv.account or task.project != conv.project:
+            raise HTTPException(status_code=409, detail="继承历史与当前账号或项目不一致")
+        result.append(TaskResponse.from_task(task))
+    return result
 
 
 async def _replay_terminal_log(websocket: WebSocket, log_path: "Path", lines: int = 300) -> None:

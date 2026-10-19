@@ -1534,7 +1534,7 @@ async function renderChatWorkspace(conv) {
     const modelSelect = document.getElementById('chat-model-select');
     const modelCustomInput = document.getElementById('chat-model-custom');
     if (modelSelect) {
-      const lastModel = convTasks.length ? (convTasks[convTasks.length - 1].model || '') : '';
+      const lastModel = convTasks.length ? (convTasks[convTasks.length - 1].model || '') : (conv.fork?.model || '');
       const remembered = Object.prototype.hasOwnProperty.call(chatModelByConversation, conv.id)
         ? chatModelByConversation[conv.id]
         : lastModel;
@@ -1580,13 +1580,20 @@ async function renderChatWorkspace(conv) {
     }
     document.getElementById('chat-status-text').innerHTML = statusHtml;
 
-    if (convTasks.length === 0) {
+    let inheritedTasks = [];
+    if (conv.fork) {
+      const response = await fetch(`${API}/api/conversations/${encodeURIComponent(conv.id)}/inherited-tasks`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '继承历史加载失败');
+      inheritedTasks = data;
+    }
+    if (convTasks.length === 0 && inheritedTasks.length === 0) {
       chatContent.innerHTML = `<div class="empty">会话目前没有指令记录，发送消息开始交流。</div>`;
       return;
     }
 
     // 只有 done/failed/killed/running 的任务才会渲染消息气泡（排队/定时中的任务跳过，由队列面板管理）
-    const renderableTasks = convTasks.filter(t => t.status !== 'pending' && t.status !== 'scheduled');
+    const renderableTasks = [...inheritedTasks, ...convTasks].filter(t => t.status !== 'pending' && t.status !== 'scheduled');
 
     // 会话历史越长，日志越大，一次性把全部任务日志都拉下来渲染就越慢（issue #42）。
     // 只 eager 拉取渲染最近 CHAT_EAGER_LOG_COUNT 条，更早的任务先显示折叠占位，
@@ -1609,6 +1616,18 @@ async function renderChatWorkspace(conv) {
     ]);
     manuallyExpanded.forEach((t, idx) => expandedLogsById.set(t.id, expandedLogs[idx]));
     chatContent.innerHTML = '';
+
+    if (conv.fork) {
+      const banner = document.createElement('div');
+      banner.className = 'chat-sys-event chat-fork-origin';
+      banner.textContent = '分叉会话 · 已继承分叉点之前的只读历史；共享当前项目文件，不回滚代码。';
+      const sourceButton = document.createElement('button');
+      sourceButton.className = 'btn';
+      sourceButton.textContent = '查看来源';
+      sourceButton.onclick = () => selectConversation(conv.fork.source_conversation_id);
+      banner.appendChild(sourceButton);
+      chatContent.appendChild(banner);
+    }
 
     collapsedTasks.forEach(task => {
       if (expandedLogsById.has(task.id)) {
@@ -1744,7 +1763,36 @@ function _renderChatTaskTurn(container, task, logText) {
   // 每一个任务在渲染时，均传入 foldProcess=true，把中间执行步骤折叠起来，把回复直接展现
   const localRenderer = new ChatLogRenderer(logWrap, task.status === 'running', true, task.project_name || null, task.id);
   localRenderer.render(logText, task.type);
+  if (task.type === 'claude' && task.status === 'done' && task.conversation_id === activeConversationId) {
+    const forkButton = document.createElement('button');
+    forkButton.className = 'btn chat-fork-button';
+    forkButton.textContent = '从这里分叉';
+    forkButton.title = '继承到本轮末尾的上下文，新会话共享当前项目文件';
+    forkButton.onclick = () => forkChatConversation(task.conversation_id, task.id, forkButton);
+    logWrap.appendChild(forkButton);
+  }
   return localRenderer;
+}
+
+async function forkChatConversation(conversationId, taskId, button) {
+  button.disabled = true;
+  try {
+    const point = await fetch(`${API}/api/conversations/${encodeURIComponent(conversationId)}/fork-point/${encodeURIComponent(taskId)}`);
+    const pointData = await point.json();
+    if (!point.ok) throw new Error(pointData.detail || '该轮次无法分叉');
+    const response = await fetch(`${API}/api/conversations/${encodeURIComponent(conversationId)}/fork`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    const child = await response.json();
+    if (!response.ok) throw new Error(child.detail || '分叉失败');
+    await loadConversations(false);
+    await selectConversation(child.id);
+  } catch (error) {
+    alert('分叉失败：' + error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // 更早历史任务的折叠占位：只显示时间 + prompt 摘要，不请求日志正文；
