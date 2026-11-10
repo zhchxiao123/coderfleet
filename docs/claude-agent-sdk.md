@@ -58,6 +58,8 @@ coderfleet account backend <account-name>
 
 Web 账号表单提供同一后端选择和诊断能力。只有 Claude Account 可以选择 SDK；其他代理保持原执行方式。
 
+CLI 默认连接 `http://localhost:8765`。服务使用其他端口时设置 `CODERFLEET_API`，例如 `CODERFLEET_API=http://127.0.0.1:8767 coderfleet account sdk-status <account-name>`。这两个 SDK 账号命令连接本机时自动读取当前工作区的 `api_key.txt`；连接远端时需显式设置 `CODERFLEET_API_KEY`，不会把本机密钥自动发往远端。
+
 后端在 Task 提交时固化，SDK Task 同时保存运行位置供派发、停止和恢复使用。切换设置只影响之后提交的新 Task，已排队或运行的 Task 不改后端或运行位置。Task 详情和 CLI status 显示实际后端及版本。缺 SDK 环境、版本不符或启动失败会明确报错，不静默换成 CLI。
 
 切回时：

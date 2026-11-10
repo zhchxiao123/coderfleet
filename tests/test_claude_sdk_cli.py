@@ -4,9 +4,50 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 from click.testing import CliRunner
 
 from coderfleet import config_cmds, task_cmds
+
+
+@pytest.mark.parametrize('command', ['backend', 'sdk-status'])
+def test_sdk_account_commands_authenticate_against_the_local_server(tmp_path: Path, monkeypatch, command: str) -> None:
+    monkeypatch.setenv('CODERFLEET_WORKSPACE', str(tmp_path))
+    monkeypatch.delenv('CODERFLEET_API_KEY', raising=False)
+    (tmp_path / 'api_key.txt').write_text('local-test-key')
+    monkeypatch.setattr(task_cmds, '_require_server', lambda: 'http://127.0.0.1:8767')
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.headers.get('Authorization') != 'Bearer local-test-key':
+            return httpx.Response(401, json={'detail': 'unauthorized'})
+        if command == 'backend':
+            return httpx.Response(200, json=[{'name': 'alice', 'type': 'claude', 'claude_backend': 'sdk'}])
+        return httpx.Response(200, json={'ready': True, 'sdk_version': '0.2.180', 'cli_version': '2.1.321'})
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
+    result = CliRunner().invoke(config_cmds.account_group, [command, 'alice'])
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize('explicit_key,expected', [(None, ''), ('remote-test-key', 'Bearer remote-test-key'), ('', '')])
+def test_remote_sdk_commands_never_implicitly_forward_local_api_keys(tmp_path: Path, monkeypatch, explicit_key, expected) -> None:
+    monkeypatch.setenv('CODERFLEET_WORKSPACE', str(tmp_path))
+    (tmp_path / 'api_key.txt').write_text('private-local-key')
+    if explicit_key is None:
+        monkeypatch.delenv('CODERFLEET_API_KEY', raising=False)
+    else:
+        monkeypatch.setenv('CODERFLEET_API_KEY', explicit_key)
+    monkeypatch.setattr(task_cmds, '_require_server', lambda: 'https://remote.example')
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get('Authorization', '') == expected
+        return httpx.Response(200, json=[{'name': 'alice', 'type': 'claude', 'claude_backend': 'sdk'}])
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
+    result = CliRunner().invoke(config_cmds.account_group, ['backend', 'alice'])
+    assert result.exit_code == 0, result.output
 
 
 def test_account_backend_reads_and_updates_the_shared_account_api(monkeypatch) -> None:

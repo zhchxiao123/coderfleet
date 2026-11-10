@@ -4,11 +4,12 @@ config_cmds.py — coderfleet account / project 子命令
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import click
 import httpx
@@ -19,6 +20,18 @@ from coderfleet.mounts import parse_mounts
 from coderfleet.ports import allocate_ide_port
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9-]+$")
+
+
+def _account_api_headers(api: str) -> dict[str, str]:
+    """Use explicit remote credentials or the selected local workspace's key."""
+    key = os.environ.get("CODERFLEET_API_KEY")
+    if key is None and urlsplit(api).hostname in {"localhost", "127.0.0.1", "::1"}:
+        from coderfleet.config import get_workspace
+
+        path = get_workspace() / "api_key.txt"
+        if path.is_file():
+            key = path.read_text(encoding="utf-8").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def _container_name(project_name: str, acc_type: str) -> str:
@@ -80,7 +93,7 @@ def cmd_account_backend(name: str, backend: Optional[str]) -> None:
 
     api = _require_server()
     try:
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=10, headers=_account_api_headers(api)) as client:
             response = client.get(f"{api}/api/accounts")
             if response.status_code != 200:
                 raise click.ClickException(f"查询失败：{_http_error_detail(response)}")
@@ -111,7 +124,7 @@ def cmd_account_sdk_status(name: str, as_json: bool) -> None:
 
     api = _require_server()
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, headers=_account_api_headers(api)) as client:
             response = client.get(f"{api}/api/accounts/{quote(name, safe='')}/claude-sdk-status")
         if response.status_code != 200:
             raise click.ClickException(f"检查失败：{_http_error_detail(response)}")

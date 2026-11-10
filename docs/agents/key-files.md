@@ -167,7 +167,7 @@ Continuation addendum for the load-bearing files below:
 
 
 - `coderfleet/server/conversation_forks.py` — Validates safe completed-turn checkpoints from persisted Claude JSONL logs. Uses the outer event UUID, filters subagent/foreign-session events, and rejects missing success or open tool calls. Native transcript membership is verified by Scheduler before saving a branch. See `docs/conversation-forks.md`.
-- `coderfleet/config_cmds.py` — Claude backend create/read/update and sdk-status commands match the account HTTP/API and Web capabilities; switching backend never applies or restarts containers.
+- `coderfleet/config_cmds.py` — Claude backend create/read/update and sdk-status commands match the account HTTP/API and Web capabilities; switching backend never applies or restarts containers. Both HTTP commands use `_account_api_headers`: an explicit CODERFLEET_API_KEY takes precedence, including empty to suppress authentication; only loopback endpoints automatically read the selected workspace's api_key.txt, never remote endpoints.
 - `coderfleet/task_cmds.py` — Task status reports the snapshotted execution backend and actual SDK/CLI versions.
 - `coderfleet/server/static/js/accounts.js` — Claude-only backend controls preserve values through create/edit/copy; SDK diagnostics render safe status/version text and actionable installation errors.
 - `coderfleet/server/static/js/utils.js` — `taskExecutionMetadataLabel` and its rendering/update helpers display actual Task backend/version metadata without rebuilding editable views.
