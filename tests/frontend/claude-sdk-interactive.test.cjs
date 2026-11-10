@@ -3,9 +3,16 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const test = require('node:test');
 
+class Element {
+  constructor() { this.dataset = {}; this.children = []; this.hidden = false; }
+  setAttribute() {}
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren() { this.children = []; }
+}
+
 function controls(fetch) {
   const storage = new Map();
-  const context = vm.createContext({fetch, crypto:require('node:crypto'),
+  const context = vm.createContext({fetch, crypto:require('node:crypto'), document:{createElement:()=>new Element()},
     sessionStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)}});
   vm.runInContext(fs.readFileSync('coderfleet/server/static/js/sdk-task-controls.js','utf8'), context);
   return vm.runInContext('SDKTaskControls', context);
@@ -39,4 +46,29 @@ test('receipt queries confirm delivery without sending the message again', async
   assert.equal(result.status,'accepted');
   assert.equal(result.text,'draft');
   assert.equal(calls,2);
+});
+
+test('composer actions reveal receipt checks only while delivery is unconfirmed', async () => {
+  let attempts = 0;
+  let text = 'supplement';
+  const ui = controls(async () => {
+    if (++attempts === 1) throw new Error('connection lost');
+    return {ok:true,json:async()=>({status:'accepted'})};
+  });
+  const host = new Element();
+  ui.mount(host, {id:'task-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}, {
+    read:()=>({text,hasAttachments:false}), clear:value=>{ if (text === value) text=''; },
+  });
+  const [message, interrupt, receipt, status] = host.children;
+  assert.match(message.className,/sdk-task-btn--message/);
+  assert.match(interrupt.className,/sdk-task-btn--interrupt/);
+  assert.equal(receipt.hidden,true);
+  await message.onclick();
+  assert.equal(receipt.hidden,false);
+  assert.equal(text,'supplement');
+  assert.equal(status.dataset.state,'error');
+  await message.onclick();
+  assert.equal(receipt.hidden,true);
+  assert.equal(text,'');
+  assert.match(status.textContent,/已送达当前任务/);
 });

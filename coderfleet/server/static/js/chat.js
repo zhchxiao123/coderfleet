@@ -2467,7 +2467,7 @@ function buildChatInputHTML(placeholder, hint) {
     <div id="chat-image-previews" class="chat-image-preview-row" style="display:none;"></div>
     <textarea class="chat-input-textarea" id="chat-input" placeholder="${placeholder}" rows="1"></textarea>
     <div id="chat-upload-status" class="chat-upload-status" style="display:none;"></div>
-    <div id="sdk-task-controls" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div id="sdk-task-controls" class="sdk-task-controls"></div>
     <div class="chat-input-actions">
       <div class="chat-input-options">
         <input type="file" id="chat-file-input" multiple style="display:none" onchange="handleFileSelect(this)">
