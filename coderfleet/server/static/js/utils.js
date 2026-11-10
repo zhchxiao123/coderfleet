@@ -309,6 +309,32 @@ function esc(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function taskExecutionLabel(task) {
+  if (task?.type !== 'claude') return '';
+  if ((task.execution_backend || 'cli') === 'sdk') {
+    return [
+      task.sdk_version ? `SDK ${task.sdk_version}` : 'SDK',
+      task.cli_version ? `CLI ${task.cli_version}` : '',
+    ].filter(Boolean).join(' · ');
+  }
+  return task.cli_version ? `CLI ${task.cli_version}` : 'CLI';
+}
+
+function renderTaskExecutionMetadata(task) {
+  const label = taskExecutionLabel(task);
+  return label
+    ? `<span class="task-execution-meta text-muted" data-task-execution="${esc(task.id)}" style="font-size:11px" title="实际执行后端和版本">${esc(label)}</span>`
+    : '';
+}
+
+function updateTaskExecutionMetadata(tasks, root = document) {
+  const byId = new Map(tasks.map(task => [task.id, task]));
+  root.querySelectorAll('[data-task-execution]').forEach(node => {
+    const task = byId.get(node.dataset.taskExecution);
+    if (task) node.textContent = taskExecutionLabel(task);
+  });
+}
+
 // ── ANSI 转义码 → 带色 HTML ──────────────────────────────────
 // Bash 类工具的输出（测试跑分、linter、`git diff --color` 等）经常带着 ANSI
 // SGR 颜色码；之前这些码要么原样显示成乱码，要么被整体吞掉。这里只解析颜色/

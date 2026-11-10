@@ -693,12 +693,13 @@ def test_get_hermes_session_id_swallows_errors(tmp_path: Path) -> None:
 
 
 # ── LocalRuntime：真的跑子进程，不碰 Docker ────────────────────────────
-def test_local_runtime_run_executes_and_captures_stdout() -> None:
+def test_local_runtime_run_executes_and_captures_stdout(tmp_path: Path) -> None:
     rt = LocalRuntime()
 
     async def drive() -> bytes:
         proc = await rt.run(ContainerSpec(
             image="unused", command=["sh", "-c", "echo hello-local"], name="probe-1",
+            workdir=str(tmp_path),
         ))
         out, _ = await proc.communicate()
         return out
@@ -733,12 +734,12 @@ def test_local_runtime_run_uses_workdir_as_cwd(tmp_path: Path) -> None:
     assert b"marker.txt" in asyncio.run(drive())
 
 
-def test_local_runtime_is_running_tracks_registered_pid() -> None:
+def test_local_runtime_is_running_tracks_registered_pid(tmp_path: Path) -> None:
     rt = LocalRuntime()
     assert rt.is_running("nope") is False
 
     async def drive() -> None:
-        proc = await rt.run(ContainerSpec(image="unused", command=["sleep", "5"], name="long-running"))
+        proc = await rt.run(ContainerSpec(image="unused", command=["sleep", "5"], name="long-running", workdir=str(tmp_path)))
         assert rt.is_running("long-running") is True
         proc.kill()
         await proc.wait()
@@ -746,11 +747,11 @@ def test_local_runtime_is_running_tracks_registered_pid() -> None:
     asyncio.run(drive())
 
 
-def test_local_runtime_remove_terminates_process_and_is_noop_for_unknown() -> None:
+def test_local_runtime_remove_terminates_process_and_is_noop_for_unknown(tmp_path: Path) -> None:
     rt = LocalRuntime()
 
     async def drive() -> int:
-        proc = await rt.run(ContainerSpec(image="unused", command=["sleep", "5"], name="killme"))
+        proc = await rt.run(ContainerSpec(image="unused", command=["sleep", "5"], name="killme", workdir=str(tmp_path)))
         await rt.remove("killme")
         return await asyncio.wait_for(proc.wait(), timeout=2)
 

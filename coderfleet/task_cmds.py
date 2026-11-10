@@ -264,6 +264,15 @@ def cmd_task_status(task_id: str) -> None:
     click.echo(f"  ID：      {d['id']}")
     click.echo(f"  状态：    {click.style(label, fg=color)}")
     click.echo(f"  账号：    {d['account']} ({d['type']})")
+    if d["type"] == "claude":
+        click.echo(f"  后端：    {d.get('execution_backend') or 'cli'}")
+        versions = [
+            f"{label} {d[key]}"
+            for key, label in (("sdk_version", "SDK"), ("cli_version", "CLI"))
+            if d.get(key)
+        ]
+        if versions:
+            click.echo(f"  版本：    {' · '.join(versions)}")
     click.echo(f"  项目：    {d['project']}")
     if d.get("project_name"):
         click.echo(f"  项目名：  {d['project_name']}")

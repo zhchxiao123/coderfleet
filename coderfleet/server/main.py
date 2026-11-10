@@ -27,7 +27,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Literal, Optional
 from urllib.parse import urlparse
 
 import uuid
@@ -138,6 +138,7 @@ class AccountCreateRequest(BaseModel):
     proxy:   AccountProxy  = AccountProxy.relay
     runtime: AccountRuntime = AccountRuntime.container
     sandbox_confirmed: bool = False
+    claude_backend: Literal["cli", "sdk"] = "cli"
 
 
 class AccountUpdateRequest(BaseModel):
@@ -146,6 +147,7 @@ class AccountUpdateRequest(BaseModel):
     proxy:   Optional[AccountProxy]  = None
     runtime: Optional[AccountRuntime] = None
     sandbox_confirmed: Optional[bool] = None
+    claude_backend: Optional[Literal["cli", "sdk"]] = None
 
 
 class EnvVarsRequest(BaseModel):
@@ -708,6 +710,14 @@ async def refresh_account_usage(name: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/api/accounts/{name}/claude-sdk-status")
+async def get_claude_sdk_status(name: str):
+    try:
+        return await scheduler.claude_sdk_status(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404 if "不存在" in str(exc) else 422, detail=str(exc))
+
+
 import re as _re
 
 def _validate_identifier(name: str, label: str) -> None:
@@ -732,6 +742,7 @@ async def create_account(req: AccountCreateRequest):
     try:
         scheduler.save_account(
             req.name, req.type, req.auth, req.proxy, req.runtime, req.sandbox_confirmed,
+            claude_backend=req.claude_backend,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -751,6 +762,7 @@ async def update_account(name: str, req: AccountUpdateRequest):
             req.proxy   or acc.proxy,
             req.runtime or acc.runtime,
             req.sandbox_confirmed if req.sandbox_confirmed is not None else acc.sandbox_confirmed,
+            claude_backend=req.claude_backend if req.claude_backend is not None else acc.claude_backend,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

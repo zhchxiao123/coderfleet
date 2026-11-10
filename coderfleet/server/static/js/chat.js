@@ -45,6 +45,7 @@ async function loadConversations(renderWorkspace = true) {
     const shouldRefreshActiveWorkspace = shouldRefreshActiveChatForTaskStatusChange(tasks);
     projectsCache = projects;
     tasksCache = tasks;
+    updateTaskExecutionMetadata(tasks);
     chatConversationsList = convs;
 
     conversationsCache = {};
@@ -1752,6 +1753,7 @@ function _renderChatTaskTurn(container, task, logText) {
       </div>
       <div class="user-bubble-content">${esc(task.prompt)}</div>
       ${renderTaskFileAttachments(task, currentChatProjectName)}
+      <div style="margin-top:6px">${renderTaskExecutionMetadata(task)}</div>
     </div>`;
   container.appendChild(userWrap);
 

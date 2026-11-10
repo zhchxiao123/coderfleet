@@ -48,12 +48,17 @@ class ContainerSpec:
 
 
 @runtime_checkable
+class ProcessOutput(Protocol):
+    async def read(self, n: int = -1) -> bytes: ...
+
+
+@runtime_checkable
 class Process(Protocol):
     """对已启动进程的把手。``asyncio.subprocess.Process`` 天然满足它，测试用 FakeProcess。"""
 
     pid: int
     returncode: int | None
-    stdout: object | None
+    stdout: ProcessOutput | None
 
     async def wait(self) -> int: ...
 

@@ -29,6 +29,7 @@ function _populateTypeSelects(types) {
       `<option value="${esc(t.id)}">${esc(t.label || t.id)}</option>`
     ).join('');
     if (types.some(t => t.id === prev)) createSel.value = prev;
+    toggleClaudeBackendControls('create-account');
   }
 }
 
@@ -58,6 +59,9 @@ function renderAccounts(accounts) {
     const runtimeBadge = a.runtime === 'local'
       ? `<span class="badge runtime-local" title="不经过 Docker，直接调用宿主机 CLI">local</span>`
       : '';
+    const backendBadge = a.type === 'claude'
+      ? `<span class="badge" title="之后提交的任务使用此后端">${esc((a.claude_backend || 'cli').toUpperCase())}</span>`
+      : '';
     const projectNames = a.projects || [];
     const containers = String(a.container || '').split(/\s+/).filter(Boolean);
     const projectChips = projectNames.length
@@ -81,6 +85,7 @@ function renderAccounts(accounts) {
         <span class="badge idle">${esc(a.auth || 'login')}</span>
         ${proxyBadge}
         ${runtimeBadge}
+        ${backendBadge}
       </div>
       <div class="account-name">${esc(a.name)}</div>
     </div>
@@ -488,6 +493,7 @@ async function cloneAccount(source, newName) {
         body: JSON.stringify({
           name: newName, type: source.type, auth: source.auth, proxy: source.proxy,
           runtime: source.runtime, sandbox_confirmed: source.sandbox_confirmed,
+          claude_backend: source.type === 'claude' ? (source.claude_backend || 'cli') : 'cli',
         }),
       }),
       fetch(`${API}/api/accounts/${encodeURIComponent(source.name)}/env`).then(r => r.json()).catch(() => ({ vars: {} })),
@@ -512,6 +518,19 @@ async function cloneAccount(source, newName) {
 
 // ── 新建账号 ──────────────────────────────────────────────
 let _localCliDetectionCache = null;
+
+function toggleClaudeBackendControls(prefix) {
+  const isClaude = document.getElementById(`${prefix}-type`)?.value === 'claude';
+  const row = document.getElementById(`${prefix}-backend-row`);
+  const select = document.getElementById(`${prefix}-claude-backend`);
+  if (row) row.style.display = isClaude ? '' : 'none';
+  if (!isClaude && select) select.value = 'cli';
+}
+
+function onCreateAccountTypeChange() {
+  toggleClaudeBackendControls('create-account');
+  onCreateAccountRuntimeChange();
+}
 
 async function _getLocalCliDetection() {
   if (_localCliDetectionCache) return _localCliDetectionCache;
@@ -551,6 +570,8 @@ function openCreateAccountModal() {
   document.getElementById('create-account-auth').value = 'login';
   document.getElementById('create-account-proxy').value = 'relay';
   document.getElementById('create-account-runtime').value = 'container';
+  document.getElementById('create-account-claude-backend').value = 'cli';
+  toggleClaudeBackendControls('create-account');
   document.getElementById('create-account-sandbox-confirmed').checked = false;
   document.getElementById('create-account-sandbox-row').style.display = 'none';
   document.getElementById('create-account-local-hint').style.display = 'none';
@@ -570,6 +591,8 @@ async function saveNewAccount() {
   const proxy = document.getElementById('create-account-proxy').value;
   const runtime = document.getElementById('create-account-runtime').value;
   const sandbox_confirmed = document.getElementById('create-account-sandbox-confirmed').checked;
+  const claude_backend = type === 'claude'
+    ? (document.getElementById('create-account-claude-backend')?.value || 'cli') : 'cli';
   if (!name) { showCreateAccountMsg('请填写账号名', 'error'); return; }
   const btn = document.getElementById('create-account-btn');
   btn.disabled = true;
@@ -577,7 +600,7 @@ async function saveNewAccount() {
     const r = await fetch(`${API}/api/accounts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, type, auth, proxy, runtime, sandbox_confirmed }),
+      body: JSON.stringify({ name, type, auth, proxy, runtime, sandbox_confirmed, claude_backend }),
     });
     const data = await r.json();
     if (!r.ok) { showCreateAccountMsg(data.detail || '创建失败', 'error'); return; }
@@ -643,7 +666,7 @@ async function loadAccountSettings(name) {
 
           <div class="form-group">
             <label class="form-label">类型</label>
-            <select id="settings-type" class="form-input">
+            <select id="settings-type" class="form-input" onchange="toggleClaudeBackendControls('settings')">
               ${(accountTypesCache.length ? accountTypesCache : [{id: acc.type, label: acc.type}])
                 .map(t => `<option value="${esc(t.id)}" ${acc.type===t.id?'selected':''}>${esc(t.label||t.id)}</option>`)
                 .join('')}
@@ -662,6 +685,17 @@ async function loadAccountSettings(name) {
               <input type="checkbox" id="settings-sandbox-confirmed" ${acc.sandbox_confirmed?'checked':''}>
               我已手工开启该 CLI 自带的 OS 级沙箱（未确认则无法提交 auto 任务）
             </label>
+          </div>
+
+          <div id="settings-backend-row" class="form-group" style="display:${acc.type==='claude'?'':'none'}">
+            <label class="form-label">Claude 执行后端</label>
+            <select id="settings-claude-backend" class="form-input">
+              <option value="cli" ${acc.claude_backend!=='sdk'?'selected':''}>CLI（默认）</option>
+              <option value="sdk" ${acc.claude_backend==='sdk'?'selected':''}>Agent SDK</option>
+            </select>
+            <div style="font-size:12px;color:var(--text-3)">只影响之后提交的任务，不停止已有任务或重启容器。</div>
+            <button class="btn" style="font-size:12px;margin-top:8px" onclick="checkAccountSdkStatus('${esc(name)}',this)">检查 SDK 环境</button>
+            <div id="settings-sdk-status" role="status" style="font-size:12px;white-space:pre-wrap;margin-top:8px"></div>
           </div>
 
           <div style="display:flex;gap:8px;align-items:center">
@@ -712,6 +746,30 @@ function toggleSettingsSandboxRow() {
   if (row) row.style.display = runtime === 'local' ? '' : 'none';
 }
 
+async function checkAccountSdkStatus(name, button) {
+  const output = document.getElementById('settings-sdk-status');
+  if (!output) return;
+  if (button) button.disabled = true;
+  output.textContent = '正在检查 SDK 环境…';
+  try {
+    const response = await fetch(`${API}/api/accounts/${encodeURIComponent(name)}/claude-sdk-status`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'SDK 环境检查失败');
+    const lines = [result.ready ? 'SDK 已就绪' : 'SDK 未就绪'];
+    if (result.sdk_version) lines.push(`SDK: ${result.sdk_version}`);
+    if (result.cli_version) lines.push(`CLI: ${result.cli_version}`);
+    if (result.python_path) lines.push(`Python: ${result.python_path}`);
+    if (result.error) lines.push(result.error);
+    output.textContent = lines.join('\n');
+    output.style.color = result.ready ? 'var(--green)' : 'var(--red)';
+  } catch (error) {
+    output.textContent = error.message;
+    output.style.color = 'var(--red)';
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 
 function addEnvRow() {
   const k = document.getElementById('new-env-key').value.trim();
@@ -743,17 +801,19 @@ async function saveAccountSettings(name) {
   const proxy   = document.getElementById('settings-proxy').value;
   const runtime = document.getElementById('settings-runtime').value;
   const sandbox_confirmed = document.getElementById('settings-sandbox-confirmed').checked;
+  const claude_backend = type === 'claude'
+    ? (document.getElementById('settings-claude-backend')?.value || 'cli') : 'cli';
   const btn   = document.querySelector('#acct-panel-settings .btn.primary');
   if (btn) btn.disabled = true;
   try {
     const r = await fetch(`${API}/api/accounts/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, auth, proxy, runtime, sandbox_confirmed }),
+      body: JSON.stringify({ type, auth, proxy, runtime, sandbox_confirmed, claude_backend }),
     });
     const data = await r.json();
     if (!r.ok) { showSettingsMsg(data.detail || '保存失败', 'error'); return; }
-    showSettingsMsg('已保存', 'ok');
+    showSettingsMsg('已保存，后端选择仅影响新提交的任务', 'ok');
     await loadAccounts();
     toggleEnvSection();
   } catch (e) {

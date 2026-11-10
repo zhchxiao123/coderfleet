@@ -33,7 +33,8 @@ async function openLogModal(taskId) {
   <span>·</span><span class="badge ${task.type}">${task.type}</span>
   <span>${esc(task.account)}</span>
   <span>·</span><span class="text-muted">${esc(task.project.split('/').pop())}</span>
-  <span>·</span><span class="text-muted">${fmtTime(task.created)}</span>`;
+  <span>·</span><span class="text-muted">${fmtTime(task.created)}</span>
+  ${renderTaskExecutionMetadata(task)}`;
 
     if (task.status === 'running') document.getElementById('kill-btn').style.display = '';
     if (task.conversation_id || task.native_session_id) document.getElementById('resume-btn').style.display = '';
@@ -68,6 +69,10 @@ function startFollow(skipBytes = 0) {
       stopFollow();
       // 刷新任务状态，隐藏终止按钮
       fetch(`${API}/api/tasks/${currentTaskId}`).then(r => r.json()).then(t => {
+        if (t.id !== currentTaskId) return;
+        currentTaskData = t;
+        updateLogSummary(t);
+        updateTaskExecutionMetadata([t]);
         if (t.status !== 'running') document.getElementById('kill-btn').style.display = 'none';
       }).catch(() => { });
       return;

@@ -24,6 +24,7 @@ class ChatLogRenderer {
     this._buf = '';          // SSE 行缓冲
     this._jsonLineBuffer = ''; // 跨行 JSON 事件缓冲
     this._footerRendered = false;
+    this.executionBackend = 'cli';
     this._isPending = false;   // renderPending() 后首次 push() 时清除占位 pill
     this.isRunning = isRunning;   // 是否正在运行
     this.foldProcess = foldProcess; // 是否折叠最新步骤
@@ -160,6 +161,7 @@ class ChatLogRenderer {
     this._buf = '';
     this._jsonLineBuffer = '';
     this._footerRendered = false;
+    this.executionBackend = 'cli';
     this.processWrapper = null;
     this.processBody = null;
     this.toolCount = 0;
@@ -315,6 +317,7 @@ class ChatLogRenderer {
       this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
       this._jsonLineBuffer = '';
       this._footerRendered = false;
+      this.executionBackend = 'cli';
       this.processWrapper = null;
       this.processBody = null;
       this.toolCount = 0;
@@ -335,6 +338,7 @@ class ChatLogRenderer {
       this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
       this._jsonLineBuffer = '';
       this._footerRendered = false;
+      this.executionBackend = 'cli';
       this.processWrapper = null;
       this.processBody = null;
       this.toolCount = 0;
@@ -472,6 +476,10 @@ class ChatLogRenderer {
 
   // ── Claude: system ────────────────────────────────────────
   _claudeSys(d) {
+    if (d.subtype === 'coderfleet_backend') {
+      this.executionBackend = d.execution_backend;
+      return;
+    }
     if (d.subtype === 'init') {
       const model = (d.model || '').replace(/^claude-/, '');
       const n = (d.tools || []).length;
@@ -583,9 +591,9 @@ class ChatLogRenderer {
       this._appendNode(el);
     }
 
-    // 4. 更新页脚
+    // SDK result ends a turn; only the scheduler's durable footer ends its Task.
     const ok = d.subtype === 'success' && !d.is_error;
-    if (!this._footerRendered) {
+    if (this.executionBackend !== 'sdk' && !this._footerRendered) {
       this._renderFooter(ok ? 'done' : 'failed');
     }
   }

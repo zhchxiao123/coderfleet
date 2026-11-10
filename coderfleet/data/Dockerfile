@@ -77,6 +77,14 @@ RUN npm install -g @openai/codex
 # ── Claude Code CLI ───────────────────────────────────────
 RUN npm install -g @anthropic-ai/claude-code
 
+# The Agent SDK requires a newer MCP than the host FastAPI server. Keep its
+# dependencies and bundled CLI in a dedicated environment; the installer pins
+# the SDK and verifies that the platform wheel contains an executable CLI.
+COPY scripts/install_claude_sdk.py /usr/local/bin/coderfleet-install-claude-sdk
+RUN python3 /usr/local/bin/coderfleet-install-claude-sdk \
+    --venv /opt/coderfleet-claude-sdk-venv
+ENV CODERFLEET_CLAUDE_SDK_PYTHON=/opt/coderfleet-claude-sdk-venv/bin/python
+
 # ── OpenCode CLI ──────────────────────────────────────────
 RUN npm install -g opencode-ai@latest
 

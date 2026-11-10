@@ -23,13 +23,13 @@ import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Literal, Optional
 
 from coderfleet.config import load_config, parse_conf, truthy
 from coderfleet import usage_probe
 from coderfleet.server import docker_mgr
 from coderfleet.server.log_parser import split_complete_lines
-from coderfleet.server.runtime import ContainerRuntime, ContainerSpec, DockerRuntime, LocalRuntime
+from coderfleet.server.runtime import ContainerRuntime, ContainerSpec, DockerRuntime, LocalRuntime, Process
 from coderfleet.server.store import JsonStore
 from coderfleet.ports import allocate_ide_port
 from coderfleet.server.models import (
@@ -129,6 +129,7 @@ class Scheduler:
         self.builds_dir     = workspace_dir / "builds"
         # task_id → asyncio.Task（后台运行的协程）
         self._running: dict[str, asyncio.Task] = {}
+        self._sdk_launching: set[str] = set()
         self._loop_task: Optional[asyncio.Task] = None
         # 任务终态通知渠道（Web Push / Telegram …），由 main.py 在启动时注册
         self._notifiers: list = []
@@ -160,6 +161,13 @@ class Scheduler:
         """任务到达终态时向所有已注册渠道扇出；单渠道失败不影响其余渠道。"""
         if task.status not in TASK_STATUS_LABELS:
             return
+        if task.execution_backend == "sdk":
+            current = self.get_task(task.id)
+            if current is None or current.terminal_notified:
+                return
+            current.terminal_notified = True
+            current.save(self.tasks_dir)
+            task = current
         for notifier in self._notifiers:
             try:
                 await notifier(task)
@@ -317,16 +325,22 @@ class Scheduler:
         proxy:    AccountProxy,
         runtime:  AccountRuntime = AccountRuntime.container,
         sandbox_confirmed: bool = False,
+        claude_backend: Literal["cli", "sdk"] = "cli",
     ) -> Account:
         """新增或修改 accounts.conf 中的账号行，env 认证时自动创建 env 文件占位。"""
         from coderfleet.server.models import check_account_runtime_proxy_compat
         rejection = check_account_runtime_proxy_compat(acc_type, runtime, proxy)
         if rejection:
             raise ValueError(rejection)
+        validated = Account(
+            name=name, type=acc_type, auth=auth, proxy=proxy, runtime=runtime,
+            sandbox_confirmed=sandbox_confirmed, claude_backend=claude_backend,
+        )
         parts = [
             f"NAME={name}", f"TYPE={acc_type.value}", f"AUTH={auth.value}",
             f"PROXY={proxy.value}", f"RUNTIME={runtime.value}",
             f"SANDBOX_CONFIRMED={'true' if sandbox_confirmed else 'false'}",
+            f"CLAUDE_BACKEND={validated.claude_backend}",
         ]
         env_file = ""
         if auth == AccountAuth.env:
@@ -344,11 +358,77 @@ class Scheduler:
         return Account(
             name=name, type=acc_type, auth=auth, proxy=proxy, runtime=runtime,
             sandbox_confirmed=sandbox_confirmed, env_file=env_file,
+            claude_backend=validated.claude_backend,
         )
 
     def delete_account(self, name: str) -> None:
         """从 accounts.conf 删除账号行。"""
         self._rewrite_conf(self.accounts_conf, name, None)
+
+    async def claude_sdk_status(self, name: str) -> dict:
+        """Inspect the selected account's SDK installation without creating a Task."""
+        from coderfleet.claude_sdk import build_doctor_command, worker_source
+        acc = next((account for account in self.get_accounts() if account.name == name), None)
+        if acc is None:
+            raise ValueError(f"账号 '{name}' 不存在")
+        if acc.type.value != "claude":
+            raise ValueError("只有 Claude 账号支持 SDK 诊断")
+        report = {"ready": False, "sdk_version": "", "cli_version": "", "python_path": "", "error": ""}
+        env = self.get_account_env(name)
+        doctor_container = ""
+        runtime = self._runtime_for(acc)
+        try:
+            source = worker_source()
+            filename = f"sdk-worker-{hashlib.sha256(source).hexdigest()[:16]}.py"
+            if acc.runtime == AccountRuntime.local:
+                worker = self.workspace_dir / "cache" / "claude-sdk" / filename
+                self._write_sdk_artifact(worker, source)
+                env["CLAUDE_CONFIG_DIR"] = str(self.local_auth_dir(acc))
+                command = build_doctor_command(worker, local=True)
+                doctor_container = f"coderfleet-sdk-doctor-{uuid.uuid4().hex[:12]}"
+                proc = await runtime.run(ContainerSpec(
+                    image="", command=["bash", "-c", command], env=env,
+                    name=doctor_container, workdir=str(self.workspace_dir.resolve()),
+                ))
+            else:
+                def find_running_project() -> Optional[Project]:
+                    return next((project for project in self.get_projects()
+                                 if project.account == name and not project.ephemeral
+                                 and runtime.is_running(project.container_name(acc.type))), None)
+
+                running_project = await asyncio.to_thread(find_running_project)
+                if running_project:
+                    worker = Path(running_project.path) / ".coderfleet-tasks" / filename
+                    self._write_sdk_artifact(worker, source)
+                    command = build_doctor_command(f"/workspace/.coderfleet-tasks/{filename}")
+                    proc = await runtime.exec(running_project.container_name(acc.type), ["bash", "-c", command], env=env)
+                else:
+                    worker = self.workspace_dir / "cache" / "claude-sdk" / filename
+                    self._write_sdk_artifact(worker, source)
+                    doctor_container = f"coderfleet-sdk-doctor-{uuid.uuid4().hex[:12]}"
+                    proc = await runtime.run(ContainerSpec(
+                        image=self._get_account_image(acc), name=doctor_container, remove=True,
+                        command=["bash", "-c", build_doctor_command("/tmp/coderfleet-sdk-doctor.py")],
+                        env=env, mounts=[(str(worker), "/tmp/coderfleet-sdk-doctor.py:ro")], workdir="/tmp",
+                    ))
+            output, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            decoded = json.loads(output.decode("utf-8"))
+            if not isinstance(decoded, dict):
+                raise ValueError("SDK 诊断返回无效结果")
+            for key in ("sdk_version", "cli_version", "python_path", "error"):
+                if isinstance(decoded.get(key), str):
+                    report[key] = decoded[key]
+            report["ready"] = decoded.get("ready") is True and proc.returncode == 0
+            if not report["ready"] and not report["error"]:
+                report["error"] = "SDK 环境未就绪，请安装隔离环境或更新项目镜像"
+        except Exception as exc:
+            report["error"] = f"SDK 预检失败：{exc}"
+            if doctor_container:
+                try:
+                    await asyncio.wait_for(runtime.remove(doctor_container), timeout=5)
+                except Exception:
+                    logger.warning("SDK 诊断进程清理失败 [account=%s]", name)
+        return report
 
     def _resolve_env_path(self, acc: Account) -> Path:
         env_file = acc.env_file or f"./accounts/{acc.name}/env"
@@ -560,6 +640,7 @@ class Scheduler:
                 env_file  = acc.env_file,
                 proxy     = acc.proxy,
                 runtime   = acc.runtime,
+                claude_backend = acc.claude_backend,
                 projects  = project_names,
                 running   = running,
                 busy      = acc.name in busy,
@@ -854,6 +935,8 @@ class Scheduler:
         return new_task
 
     async def _maybe_auto_retry(self, task: Task, log_path: Path) -> Optional[Task]:
+        if task.execution_backend == "sdk":
+            return None  # A result-unknown SDK execution must never be replayed automatically.
         enabled, max_retries, base_delay = self._auto_retry_settings()
         if not enabled or task.retry_count >= max_retries:
             return None
@@ -1753,8 +1836,12 @@ class Scheduler:
 
     def ensure_conversation_available(self, conversation: Conversation) -> None:
         for task in Task.load_all(self.tasks_dir):
-            if task.conversation_id == conversation.id and task.status == TaskStatus.running:
+            if task.conversation_id == conversation.id and self._task_is_active(task):
                 raise RuntimeError(f"任务链 '{conversation.name}' 正在运行，请等待当前任务结束")
+
+    def _task_is_active(self, task: Task) -> bool:
+        watcher = self._running.get(task.id)
+        return task.status == TaskStatus.running or bool(watcher and not watcher.done())
 
     def update_conversation_native_session(
         self,
@@ -1899,7 +1986,7 @@ class Scheduler:
         # conversation 级串行约束：同一 conversation 同时只能有一个任务在跑
         busy_conv_ids = {
             t.conversation_id for t in all_pending
-            if t.status == TaskStatus.running and t.conversation_id
+            if self._task_is_active(t) and t.conversation_id
         }
         # 本轮已派发的 conversation，防止同一轮调度把同一 conversation 的多个 pending 同时拉起
         in_flight_conv_ids: set[str] = set()
@@ -1941,6 +2028,8 @@ class Scheduler:
                 task.update_status(TaskStatus.failed, self.tasks_dir)
                 self._write_failed_log(task, f"账号 '{task.account}' 不存在")
                 return
+            if task.execution_backend == "sdk" and task.execution_runtime:
+                acc = acc.model_copy(update={"runtime": AccountRuntime(task.execution_runtime)})
 
             task_is_ephemeral = (
                 getattr(task, "ephemeral", False)
@@ -1951,7 +2040,10 @@ class Scheduler:
                 project = self.find_project_by_name(task.project_name) if task.project_name else None
                 session_dir: Optional[Path] = None
                 if conversation:
-                    session_dir = self._get_session_dir(conversation.id)
+                    if acc.runtime == AccountRuntime.local and not conversation.ephemeral:
+                        session_dir = Path(task.project)
+                    else:
+                        session_dir = self._get_session_dir(conversation.id)
 
                 task.ephemeral = True
                 task.execution_mode = "ephemeral"
@@ -2080,7 +2172,7 @@ class Scheduler:
 
             # 判断任务链是否有正在运行的任务
             has_running_in_conv = any(
-                t.conversation_id == conversation.id and t.status == TaskStatus.running
+                t.conversation_id == conversation.id and self._task_is_active(t)
                 for t in Task.load_all(self.tasks_dir)
             )
             if has_running_in_conv:
@@ -2268,6 +2360,8 @@ class Scheduler:
                 status       = status,
                 account      = acc.name,
                 type         = acc.type,
+                execution_backend = acc.claude_backend,
+                execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
                 project_name = proj_name,
@@ -2346,6 +2440,8 @@ class Scheduler:
                 status       = TaskStatus.scheduled,
                 account      = acc.name,
                 type         = acc.type,
+                execution_backend = acc.claude_backend,
+                execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
                 project_name = selected_project.name,
@@ -2384,6 +2480,8 @@ class Scheduler:
                 status       = TaskStatus.pending,
                 account      = acc.name,
                 type         = acc.type,
+                execution_backend = acc.claude_backend,
+                execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
                 project_name = selected_project.name,
@@ -2423,6 +2521,8 @@ class Scheduler:
             status       = TaskStatus.running,
             account      = acc.name,
             type         = acc.type,
+            execution_backend = acc.claude_backend,
+            execution_runtime = acc.runtime.value,
             prompt       = prompt,
             project      = task_project,
             project_name = selected_project.name,
@@ -2466,7 +2566,7 @@ class Scheduler:
         account = next((a for a in self.get_accounts() if a.name == account_name), None)
         if account is None:
             raise ValueError("来源账号不存在")
-        root = (Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+        root = (self.local_auth_dir(account)
                 if account.runtime == AccountRuntime.local
                 else self.workspace_dir / "accounts" / account_name)
         paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
@@ -2505,7 +2605,7 @@ class Scheduler:
         assert source is not None and task is not None
         own_tasks = sorted(
             (t for t in Task.load_all(self.tasks_dir) if t.conversation_id == source.id),
-            key=lambda t: (t.finished or t.created, t.id),
+            key=lambda t: (parse_iso(t.finished or t.created), parse_iso(t.created), t.id),
         )
         inherited = list(source.fork.inherited_task_ids) if source.fork else []
         for item in own_tasks:
@@ -2660,6 +2760,8 @@ class Scheduler:
         container_name = self._get_task_container(task) or ""
         # 跨轮次缓冲还没见到换行符的尾巴——见下方 async with 内的说明。
         pending = b""
+        liveness_tick = 0
+        worker_dead_since: Optional[float] = None
 
         async with aiofiles.open(log_path, mode="a", encoding="utf-8") as f:
             async def _write_chunk(chunk: bytes) -> None:
@@ -2669,12 +2771,25 @@ class Scheduler:
                 text = chunk.decode("utf-8", errors="replace")
                 await f.write(text)
                 await f.flush()
+                if task.execution_backend == "sdk":
+                    self._record_sdk_progress(
+                        task, text, source_offset=last_size - len(pending),
+                        log_size=log_path.stat().st_size,
+                    )
                 if not captured_session_id:
                     sid = self.extract_native_session_id(acc.type, text)
                     if sid:
                         captured_session_id = sid
-                        task.native_session_id = sid
-                        task.save(self.tasks_dir)
+                        if task.execution_backend == "sdk":
+                            current = self.get_task(task.id) or task
+                            current.native_session_id = sid
+                            current.save(self.tasks_dir)
+                            task.native_session_id = sid
+                            task.status = current.status
+                            task.finished = current.finished
+                        else:
+                            task.native_session_id = sid
+                            task.save(self.tasks_dir)
                         if conversation:
                             self.update_conversation_native_session(conversation.id, sid, task.id)
 
@@ -2704,11 +2819,42 @@ class Scheduler:
                         complete, pending = split_complete_lines(pending)
                         await _write_chunk(complete)
 
+                if task.execution_backend == "sdk":
+                    liveness_tick += 1
+                    if is_done or liveness_tick % 10 == 0:
+                        try:
+                            alive = await self._control_sdk_task(task, "probe_worker")
+                        except RuntimeError:
+                            # A durable exit record is still evidence; an observation
+                            # failure alone must never be treated as a dead worker.
+                            logger.warning("SDK worker liveness unavailable [task=%s]", task.id)
+                        else:
+                            if alive:
+                                worker_dead_since = None
+                                is_done = False  # A live worker wins over stale exit data.
+                            elif task.id not in self._sdk_launching:
+                                # The shell publishes .exit after the worker exits.
+                                # Allow that atomic publication before inferring a crash.
+                                now = asyncio.get_running_loop().time()
+                                if worker_dead_since is None:
+                                    worker_dead_since = now
+                                is_done = is_done or now - worker_dead_since >= 3
+
                 if is_done:
+                    if task.execution_backend == "sdk":
+                        await self._drain_sdk_task(task)
+                    # A probe can suspend while the worker publishes its final
+                    # bytes. Drain once more after observing its termination.
+                    if task.execution_backend == "sdk" and host_log.exists():
+                        async with aiofiles.open(host_log, mode="rb") as hf:
+                            await hf.seek(last_size)
+                            remaining = await hf.read()
+                        last_size += len(remaining)
+                        pending += remaining
                     # 容器已退出：不管 pending 里还有没有换行符都强制落盘，
                     # 否则最后一行不以换行结尾的输出会永远留在内存里、从不落盘。
-                    await _write_chunk(pending)
-                    pending = b""
+                    tail, pending = pending, b""
+                    await _write_chunk(tail)
                     break
 
         rc = -1
@@ -2718,23 +2864,34 @@ class Scheduler:
             except (ValueError, OSError):
                 rc = -1
 
+        if task.execution_backend == "sdk" and conversation:
+            conversation = self.get_conversation(conversation.id)
+
         if rc == 0:
             if conversation:
                 if not conversation.native_session_id and captured_session_id:
                     self.update_conversation_native_session(conversation.id, captured_session_id, task.id)
                 else:
                     conversation.touch(self.conversations_dir, last_task_id=task.id)
-            task.update_status(TaskStatus.done, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                task = self._finish_sdk_task(task, TaskStatus.done)
+            else:
+                task.update_status(TaskStatus.done, self.tasks_dir)
             self._sync_board_card_for_task(task)
             await self._append_usage_status(log_path, acc, container_name)
-            self._append_log_footer(log_path, "done")
+            self._append_log_footer(log_path, task.status.value if task.execution_backend == "sdk" else "done")
         else:
             if conversation:
                 conversation.touch(self.conversations_dir, last_task_id=task.id)
-            task.update_status(TaskStatus.failed, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                target = TaskStatus.killed if rc in (-2, -15, 130, 143) else TaskStatus.failed
+                task = self._finish_sdk_task(task, target)
+            else:
+                task.update_status(TaskStatus.failed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             await self._append_usage_status(log_path, acc, container_name)
-            self._append_log_footer(log_path, f"failed (exit={rc})")
+            label = task.status.value if task.execution_backend == "sdk" else "failed"
+            self._append_log_footer(log_path, f"{label} (exit={rc})")
 
         self._extract_and_save_token_usage(task, log_path)
         retried = await self._maybe_auto_retry(task, log_path) if rc != 0 else None
@@ -2979,7 +3136,13 @@ class Scheduler:
             f"coderfleet-eph-session-{conversation.id}" if keep_container and conversation
             else f"coderfleet-ephemeral-{task.id}"
         )
-        proc: Optional[asyncio.subprocess.Process] = None
+        proc: Optional[Process] = None
+
+        if task.execution_backend == "sdk":
+            self._sdk_launching.add(task.id)
+            current = self.get_task(task.id) or task
+            current.ephemeral_container_name = task.ephemeral_container_name = container_name
+            current.save(self.tasks_dir)
 
         try:
             gate_rejection = (
@@ -3000,17 +3163,20 @@ class Scheduler:
 
             conversation = self._conversation_for_launch(conversation)
             pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
-            inner_cmd = spec.build_inner_cmd(
-                self._expand_skill_command(task.prompt, acc.name), auto, task.id,
-                shlex.quote(Scheduler.task_process_marker(task.id)),
-                shlex.quote(task.id),
-                (pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
-                list(images),
-                getattr(task, "model", ""),
-                local_sandboxed,
-                **({"fork_session_id": pending_fork.target_session_id,
-                    "resume_session_at": pending_fork.message_uuid} if pending_fork else {}),
-            )
+            if task.execution_backend == "sdk":
+                inner_cmd = ""
+            else:
+                inner_cmd = spec.build_inner_cmd(
+                    self._expand_skill_command(task.prompt, acc.name), auto, task.id,
+                    shlex.quote(Scheduler.task_process_marker(task.id)),
+                    shlex.quote(task.id),
+                    (pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
+                    list(images),
+                    getattr(task, "model", ""),
+                    local_sandboxed,
+                    **({"fork_session_id": pending_fork.target_session_id,
+                        "resume_session_at": pending_fork.message_uuid} if pending_fork else {}),
+                )
 
             auth_src = self.workspace_dir / "accounts" / acc.name
             auth_dst = spec.auth_dir
@@ -3020,6 +3186,12 @@ class Scheduler:
             # local 账号没有容器，mounts 对 LocalRuntime 是死字段，但留着构建不影响正确性
             # （只是没人读），不必为它单独分叉。
             env: dict[str, str] = {}
+            if task.execution_backend == "sdk" and is_local:
+                # LocalRuntime merges the service environment. Credentials must
+                # come from this account/project/Task, never another login.
+                env.update({key: "" for key in (
+                    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                )})
             mounts: list[tuple[str, str]] = [(str(auth_src), str(auth_dst))]
 
             if session_dir is not None:
@@ -3103,6 +3275,15 @@ class Scheduler:
             # Task-level secrets (highest priority, override everything)
             env.update(task_secrets or {})
 
+            if task.execution_backend == "sdk":
+                root = host_workspace if is_local else "/workspace"
+                inner_cmd = self._prepare_sdk_launch(
+                    task, acc, Path(host_workspace), root, root, conversation,
+                    self._expand_skill_command(task.prompt, acc.name), list(images),
+                )
+                diagnostic = str(Path(root) / ".coderfleet-tasks" / f"{task.id}.sdk-diagnostic.log")
+                inner_cmd = f"{inner_cmd} 2>> {shlex.quote(diagnostic)}"
+
             # Wrap inner_cmd in explicit subshell so exec -a replaces the subshell,
             # not the outer bash (which must stay alive to propagate the exit code).
             # Use bash -c (not -lc) and set PATH explicitly to avoid login-profile issues.
@@ -3116,7 +3297,10 @@ class Scheduler:
                     "export PATH=/home/byclaw/.local/bin:/usr/local/bin"
                     ":/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH && "
                 )
-            wrapped_cmd = path_prefix + f"( {inner_cmd} )"
+            if task.execution_backend == "sdk":
+                wrapped_cmd = path_prefix + inner_cmd
+            else:
+                wrapped_cmd = path_prefix + f"( {inner_cmd} )"
 
             if keep_container:
                 if not self._docker_container_running(container_name):
@@ -3190,9 +3374,19 @@ class Scheduler:
                     remove=True,
                 ))
 
-            task.pid = str(proc.pid)
-            task.ephemeral_container_name = container_name
-            task.save(self.tasks_dir)
+            if task.execution_backend == "sdk":
+                current = self.get_task(task.id) or task
+                current.pid = task.pid = str(proc.pid)
+                current.ephemeral_container_name = task.ephemeral_container_name = container_name
+                current.save(self.tasks_dir)
+                if current.status == TaskStatus.killed:
+                    raise asyncio.CancelledError()
+            else:
+                task.pid = str(proc.pid)
+                task.ephemeral_container_name = container_name
+                task.save(self.tasks_dir)
+
+            self._sdk_launching.discard(task.id)
 
             captured_session_id = ""
             session_scan_buffer = ""
@@ -3200,21 +3394,42 @@ class Scheduler:
             import aiofiles
             async with aiofiles.open(log_path, mode="a", encoding="utf-8") as f:
                 while proc.stdout is not None:
-                    raw_chunk = await proc.stdout.read(8192)
+                    if task.execution_backend == "sdk":
+                        try:
+                            raw_chunk = await asyncio.wait_for(proc.stdout.read(8192), timeout=3)
+                        except asyncio.TimeoutError:
+                            try:
+                                worker_alive = await self._control_sdk_task(task, "probe_worker")
+                            except RuntimeError:
+                                logger.warning("SDK worker liveness unavailable [task=%s]", task.id)
+                                continue
+                            if not worker_alive:
+                                await self._drain_sdk_task(task)
+                            continue
+                    else:
+                        raw_chunk = await proc.stdout.read(8192)
                     if not raw_chunk:
                         break
                     text = decoder.decode(raw_chunk)
                     if text:
                         await f.write(text)
                         await f.flush()
+                        if task.execution_backend == "sdk":
+                            self._record_sdk_progress(task, session_scan_buffer + text)
                         if not captured_session_id:
                             session_scan_buffer = (session_scan_buffer + text)[-65536:]
                             captured_session_id = self.extract_native_session_id(
                                 acc.type, session_scan_buffer
                             )
                             if captured_session_id:
+                                current = self.get_task(task.id) or task
+                                current.native_session_id = captured_session_id
+                                current.save(self.tasks_dir)
                                 task.native_session_id = captured_session_id
-                                task.save(self.tasks_dir)
+                                task.sdk_version = current.sdk_version
+                                task.cli_version = current.cli_version
+                                task.status = current.status
+                                task.finished = current.finished
                                 if conversation:
                                     self.update_conversation_native_session(
                                         conversation.id, captured_session_id, task.id
@@ -3226,6 +3441,15 @@ class Scheduler:
 
             await proc.wait()
             rc = proc.returncode if proc.returncode is not None else -1
+
+            if task.execution_backend == "sdk":
+                await self._drain_sdk_task(task)
+                task = self.get_task(task.id) or task
+                if task.status == TaskStatus.killed:
+                    self._append_log_footer(log_path, "killed")
+                    return
+                if conversation:
+                    conversation = self.get_conversation(conversation.id)
 
             if rc == 0:
                 if conversation:
@@ -3243,15 +3467,23 @@ class Scheduler:
                         if retention == "keep_until_ttl":
                             conversation.ephemeral_expires_at = self._ephemeral_expires_at(ttl_minutes)
                         conversation.save(self.conversations_dir)
-                task.update_status(TaskStatus.done, self.tasks_dir)
+                if task.execution_backend == "sdk":
+                    task = self._finish_sdk_task(task, TaskStatus.done)
+                else:
+                    task.update_status(TaskStatus.done, self.tasks_dir)
                 self._sync_board_card_for_task(task)
                 self._append_log_footer(log_path, "done")
             else:
                 if conversation:
                     conversation.touch(self.conversations_dir, last_task_id=task.id)
-                task.update_status(TaskStatus.failed, self.tasks_dir)
+                if task.execution_backend == "sdk":
+                    target = TaskStatus.killed if rc in (-2, -15, 130, 143) else TaskStatus.failed
+                    task = self._finish_sdk_task(task, target)
+                else:
+                    task.update_status(TaskStatus.failed, self.tasks_dir)
                 self._sync_board_card_for_task(task)
-                self._append_log_footer(log_path, f"failed (exit={rc})")
+                label = task.status.value if task.execution_backend == "sdk" else "failed"
+                self._append_log_footer(log_path, f"{label} (exit={rc})")
 
             self._extract_and_save_token_usage(task, log_path)
             retried = await self._maybe_auto_retry(task, log_path) if rc != 0 else None
@@ -3259,7 +3491,27 @@ class Scheduler:
                 asyncio.create_task(self._notify(task))
 
         except asyncio.CancelledError:
-            if proc is not None:
+            self._sdk_launching.discard(task.id)
+            if task.execution_backend == "sdk":
+                current = self.get_task(task.id) or task
+                if current.status not in (TaskStatus.killed, TaskStatus.done, TaskStatus.failed):
+                    try:
+                        await self._drain_sdk_task(current)
+                    except RuntimeError as error:
+                        self._append_log_footer(log_path, f"SDK cleanup could not be verified: {error}")
+                        return
+                if is_local:
+                    await self._local_runtime.remove(container_name)
+                elif not keep_container:
+                    await self.runtime.remove(container_name)
+                if proc is not None and hasattr(proc, "wait"):
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2)
+                    except (asyncio.TimeoutError, ProcessLookupError):
+                        logger.warning("SDK launcher cleanup timed out [task=%s]", task.id)
+                target = TaskStatus.killed if current.status == TaskStatus.killed else TaskStatus.failed
+                task = self._finish_sdk_task(task, target)
+            elif proc is not None:
                 if keep_container:
                     subprocess.run(
                         ["docker", "exec", container_name, "pkill", "-f", task.id],
@@ -3270,12 +3522,22 @@ class Scheduler:
                         ["docker", "rm", "-f", container_name],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
-            task.update_status(TaskStatus.killed, self.tasks_dir)
+            if task.execution_backend != "sdk":
+                task.update_status(TaskStatus.killed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             self._append_log_footer(log_path, "killed")
             asyncio.create_task(self._notify(task))
         except Exception as e:
-            task.update_status(TaskStatus.failed, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                if proc is not None:
+                    try:
+                        await self._drain_sdk_task(task)
+                    except RuntimeError:
+                        logger.exception("SDK task failed; worker exit is unverified [task=%s]", task.id)
+                        return
+                task = self._finish_sdk_task(task, TaskStatus.failed)
+            else:
+                task.update_status(TaskStatus.failed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             try:
                 with log_path.open("a", encoding="utf-8") as f:
@@ -3285,6 +3547,7 @@ class Scheduler:
             self._append_log_footer(log_path, f"failed: {e}")
             asyncio.create_task(self._notify(task))
         finally:
+            self._sdk_launching.discard(task.id)
             self._running.pop(task.id, None)
             asyncio.create_task(self.schedule_next_tasks())
 
@@ -3349,6 +3612,79 @@ class Scheduler:
         fresh.git_diff_removed = diff_removed
         fresh.save(self.tasks_dir)
 
+    @staticmethod
+    def _write_sdk_artifact(path: Path, content: bytes, *, private: bool = False) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(content)
+            temporary.chmod(0o600 if private else 0o644)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _prepare_sdk_launch(
+        self, task: Task, acc: Account, project_root: Path, execution_root: str,
+        cwd: str, conversation: Optional[Conversation], prompt: str,
+        images: list[str],
+    ) -> str:
+        from coderfleet.claude_sdk import build_worker_command, worker_source
+        from coderfleet.account_type_registry import _CF_SEND_SYSTEM_HINT, claude_mcp_options
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task.id):
+            raise ValueError("无效的 SDK Task 标识")
+        source = worker_source()
+        filename = f"sdk-worker-{hashlib.sha256(source).hexdigest()[:16]}.py"
+        artifact_dir = project_root / ".coderfleet-tasks"
+        runtime_dir = Path(execution_root) / ".coderfleet-tasks"
+        self._write_sdk_artifact(artifact_dir / filename, source)
+        pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
+        request = {
+            "task_id": task.id, "prompt": prompt, "cwd": cwd,
+            "model": task.model, "auto": task.auto, "images": images,
+            "session_id": (pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
+            "fork_session_id": pending_fork.target_session_id if pending_fork else "",
+            "resume_session_at": pending_fork.message_uuid if pending_fork else "",
+            "append_system_prompt": _CF_SEND_SYSTEM_HINT,
+            "mcp_options": claude_mcp_options(allow_ask_user=not task.auto),
+            "diagnostic_path": str(runtime_dir / f"{task.id}.sdk-diagnostic.log"),
+            "state_path": str(runtime_dir / f"{task.id}.sdk-state.json"),
+        }
+        self._write_sdk_artifact(
+            artifact_dir / f"{task.id}.sdk.json",
+            json.dumps(request, ensure_ascii=False).encode("utf-8"),
+            private=acc.runtime == AccountRuntime.local,
+        )
+        command = build_worker_command(
+            runtime_dir / f"{task.id}.sdk.json", runtime_dir / filename,
+            self.task_process_marker(task.id), local=acc.runtime == AccountRuntime.local,
+        )
+        return f"export CODERFLEET_TASK_ID={shlex.quote(task.id)}; {command}"
+
+    def _record_sdk_progress(
+        self, task: Task, text: str, *, source_offset: Optional[int] = None,
+        log_size: Optional[int] = None,
+    ) -> None:
+        from coderfleet.claude_sdk import extract_sdk_metadata
+        metadata = extract_sdk_metadata(text, task_id=task.id)
+        current = self.get_task(task.id)
+        if current is None:
+            return
+        for name, value in metadata.items():
+            setattr(current, name, value)
+            setattr(task, name, value)
+        if source_offset is not None:
+            current.sdk_source_offset = task.sdk_source_offset = source_offset
+        if log_size is not None:
+            current.sdk_log_size = task.sdk_log_size = log_size
+        current.save(self.tasks_dir)
+
+    def _finish_sdk_task(self, task: Task, status: TaskStatus) -> Task:
+        current = self.get_task(task.id) or task
+        if current.status not in (TaskStatus.done, TaskStatus.failed, TaskStatus.killed):
+            current.update_status(status, self.tasks_dir)
+        return current
+
     async def _run(
         self,
         task: Task,
@@ -3361,6 +3697,8 @@ class Scheduler:
         images: list[str] = [],
     ) -> None:
         """后台协程：以 detached 方式启动容器任务，再轮询宿主机日志文件跟踪进度。"""
+        detached = False
+        launch_attempted = False
         try:
             if container_name and container_workdir:
                 git_branch, git_worktree, diff_added, diff_removed = await self._probe_git_context(
@@ -3375,20 +3713,35 @@ class Scheduler:
                     task.git_diff_added = diff_added
                     task.git_diff_removed = diff_removed
 
+            if task.execution_backend == "sdk":
+                current = self.get_task(task.id)
+                if current is None or current.status != TaskStatus.running:
+                    return
+
             cli_prompt = self._expand_skill_command(task.prompt, acc.name)
             conversation = self._conversation_for_launch(conversation)
             pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
-            cmd = self.build_cli_command(
-                acc.type,
-                cli_prompt,
-                auto,
-                task.id,
-                native_session_id=(pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
-                container_workdir=container_workdir,
-                images=images,
-                model=getattr(task, "model", ""),
-                fork=pending_fork,
-            )
+            if task.execution_backend == "sdk":
+                project_root = self._get_project_root(task)
+                if project_root is None:
+                    raise RuntimeError("找不到 SDK Task 对应的项目根目录")
+                inner = self._prepare_sdk_launch(
+                    task, acc, project_root, "/workspace", container_workdir or "/workspace",
+                    conversation, cli_prompt, images,
+                )
+                diagnostic = shlex.quote(f"/workspace/.coderfleet-tasks/{task.id}.sdk-diagnostic.log")
+                target_log = shlex.quote(f"/workspace/.coderfleet-tasks/{task.id}.log")
+                target_exit = shlex.quote(f"/workspace/.coderfleet-tasks/{task.id}.exit")
+                body = f"( {inner} ) >> {target_log} 2>> {diagnostic}; cf_sdk_rc=$?; echo $cf_sdk_rc > {target_exit}.tmp; mv {target_exit}.tmp {target_exit}"
+                cmd = f"mkdir -p /workspace/.coderfleet-tasks && setsid bash -c {shlex.quote(body)} &"
+                self._record_sdk_progress(task, "", log_size=log_path.stat().st_size)
+            else:
+                cmd = self.build_cli_command(
+                    acc.type, cli_prompt, auto, task.id,
+                    native_session_id=(pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
+                    container_workdir=container_workdir, images=images,
+                    model=getattr(task, "model", ""), fork=pending_fork,
+                )
 
             project_env = {}
             if task.project_name:
@@ -3397,10 +3750,16 @@ class Scheduler:
                 except Exception:
                     pass
 
-            proc = await self.runtime.exec(
-                container_name, ["bash", "-c", cmd], env=project_env,
-            )
-            await proc.wait()
+            if task.execution_backend == "sdk":
+                self._sdk_launching.add(task.id)
+                launch_attempted = True
+            try:
+                proc = await self.runtime.exec(
+                    container_name, ["bash", "-c", cmd], env=project_env,
+                )
+                await proc.wait()
+            finally:
+                self._sdk_launching.discard(task.id)
 
             if proc.returncode != 0:
                 err = (await proc.stdout.read()).decode("utf-8", errors="replace") if proc.stdout else ""
@@ -3418,14 +3777,31 @@ class Scheduler:
             )
 
         except asyncio.CancelledError:
+            current = self.get_task(task.id)
+            if task.execution_backend == "sdk" and current and current.status == TaskStatus.running:
+                detached = True  # Server shutdown detaches the watcher; explicit kill marks killed first.
+                return
             self.kill_task_process(task)
-            task.update_status(TaskStatus.killed, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                task = self._finish_sdk_task(task, TaskStatus.killed)
+            else:
+                task.update_status(TaskStatus.killed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             self._append_log_footer(log_path, "killed")
             asyncio.create_task(self._notify(task))
             return
         except Exception as e:
-            task.update_status(TaskStatus.failed, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                if launch_attempted:
+                    try:
+                        await self._drain_sdk_task(task)
+                    except RuntimeError:
+                        detached = True
+                        logger.exception("SDK watcher failed; worker exit is unverified [task=%s]", task.id)
+                        return
+                task = self._finish_sdk_task(task, TaskStatus.failed)
+            else:
+                task.update_status(TaskStatus.failed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             await self._append_usage_status(log_path, acc, container_name)
             self._append_log_footer(log_path, f"failed: {e}")
@@ -3433,8 +3809,9 @@ class Scheduler:
             return
         finally:
             self._running.pop(task.id, None)
-            self._cleanup_container_task_files(task)
-            asyncio.create_task(self.schedule_next_tasks())
+            if not detached:
+                self._cleanup_container_task_files(task)
+                asyncio.create_task(self.schedule_next_tasks())
 
     async def _reattach(self, task: Task) -> None:
         """重新 attach 到一个在 Python 重启后仍存活的容器进程，继续跟踪其日志。"""
@@ -3457,31 +3834,56 @@ class Scheduler:
         host_log  = self._host_task_log(project_root, task.id)
         host_exit = self._host_task_exit(project_root, task.id)
         conversation = self.get_conversation(task.conversation_id) if task.conversation_id else None
-        start_offset = host_log.stat().st_size if host_log.exists() else 0
+        detached = False
+        if task.execution_backend == "sdk":
+            start_offset = task.sdk_source_offset
+            if task.sdk_log_size and log_path.exists():
+                with log_path.open("r+b") as destination:
+                    destination.truncate(task.sdk_log_size)
+        else:
+            start_offset = host_log.stat().st_size if host_log.exists() else 0
 
         try:
-            self._append_log_footer(log_path, "reattached after server restart")
+            if task.execution_backend != "sdk":
+                self._append_log_footer(log_path, "reattached after server restart")
             await self._stream_container_log(
                 task, acc, log_path, host_log, host_exit, conversation,
                 start_offset=start_offset,
             )
         except asyncio.CancelledError:
+            current = self.get_task(task.id)
+            if task.execution_backend == "sdk" and current and current.status == TaskStatus.running:
+                detached = True
+                return
             self.kill_task_process(task)
-            task.update_status(TaskStatus.killed, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                task = self._finish_sdk_task(task, TaskStatus.killed)
+            else:
+                task.update_status(TaskStatus.killed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             self._append_log_footer(log_path, "killed")
             asyncio.create_task(self._notify(task))
             return
         except Exception as e:
-            task.update_status(TaskStatus.failed, self.tasks_dir)
+            if task.execution_backend == "sdk":
+                try:
+                    await self._drain_sdk_task(task)
+                except RuntimeError:
+                    detached = True
+                    logger.exception("SDK reattachment failed; worker exit is unverified [task=%s]", task.id)
+                    return
+                task = self._finish_sdk_task(task, TaskStatus.failed)
+            else:
+                task.update_status(TaskStatus.failed, self.tasks_dir)
             self._sync_board_card_for_task(task)
             self._append_log_footer(log_path, f"failed during reattach: {e}")
             asyncio.create_task(self._notify(task))
             return
         finally:
             self._running.pop(task.id, None)
-            self._cleanup_container_task_files(task)
-            asyncio.create_task(self.schedule_next_tasks())
+            if not detached:
+                self._cleanup_container_task_files(task)
+                asyncio.create_task(self.schedule_next_tasks())
 
     async def _append_usage_status(self, log_path: Path, acc: Account, container_name: str) -> None:
         cmd = self.build_usage_status_command(acc.type)
@@ -3522,10 +3924,14 @@ class Scheduler:
             log_text = log_path.read_text(encoding="utf-8", errors="ignore")
             data = parse_log(log_text, task.type.value)
             if data.tokens_input or data.tokens_output or data.cost_usd:
+                current = (self.get_task(task.id) or task) if task.execution_backend == "sdk" else task
+                current.tokens_input = data.tokens_input
+                current.tokens_output = data.tokens_output
+                current.cost_usd = data.cost_usd
+                current.save(self.tasks_dir)
                 task.tokens_input  = data.tokens_input
                 task.tokens_output = data.tokens_output
                 task.cost_usd      = data.cost_usd
-                task.save(self.tasks_dir)
         except Exception:
             pass
 
@@ -3602,6 +4008,8 @@ class Scheduler:
         return result.returncode == 0
 
     def kill_task_process(self, task: Task) -> None:
+        if task.execution_backend == "sdk":
+            return  # SDK shutdown uses the owning runtime and its exact worker state.
         container = self._get_task_container(task)
         if container is None:
             return
@@ -3620,6 +4028,60 @@ class Scheduler:
             check=False,
         )
 
+    async def _control_sdk_task(self, task: Task, action: Literal["probe", "probe_worker", "term", "kill"] = "probe") -> bool:
+        from coderfleet.server.sdk_process import control_sdk_process
+        account = next((item for item in self.get_accounts() if item.name == task.account), None)
+        local = (task.execution_runtime == "local" if task.execution_runtime else
+                 bool(account and account.runtime == AccountRuntime.local))
+        root = Path("/workspace")
+        if local:
+            root = (self.sessions_dir / f"task-{task.id}" if task.project == "ephemeral"
+                    else Path(task.project))
+        container = "" if local else (task.ephemeral_container_name or self._get_task_container(task) or "")
+        return await control_sdk_process(
+            self._local_runtime if local else self.runtime,
+            container=container, state_path=str(root / ".coderfleet-tasks" / f"{task.id}.sdk-state.json"),
+            task_id=task.id, action=action, local=local,
+            known_pid=int(task.pid or "0") if local else 0,
+        )
+
+    async def _drain_sdk_task(self, task: Task) -> None:
+        """Do not release a Conversation until the worker has verifiably exited."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 4
+
+        async def observe(action: Literal["probe", "term", "kill"]) -> bool:
+            try:
+                return await self._control_sdk_task(task, action)
+            except RuntimeError:
+                # A container exiting can kill its own in-flight observer. A
+                # fresh observation must prove absence; the error itself cannot.
+                await asyncio.sleep(0.05)
+                return await self._control_sdk_task(task, action)
+
+        while True:
+            try:
+                alive = await observe("term")
+                break
+            except RuntimeError:
+                if task.id not in self._sdk_launching or loop.time() >= deadline:
+                    raise
+                await asyncio.sleep(0.05)
+        while (alive or task.id in self._sdk_launching) and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+            alive = await observe("term" if task.id in self._sdk_launching else "probe")
+        if task.id in self._sdk_launching:
+            raise RuntimeError("SDK 启动尚未确认，无法确认停止；任务不会被自动重放")
+        if alive:
+            alive = await observe("kill")
+            for _ in range(3):
+                if not alive:
+                    break
+                await asyncio.sleep(0.1)
+                alive = await observe("probe")
+        if alive:
+            raise RuntimeError("SDK worker 尚未退出；任务继续占用会话以防止重复执行")
+
     async def reconcile_running_tasks(self) -> int:
         """
         服务启动时调用：对状态仍为 running 的任务做恢复处理。
@@ -3629,6 +4091,29 @@ class Scheduler:
         reconciled = 0
         for task in Task.load_all(self.tasks_dir):
             if task.status != TaskStatus.running:
+                continue
+
+            if task.execution_backend == "sdk":
+                acc = next((account for account in self.get_accounts() if account.name == task.account), None)
+                local = (task.execution_runtime == "local" if task.execution_runtime else
+                         bool(acc and acc.runtime == AccountRuntime.local))
+                if not local and not task.ephemeral:
+                    bg = asyncio.create_task(self._reattach(task), name=f"task-{task.id}")
+                    self._running[task.id] = bg
+                else:
+                    # These paths have no durable stdout attachment. Never replay them.
+                    try:
+                        await self._drain_sdk_task(task)
+                    except RuntimeError:
+                        logger.exception("SDK recovery could not verify worker exit; Task remains running [task=%s]", task.id)
+                        continue
+                    if local:
+                        await self._local_runtime.remove(task.ephemeral_container_name)
+                    elif task.ephemeral_container_name:
+                        await self.runtime.remove(task.ephemeral_container_name)
+                    task = self._finish_sdk_task(task, TaskStatus.failed)
+                    self._append_log_footer(self.get_log_path(task.id), "failed: server restarted; SDK output cannot be reattached for this runtime")
+                reconciled += 1
                 continue
 
             if self.is_task_process_alive(task):
@@ -3686,11 +4171,29 @@ class Scheduler:
             asyncio.create_task(self.schedule_next_tasks())
             return task
 
+        if task.execution_backend == "sdk":
+            await self._drain_sdk_task(task)
+            current = self.get_task(task_id) or task
+            if current.status in (TaskStatus.done, TaskStatus.failed, TaskStatus.killed):
+                await self._notify(current)
+                return current
+            task = self._finish_sdk_task(task, TaskStatus.killed)
+            bg = self._running.get(task_id)
+            if bg and not bg.done():
+                bg.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(bg), timeout=3)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            else:
+                self._append_log_footer(self.get_log_path(task_id), task.status.value)
+            await self._notify(task)
+            asyncio.create_task(self.schedule_next_tasks())
+            return self.get_task(task_id) or task
+
         # 先更新状态防止并发写入
         task.update_status(TaskStatus.killed, self.tasks_dir)
         self._sync_board_card_for_task(task)
-
-        # 取消后台协程
         self.kill_task_process(task)
         bg = self._running.pop(task_id, None)
         if bg and not bg.done():

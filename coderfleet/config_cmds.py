@@ -3,12 +3,15 @@ config_cmds.py — coderfleet account / project 子命令
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import click
+import httpx
 
 from coderfleet.config import container_timezone, ensure_bind_mount_dir, ensure_workspace, load_config, parse_conf, remove_conf_entry, set_config, update_conf_field, write_conf_line
 from coderfleet.account_type_registry import ACCOUNT_TYPES, duplicate_account_types, env_auth_type_ids
@@ -68,6 +71,66 @@ def account_group() -> None:
     pass
 
 
+@account_group.command("backend")
+@click.argument("name")
+@click.argument("backend", required=False, type=click.Choice(["cli", "sdk"]))
+def cmd_account_backend(name: str, backend: Optional[str]) -> None:
+    """查看或更新 Claude 账号后端；只影响之后提交的任务。"""
+    from coderfleet.task_cmds import _http_error_detail, _require_server
+
+    api = _require_server()
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(f"{api}/api/accounts")
+            if response.status_code != 200:
+                raise click.ClickException(f"查询失败：{_http_error_detail(response)}")
+            account = next((item for item in response.json() if item["name"] == name), None)
+            if account is None:
+                raise click.ClickException(f"账号 '{name}' 不存在")
+            if account["type"] != "claude":
+                raise click.ClickException("执行后端设置仅适用于 Claude 账号")
+            if backend is None:
+                click.echo(f"{name}: {account.get('claude_backend', 'cli')}")
+                return
+            response = client.put(
+                f"{api}/api/accounts/{quote(name, safe='')}", json={"claude_backend": backend},
+            )
+            if response.status_code != 200:
+                raise click.ClickException(f"保存失败：{_http_error_detail(response)}")
+    except httpx.RequestError as err:
+        raise click.ClickException(f"请求失败：{err}") from err
+    click.echo(f"{name}: {backend}（只影响之后提交的任务）")
+
+
+@account_group.command("sdk-status")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True, help="输出结构化诊断结果")
+def cmd_account_sdk_status(name: str, as_json: bool) -> None:
+    """检查 Claude 账号的 SDK 环境，不调用模型。"""
+    from coderfleet.task_cmds import _http_error_detail, _require_server
+
+    api = _require_server()
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.get(f"{api}/api/accounts/{quote(name, safe='')}/claude-sdk-status")
+        if response.status_code != 200:
+            raise click.ClickException(f"检查失败：{_http_error_detail(response)}")
+    except httpx.RequestError as err:
+        raise click.ClickException(f"请求失败：{err}") from err
+    result = response.json()
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False))
+    else:
+        click.echo(f"{name}: {'SDK 已就绪' if result.get('ready') else 'SDK 未就绪'}")
+        for key, label in (("sdk_version", "SDK"), ("cli_version", "CLI"), ("python_path", "Python")):
+            if result.get(key):
+                click.echo(f"  {label}: {result[key]}")
+        if result.get("error"):
+            click.echo(f"  {result['error']}")
+    if not result.get("ready"):
+        raise click.exceptions.Exit(1)
+
+
 @account_group.command("add")
 @click.argument("name")
 @click.argument("typearg", metavar="TYPE=<type>")
@@ -85,6 +148,8 @@ def account_group() -> None:
               help="确认已手工开启该 CLI 自带的 OS 级沙箱（Claude Code: sandbox.enabled + "
                    "failIfUnavailable；Codex: --sandbox）。仅 --runtime local 时有意义，"
                    "不设置的话该账号无法提交 auto 任务。")
+@click.option("--claude-backend", default="cli", type=click.Choice(["cli", "sdk"]),
+              show_default=True, help="Claude 执行后端；只影响之后提交的任务")
 @click.pass_context
 def cmd_account_add(
     ctx: click.Context,
@@ -95,6 +160,7 @@ def cmd_account_add(
     proxy: str,
     runtime: str,
     sandbox_confirmed: bool,
+    claude_backend: str,
 ) -> None:
     """Add a new account. TYPE can be any registered type (run 'account list-types' to see all)."""
     ws: Path = ctx.obj["workspace"]
@@ -125,7 +191,11 @@ def cmd_account_add(
             raise click.ClickException(f"账号 '{name}' 已存在，若要修改请先 remove 再 add")
 
     from coderfleet.account_type_registry import AccountType
-    from coderfleet.server.models import AccountProxy, AccountRuntime, check_account_runtime_proxy_compat
+    from coderfleet.server.models import Account, AccountProxy, AccountRuntime, check_account_runtime_proxy_compat
+    try:
+        Account.model_validate({"name": name, "type": acc_type, "claude_backend": claude_backend})
+    except ValueError as err:
+        raise click.ClickException(str(err)) from err
     rejection = check_account_runtime_proxy_compat(
         AccountType(acc_type), AccountRuntime(runtime), AccountProxy(proxy),
     )
@@ -138,12 +208,15 @@ def cmd_account_add(
     tokens["PROXY"] = proxy
     tokens["RUNTIME"] = runtime
     tokens["SANDBOX_CONFIRMED"] = "true" if sandbox_confirmed else "false"
+    tokens["CLAUDE_BACKEND"] = claude_backend
 
     ensure_workspace(ws)
     write_conf_line(accounts_conf, tokens)
     ensure_bind_mount_dir(ws / "accounts" / name)
 
     click.secho(f"✓ 账号 '{name}' 已添加（类型：{acc_type}，认证：{auth}，代理：{proxy}，执行方式：{runtime}）", fg="green")
+    if acc_type == "claude":
+        click.echo(f"  Claude 后端：{claude_backend}")
     if runtime == "local":
         click.secho(
             "  local 执行方式：不经过 Docker，直接调用宿主机上已安装的 CLI 二进制。"
@@ -246,7 +319,7 @@ def cmd_account_list(ctx: click.Context) -> None:
 
     click.echo()
     click.echo("  ── 账号列表 " + "─" * 58)
-    click.echo(f"  {'名称':<20} {'类型':<8} {'认证':<8} {'代理':<8} {'执行方式':<10}  状态")
+    click.echo(f"  {'名称':<20} {'类型':<8} {'认证':<8} {'代理':<8} {'执行方式':<10} {'Claude 后端':<12} 状态")
     click.echo("  " + "─" * 70)
 
     if not accounts:
@@ -260,6 +333,7 @@ def cmd_account_list(ctx: click.Context) -> None:
         auth = rec.get("AUTH", "login")
         proxy = rec.get("PROXY", "relay")
         runtime = rec.get("RUNTIME", "container")
+        backend = rec.get("CLAUDE_BACKEND", "cli") if acc_type == "claude" else "-"
 
         if runtime == "local":
             status = click.style("● 本地", fg="cyan")
@@ -270,7 +344,7 @@ def cmd_account_list(ctx: click.Context) -> None:
                 if p.get("ACCOUNT") == name
             )
             status = click.style("● 运行中", fg="green") if any_running else click.style("○ 已停止", fg="yellow")
-        click.echo(f"  {name:<20} {acc_type:<8} {auth:<8} {proxy:<8} {runtime:<10}  {status}")
+        click.echo(f"  {name:<20} {acc_type:<8} {auth:<8} {proxy:<8} {runtime:<10} {backend:<12} {status}")
 
     click.echo()
 

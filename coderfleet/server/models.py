@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -163,12 +163,19 @@ class Account(BaseModel):
     env_file: str = ""
     proxy:    AccountProxy = AccountProxy.relay
     runtime:  AccountRuntime = AccountRuntime.container
+    claude_backend: Literal["cli", "sdk"] = "cli"
     # 只对 runtime=local 有意义：用户显式确认已经手工开启该账号对应 CLI 自带的 OS 级沙箱
     # （Claude Code 的 sandbox.enabled+failIfUnavailable / Codex 的 --sandbox）。CoderFleet
     # 不代为解析/修改对方 CLI 的配置文件 —— 这个字段只是"用户声明我已经做了"，由调度器在
     # auto=True 任务提交时校验；没有它，local 账号无法提交 auto 任务（见
     # Scheduler.check_local_sandbox_gate）。
     sandbox_confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_claude_backend(self) -> "Account":
+        if self.claude_backend == "sdk" and self.type.value != "claude":
+            raise ValueError("只有 Claude 账号支持 SDK 执行后端")
+        return self
 
     @classmethod
     def from_conf_record(cls, record: dict[str, str]) -> "Account | None":
@@ -183,6 +190,11 @@ class Account(BaseModel):
             auth = AccountAuth(record.get("AUTH", AccountAuth.login.value))
             proxy = AccountProxy(record.get("PROXY", AccountProxy.relay.value))
             runtime = AccountRuntime(record.get("RUNTIME", AccountRuntime.container.value))
+            claude_backend = record.get("CLAUDE_BACKEND", "cli")
+            if claude_backend not in {"cli", "sdk"}:
+                raise ValueError("无效的 Claude 执行后端")
+            if claude_backend == "sdk" and acc_type.value != "claude":
+                raise ValueError("只有 Claude 账号支持 SDK 执行后端")
         except ValueError:
             return None
         env_file = record.get("ENV_FILE", "")
@@ -194,6 +206,7 @@ class Account(BaseModel):
         return cls(
             name=record["NAME"], type=acc_type, auth=auth, env_file=env_file,
             proxy=proxy, runtime=runtime, sandbox_confirmed=sandbox_confirmed,
+            claude_backend="sdk" if claude_backend == "sdk" else "cli",
         )
 
 
@@ -487,12 +500,19 @@ class Task(BaseModel):
     conversation_id:   str = ""
     native_session_id: str = ""
     pid:      str = ""
-    created:  str = Field(default_factory=now_iso)
+    created:  str = Field(default_factory=lambda: utc_now().isoformat(timespec="microseconds"))
     finished: Optional[str] = None
     archived: bool = False
     auto:     bool = False
     images:   list[str] = Field(default_factory=list)
     model:    str = ""
+    execution_backend: Literal["cli", "sdk"] = "cli"
+    execution_runtime: Literal["", "local", "container"] = ""
+    sdk_version: str = ""
+    cli_version: str = ""
+    sdk_source_offset: int = 0
+    sdk_log_size: int = 0
+    terminal_notified: bool = False
     # 容器内 container_workdir 在任务开始执行时的 git 快照，仅当该目录是 git 仓库时非空。
     # 探测失败（非 git 目录等）不影响任务本身执行，字段留空。
     git_branch:   str = ""
@@ -543,7 +563,7 @@ class Task(BaseModel):
     def update_status(self, status: TaskStatus, tasks_dir: Path) -> None:
         self.status = status
         if status in (TaskStatus.done, TaskStatus.failed, TaskStatus.killed):
-            self.finished = now_iso()
+            self.finished = utc_now().isoformat(timespec="microseconds")
         self.save(tasks_dir)
 
     @property
@@ -631,6 +651,9 @@ class TaskResponse(BaseModel):
     auto:     bool = False
     images:   list[str] = []
     model:    str = ""
+    execution_backend: Literal["cli", "sdk"] = "cli"
+    sdk_version: str = ""
+    cli_version: str = ""
     git_branch:   str = ""
     git_worktree: bool = False
     git_diff_added:   int = 0
@@ -674,6 +697,9 @@ class TaskResponse(BaseModel):
             auto         = getattr(t, "auto", False),
             images       = getattr(t, "images", []),
             model        = getattr(t, "model", ""),
+            execution_backend = getattr(t, "execution_backend", "cli"),
+            sdk_version  = getattr(t, "sdk_version", ""),
+            cli_version  = getattr(t, "cli_version", ""),
             git_branch   = getattr(t, "git_branch", ""),
             git_worktree = getattr(t, "git_worktree", False),
             git_diff_added   = getattr(t, "git_diff_added", 0),
@@ -850,6 +876,7 @@ class AccountResponse(BaseModel):
     env_file:  str = ""
     proxy:     AccountProxy
     runtime:   AccountRuntime = AccountRuntime.container
+    claude_backend: Literal["cli", "sdk"] = "cli"
     projects:  list[str]
     running:   bool         # 容器是否在线
     busy:      bool         # 是否有 running 任务占用

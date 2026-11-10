@@ -16,7 +16,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, List, Optional, Union
+from typing import Any, Callable, List, Optional, TypedDict, Union
 
 
 # ── 函数类型别名 ──────────────────────────────────────────────
@@ -186,6 +186,29 @@ _CF_SEND_SYSTEM_HINT = (
 )
 
 
+class ClaudeMcpOptions(TypedDict):
+    mcp_servers: dict[str, dict[str, Any]]
+    allowed_tools: list[str]
+    disallowed_tools: list[str]
+
+
+def claude_mcp_options(*, allow_ask_user: bool) -> ClaudeMcpOptions:
+    """Shared CLI/SDK bridge configuration; environment expands inside Claude."""
+    ask_tool = "mcp__coderfleet__ask_user_question"
+    continuation_tool = "mcp__coderfleet__schedule_continuation"
+    return {
+        "mcp_servers": {
+            "coderfleet": {
+                "type": "http",
+                "url": "http://${CODERFLEET_RELAY_IP:-127.0.0.1}:${CODERFLEET_MCP_BRIDGE_PORT:-0}/mcp/",
+                "headers": {"X-CoderFleet-Task-Id": "${CODERFLEET_TASK_ID}"},
+            },
+        },
+        "allowed_tools": [ask_tool, continuation_tool] if allow_ask_user else [continuation_tool],
+        "disallowed_tools": [] if allow_ask_user else [ask_tool],
+    }
+
+
 def _claude_mcp_bridge_arg(*, allow_ask_user: bool) -> str:
     """CoderFleet MCP 的配置与工具权限参数。
 
@@ -207,20 +230,11 @@ def _claude_mcp_bridge_arg(*, allow_ask_user: bool) -> str:
     Intervention"这条只是已知限制而不是需要另外报警的失败：调用会失败得很明显，
     不是静默"看起来成功了"。
     """
-    mcp_config = {
-        "mcpServers": {
-            "coderfleet": {
-                "type": "http",
-                "url": "http://${CODERFLEET_RELAY_IP:-127.0.0.1}:${CODERFLEET_MCP_BRIDGE_PORT:-0}/mcp/",
-                "headers": {"X-CoderFleet-Task-Id": "${CODERFLEET_TASK_ID}"},
-            },
-        },
-    }
+    options = claude_mcp_options(allow_ask_user=allow_ask_user)
+    mcp_config = {"mcpServers": options["mcp_servers"]}
     config_json = shlex.quote(json.dumps(mcp_config))
-    ask_tool = "mcp__coderfleet__ask_user_question"
-    continuation_tool = "mcp__coderfleet__schedule_continuation"
-    allowed = f"{ask_tool},{continuation_tool}" if allow_ask_user else continuation_tool
-    denied = "" if allow_ask_user else f" --disallowedTools {ask_tool}"
+    allowed = ",".join(options["allowed_tools"])
+    denied = f" --disallowedTools {','.join(options['disallowed_tools'])}" if options["disallowed_tools"] else ""
     return f" --mcp-config {config_json} --allowedTools {allowed}{denied}"
 
 
