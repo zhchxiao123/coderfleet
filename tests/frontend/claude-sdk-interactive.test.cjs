@@ -56,18 +56,18 @@ test('composer actions reveal receipt checks only while delivery is unconfirmed'
     return {ok:true,json:async()=>({status:'accepted'})};
   });
   const host = new Element();
-  ui.mount(host, {id:'task-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}, {
+  const task = {id:'task-one',status:'running',execution_backend:'sdk',sdk_control_ready:true};
+  const editor = {
     read:()=>({text,hasAttachments:false}), clear:value=>{ if (text === value) text=''; },
-  });
-  const [message, interrupt, receipt, status] = host.children;
-  assert.match(message.className,/sdk-task-btn--message/);
-  assert.match(interrupt.className,/sdk-task-btn--interrupt/);
+  };
+  ui.mount(host, task, editor);
+  const [receipt, status] = host.children;
   assert.equal(receipt.hidden,true);
-  await message.onclick();
+  await ui.perform(host, task, 'message', editor);
   assert.equal(receipt.hidden,false);
   assert.equal(text,'supplement');
   assert.equal(status.dataset.state,'error');
-  await message.onclick();
+  await ui.perform(host, task, 'message', editor);
   assert.equal(receipt.hidden,true);
   assert.equal(text,'');
   assert.match(status.textContent,/已送达当前任务/);

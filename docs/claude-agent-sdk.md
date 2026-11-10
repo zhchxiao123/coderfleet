@@ -2,7 +2,7 @@
 
 Claude Account 可以继续使用 CLI，或显式选择 SDK。默认保持 CLI。`runtime=container|local` 决定运行位置，`claude_backend=cli|sdk` 决定如何驱动 Claude；两者独立。
 
-SDK worker 仍会启动 Claude Code 子进程。一个 Task 对应一次完整运行，Conversation 的后续 Task 继续使用明确的原生 session ID。运行中可以显式补充文字、调用原生 interrupt，或回答原生 AskUserQuestion；普通“发送”仍把后续 Task 排队。
+SDK worker 仍会启动 Claude Code 子进程。一个 Task 对应一次完整运行，Conversation 的后续 Task 继续使用明确的原生 session ID。运行中的 SDK Task 可通过主发送按钮补充文字或原生 interrupt，也可回答原生 AskUserQuestion；勾选“排队发送”则创建后续 Task。
 
 ## 安装与版本
 
@@ -80,7 +80,11 @@ coderfleet account backend <account-name> cli
 
 ## 运行中交互
 
-新 SDK Task 的控制通道就绪后，桌面和移动端提供“补充到当前任务”“中断当前运行”。原生提问复用问题卡片，可单选、多选或自由输入；回答保留原问题结构，并交还原生工具调用。问题最多等待 10 分钟，超时或中断后关闭。持久容器中的等待由 worker 持有，服务重启并重新接管后可继续回答；旧 MCP 提问仍受原进程内 Future 的恢复边界限制。
+新 SDK Task 的控制通道就绪后，桌面和移动端复用主发送按钮：有纯文字时点击“发送”或按 Enter 补充到当前 Task；输入框为空时按钮显示方形图标，点击请求原生中断。勾选“排队发送”、设置定时或附带文件时，仍走后续 Task 的提交路径。补充消息不占等待队列名额，队列满时仍可发送。连接尚未就绪或附件正在上传时，界面明确禁用当前动作，不会静默把插话转为排队。
+
+投递失败保留文字；投递结果未知时保留原请求 ID，并显示查询入口。原 Task 已结束但回执缺失时，主按钮先查询状态，避免将同一段文字自动重放为新 Task。
+
+原生提问复用问题卡片，可单选、多选或自由输入；回答保留原问题结构，并交还原生工具调用。问题最多等待 10 分钟，超时或中断后关闭。持久容器中的等待由 worker 持有，服务重启并重新接管后可继续回答；旧 MCP 提问仍受原进程内 Future 的恢复边界限制。
 
 ```bash
 coderfleet task status <task-id>

@@ -17,7 +17,7 @@
   <link rel="manifest" href="/static/manifest.json">
   <link rel="stylesheet" href="/static/css/renderer.css">
   <link rel="stylesheet" href="/static/css/turn-actions.css?v=__BUILD__">
-  <link rel="stylesheet" href="/static/css/sdk-task-controls.css?v=__BUILD__">
+  <link rel="stylesheet" href="/static/css/sdk-task-controls.css?v=__BUILD__-3">
   <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -823,6 +823,10 @@
         <input type="checkbox" id="auto-mode" checked>
         <span>自动</span>
       </label>
+      <label class="compose-option" id="mobile-queue-wrap" data-sdk-queue hidden title="将消息作为下一轮任务排队">
+        <input type="checkbox" id="mobile-queue-mode" onchange="updateSendState()">
+        <span>排队发送</span>
+      </label>
       <label class="compose-option">
         <input type="checkbox" id="schedule-mode" onchange="toggleScheduleInput(this.checked)">
         <span>定时</span>
@@ -910,7 +914,7 @@
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
 <script src="/static/js/renderer.js?v=__BUILD__"></script>
-<script src="/static/js/sdk-task-controls.js?v=__BUILD__-2"></script>
+<script src="/static/js/sdk-task-controls.js?v=__BUILD__-3"></script>
 
 <script>
 // ── State ────────────────────────────────────────────────
@@ -1443,13 +1447,7 @@ function syncMessages(scrollEnd) {
       ? `task-${t.id}` === activeConv.id
       : t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id))
     .sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0));
-  SDKTaskControls.mount(document.getElementById('sdk-task-controls'), ownTasks.find(t => t.status === 'running') || ownTasks.find(t => SDKTaskControls.hasPending(t.id)), {
-    read: () => ({ text: document.getElementById('ta').value, hasAttachments: pendingImages.length > 0 || uploadingImages > 0 }),
-    clear: text => {
-      const input = document.getElementById('ta');
-      if (input.value === text) { input.value = ''; onInput(input); }
-    },
-  });
+  updateSendState();
   const ct = [...mobileInheritedTasks, ...ownTasks];
 
   if (!ct.length) {
@@ -1614,6 +1612,8 @@ async function streamAiContent(task, wrap) {
 // ── Send ─────────────────────────────────────────────────
 async function send() {
   const ta   = document.getElementById('ta');
+  const btn = document.getElementById('btn-send');
+  if (btn.dataset.busy === '1') return;
   let prompt = ta.value.trim();
   if (!prompt && pendingImages.length === 0) return;
   if (!prompt && pendingImages.length > 0) prompt = '请查看附件图片。';
@@ -1622,7 +1622,14 @@ async function send() {
     return;
   }
 
-  const btn = document.getElementById('btn-send');
+  const task = _mobileComposerTask();
+  const action = SDKTaskControls.primaryAction(task, _mobileSDKEditor().read(), {
+    queued: document.getElementById('mobile-queue-mode')?.checked,
+    scheduled: document.getElementById('schedule-mode')?.checked,
+  });
+  if (['message','check'].includes(action)) { await _performMobileSDKAction(task, action); return; }
+  if (action === 'connecting') return;
+  btn.dataset.busy = '1';
   btn.disabled = true;
   ta.value = '';
   ta.style.height = '';
@@ -1663,6 +1670,8 @@ async function send() {
     const task = await api('/api/tasks', { method:'POST', body });
     tasks.unshift(task);
     pendingImages = [];
+    const queue = document.getElementById('mobile-queue-mode');
+    if (queue) queue.checked = false;
     if (typeof renderImagePreviews === 'function') {
       renderImagePreviews();
     } else {
@@ -1684,6 +1693,9 @@ async function send() {
     syncMessages(true);
   } catch (err) {
     alert('发送失败：' + (err.message || err));
+    if (!ta.value) { ta.value = prompt; onInput(ta); }
+  } finally {
+    btn.dataset.busy = '';
     updateSendState();
   }
 }
@@ -1899,11 +1911,47 @@ function updateUploadState() {
   updateSendState();
 }
 
+function _mobileComposerTask() {
+  if (!activeConv) return undefined;
+  const own = tasks.filter(t => activeConv?.isOneOff ? `task-${t.id}` === activeConv.id :
+    t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id));
+  return own.find(t => SDKTaskControls.hasPending(t.id)) || own.find(t => t.status === 'running');
+}
+
+function _mobileSDKEditor() {
+  const input = document.getElementById('ta');
+  const conversationId = activeConv?.id;
+  return {
+    read: () => ({ text:input?.value || '', hasAttachments:pendingImages.length > 0, uploading:uploadingImages > 0 }),
+    clear: text => {
+      if (activeConv?.id === conversationId && input && input.value === text) { input.value = ''; onInput(input); }
+    },
+  };
+}
+
+async function _performMobileSDKAction(task, action) {
+  const button = document.getElementById('btn-send');
+  if (!button || button.dataset.busy === '1') return;
+  button.dataset.busy = '1'; button.disabled = true;
+  try { await SDKTaskControls.perform(document.getElementById('sdk-task-controls'), task, action, _mobileSDKEditor()); }
+  finally { button.dataset.busy = ''; updateSendState(); }
+}
+
 function updateSendState() {
   const ta = document.getElementById('ta');
   const btn = document.getElementById('btn-send');
   if (!btn || !ta) return;
-  btn.disabled = uploadingImages > 0 || (ta.value.trim() === '' && pendingImages.length === 0);
+  const task = _mobileComposerTask();
+  SDKTaskControls.mount(document.getElementById('sdk-task-controls'), task, _mobileSDKEditor());
+  const queue = document.getElementById('mobile-queue-wrap');
+  if (queue) queue.hidden = !(task?.execution_backend === 'sdk' && (task.status === 'running' || SDKTaskControls.hasPending(task.id)));
+  const action = SDKTaskControls.primaryAction(task, _mobileSDKEditor().read(), {
+    queued: document.getElementById('mobile-queue-mode')?.checked,
+    scheduled: document.getElementById('schedule-mode')?.checked,
+  });
+  SDKTaskControls.renderPrimary(btn, action, { compact:true });
+  btn.onclick = () => ['interrupt','check'].includes(action) ? _performMobileSDKAction(task, action)
+    : action === 'stop' ? killMobileTask(task.id) : send();
 }
 
 function currentUploadProjectName() {

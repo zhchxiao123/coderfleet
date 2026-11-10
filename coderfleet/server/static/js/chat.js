@@ -1204,7 +1204,7 @@ function bindChatTextareaEvents(textarea) {
     _handleChatSlashInput(textarea);
     _handleChatMentionInput(textarea);
     // 任务运行中时，输入框内容的有无决定发送/停止合并按钮的外观
-    if (currentChatTaskId) _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
+    _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
   });
   textarea.addEventListener('click', () => {
     _validateChatSlashCursor(textarea);
@@ -1909,6 +1909,7 @@ function _appendOptimisticUserMessage(promptText, snapshotPaths, taskId, isPendi
 
 // 发送消息及自动升级任务链
 async function sendChatMessage() {
+  if (document.getElementById('chat-send-btn')?.dataset.busy === '1') return;
   const textarea = document.getElementById('chat-input');
   if (!textarea) return;
   let promptText = textarea.value.trim();
@@ -1921,6 +1922,17 @@ async function sendChatMessage() {
     alert('图片还在上传中，请稍后再发送');
     return;
   }
+
+  const sdkTask = _chatComposerTask();
+  const action = SDKTaskControls.primaryAction(sdkTask, _chatSDKEditor().read(), {
+    queued: document.getElementById('chat-queue-mode')?.checked,
+    scheduled: document.getElementById('chat-schedule-checkbox')?.checked,
+  });
+  if (['message', 'check'].includes(action)) {
+    await _performChatSDKAction(sdkTask, action);
+    return;
+  }
+  if (action === 'connecting') return;
 
   // 前端也检查队列是否已满（防止按钮状态不同步的情况）
   if (_isChatQueueFull(activeConversationId)) {
@@ -1987,6 +1999,7 @@ async function sendChatMessage() {
       textarea.value = '';
       textarea.style.height = 'auto';
       pendingImages = [];
+      _resetChatQueueMode();
       renderImagePreviews();
 
       if (schedCheckbox) schedCheckbox.checked = false;
@@ -2074,6 +2087,7 @@ async function sendChatMessage() {
     textarea.value = '';
     textarea.style.height = 'auto';
     pendingImages = [];
+    _resetChatQueueMode();
     renderImagePreviews();
 
     if (schedCheckbox) schedCheckbox.checked = false;
@@ -2198,42 +2212,60 @@ function _setChatSendBusy(sendBtn, label) {
   sendBtn.textContent = label;
 }
 
-// 发送/停止合并为同一个按钮：
-// - 无运行中任务：始终显示"发送"。
-// - 有运行中任务 + 输入框为空：显示加载中的转圈图标，点击即终止当前任务。
-// - 有运行中任务 + 输入框有内容（或有待发送图片）：显示"发送"，点击追加消息进入排队，
-//   而不会误触终止——用户既然在输入，多半是想接着说而非打断当前任务。
-// runningTaskId 由调用方传入（而非在点击时读取可能已被轮询改写的全局变量），避免按钮
-// 可见期间全局状态被其他任务/会话的同步覆盖，导致误终止。
-// isQueueFull 仅在"发送"外观下生效；加载态本质是停止按钮，不受排队上限影响。
+// The shared primary action keeps SDK live input separate from queued Tasks.
+// Empty drafts expose native interrupt; attachments/schedules or an explicit
+// queue choice preserve the Task submission path. Callbacks capture Task identity.
+function _resetChatQueueMode() {
+  const checkbox = document.getElementById('chat-queue-mode');
+  if (checkbox) checkbox.checked = false;
+}
+
+function _chatComposerTask(runningTaskId = currentChatTaskId) {
+  return (tasksCache || []).find(t =>
+    (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId) && SDKTaskControls.hasPending(t.id)) ||
+    (tasksCache || []).find(t => t.id === runningTaskId);
+}
+
+function _chatSDKEditor() {
+  const input = document.getElementById('chat-input');
+  const conversationId = activeConversationId;
+  return {
+    read: () => ({ text: input?.value || '', hasAttachments: pendingImages.length > 0, uploading: chatUploadingImages > 0 }),
+    clear: text => {
+      if (activeConversationId === conversationId && input && input.value === text) {
+        input.value = ''; input.dispatchEvent(new Event('input'));
+      }
+    },
+  };
+}
+
+async function _performChatSDKAction(task, action) {
+  const button = document.getElementById('chat-send-btn');
+  if (!button || button.dataset.busy === '1') return;
+  button.dataset.busy = '1'; button.disabled = true;
+  try { await SDKTaskControls.perform(document.getElementById('sdk-task-controls'), task, action, _chatSDKEditor()); }
+  finally {
+    button.dataset.busy = '';
+    _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
+  }
+}
+
 function _syncChatSendButton(runningTaskId, isQueueFull) {
   const btn = document.getElementById('chat-send-btn');
   if (!btn) return;
   const sdkHost = document.getElementById('sdk-task-controls');
-  const sdkTask = (typeof tasksCache === 'undefined' ? [] : tasksCache).find(t => t.id === runningTaskId) ||
-    (sdkHost ? (tasksCache || []).find(t => (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId) && SDKTaskControls.hasPending(t.id)) : null);
-  if (sdkHost) SDKTaskControls.mount(sdkHost, sdkTask, {
-    read: () => ({ text: document.getElementById('chat-input')?.value || '', hasAttachments: pendingImages.length > 0 || uploadingImages > 0 }),
-    clear: text => {
-      const input = document.getElementById('chat-input');
-      if (input && input.value === text) { input.value = ''; input.dispatchEvent(new Event('input')); }
-    },
-  });
+  const sdkTask = _chatComposerTask(runningTaskId);
+  if (sdkHost) SDKTaskControls.mount(sdkHost, sdkTask, _chatSDKEditor());
+  const queue = document.getElementById('chat-queue-wrap');
+  if (queue) queue.hidden = !(sdkTask?.execution_backend === 'sdk' && (sdkTask.status === 'running' || SDKTaskControls.hasPending(sdkTask.id)));
   if (btn.dataset.busy === '1') return; // 发送请求本身正在进行中（发送中.../建会话.../上传中...），由调用方自行管理文案
-  const hasInput = _hasChatInputContent();
-  if (runningTaskId && !hasInput) {
-    btn.classList.add('chat-send-btn-loading');
-    btn.innerHTML = '<span class="chat-send-spinner"></span>';
-    btn.title = '点击终止当前任务';
-    btn.disabled = false;
-    btn.onclick = () => killChatTask(runningTaskId);
-  } else {
-    btn.classList.remove('chat-send-btn-loading');
-    btn.textContent = '发送';
-    btn.disabled = !!isQueueFull;
-    btn.title = isQueueFull ? '队列已满，请等待执行或删除队列中的任务后再发送' : '';
-    btn.onclick = () => sendChatMessage();
-  }
+  const action = SDKTaskControls.primaryAction(sdkTask, _chatSDKEditor().read(), {
+    queued: document.getElementById('chat-queue-mode')?.checked,
+    scheduled: document.getElementById('chat-schedule-checkbox')?.checked,
+  });
+  SDKTaskControls.renderPrimary(btn, action, { queueFull:isQueueFull });
+  btn.onclick = () => ['interrupt','check'].includes(action) ? _performChatSDKAction(sdkTask, action)
+    : action === 'stop' ? killChatTask(runningTaskId) : sendChatMessage();
 }
 
 async function killChatTask(taskId) {
@@ -2475,6 +2507,9 @@ function buildChatInputHTML(placeholder, hint) {
         <label class="toggle-row" style="cursor: pointer;" title="全自动模式 (--dangerously-skip-permissions)">
           <input type="checkbox" id="chat-auto-mode" checked> 全自动
         </label>
+        <label class="toggle-row" id="chat-queue-wrap" data-sdk-queue hidden title="将消息作为下一轮任务排队">
+          <input type="checkbox" id="chat-queue-mode" onchange="_syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId))"> 排队发送
+        </label>
         <label class="toggle-row" style="cursor: pointer;" title="选择未来时间，定时发送这条指令">
           <input type="checkbox" id="chat-schedule-checkbox" onchange="toggleSchedTimeInput(this.checked)"> 定时 ⏰
         </label>
@@ -2706,7 +2741,7 @@ function renderImagePreviews() {
     getImages: () => pendingImages,
     removeImage: (index) => pendingImages.splice(index, 1),
     clearImages: () => { pendingImages = []; },
-    afterRender: () => { if (currentChatTaskId) _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId)); },
+    afterRender: () => { _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId)); },
     getSseUrl: (u) => sseUrl(u),
     getApi: () => (typeof API !== 'undefined' ? API : ''),
     escFn: (s) => esc(s),

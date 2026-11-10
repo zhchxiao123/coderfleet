@@ -7,6 +7,7 @@
   padding: 4px 0 8px;
 }
 .sdk-task-controls:empty { display: none; }
+.sdk-task-controls[hidden], [data-sdk-queue][hidden] { display: none; }
 .sdk-task-controls .sdk-task-btn {
   appearance: none;
   display: inline-flex;
@@ -36,24 +37,9 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.sdk-task-controls .sdk-task-btn--message {
-  color: var(--text);
-  background: var(--accent-bg);
-  border-color: transparent;
-}
-.sdk-task-controls .sdk-task-btn--message svg { color: var(--accent); }
 .sdk-task-controls .sdk-task-btn:hover:not(:disabled) {
   color: var(--text);
   border-color: var(--border-md);
-}
-.sdk-task-controls .sdk-task-btn--message:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--accent);
-}
-.sdk-task-controls .sdk-task-btn--interrupt:hover:not(:disabled) {
-  color: var(--red);
-  background: var(--red-bg, var(--surface-2));
-  border-color: var(--red);
 }
 .sdk-task-controls .sdk-task-btn:focus-visible {
   outline: 2px solid var(--accent);
