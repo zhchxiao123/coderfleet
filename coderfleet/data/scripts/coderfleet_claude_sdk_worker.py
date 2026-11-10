@@ -12,9 +12,12 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import redirect_stderr, suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import importlib
 import importlib.metadata
+import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -43,6 +46,10 @@ class TaskSpec:
     append_system_prompt: str = ""
     diagnostic_path: str = ""
     state_path: str = ""
+    control_directory: str = ""
+    control_token: str = ""
+    control_module: str = ""
+    question_timeout_seconds: float = 0
     mcp_options: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -53,7 +60,7 @@ class TaskSpec:
         allowed = set(cls.__dataclass_fields__)
         if set(data) - allowed:
             raise ValueError("Task specification contains unsupported fields")
-        for name in allowed - {"images", "auto", "mcp_options"}:
+        for name in allowed - {"images", "auto", "mcp_options", "question_timeout_seconds"}:
             if not isinstance(data.get(name, ""), str):
                 raise ValueError(f"{name} must be a string")
         if not isinstance(data.get("auto", False), bool):
@@ -77,9 +84,17 @@ class TaskSpec:
             raise ValueError("A prompt or attachment is required")
         if data.get("fork_session_id") and not (data.get("session_id") and data.get("resume_session_at")):
             raise ValueError("Forking requires a source session and message checkpoint")
-        for name in ("diagnostic_path", "state_path"):
+        for name in ("diagnostic_path", "state_path", "control_directory", "control_module"):
             if data.get(name) and not Path(data[name]).is_absolute():
                 raise ValueError(f"{name} must be an absolute path")
+        if data.get("control_directory") and (
+            not re.fullmatch(r"[0-9a-f]{64}", data.get("control_token", "")) or not data.get("control_module")
+        ):
+            raise ValueError("Control channel requires a capability and protocol module")
+        timeout = data.get('question_timeout_seconds', 0)
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout)
+                or (data.get('control_directory') and timeout <= 0)):
+            raise ValueError('Control channel requires a positive finite question timeout')
         return cls(**{**data, "images": tuple(images)})
 
 
@@ -239,7 +254,7 @@ def signal_processes(pids: set[int], signum: int) -> None:
 
 async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, errors: ErrorPresentation) -> int:
     # All private SDK imports are isolated here and protected by doctor()'s pin.
-    from claude_agent_sdk import ClaudeAgentOptions, PermissionResultDeny, query
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow, PermissionResultDeny, ResultError
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
     from claude_agent_sdk.types import _configure_can_use_tool
 
@@ -247,11 +262,31 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         diagnostic.write(line + "\n")
         diagnostic.flush()
 
-    async def reject_unapproved(_tool: str, _input: dict[str, Any], _context: Any) -> Any:
-        # Existing settings/allowlists run before this fallback. Background Tasks
-        # have no native approval UI; explicit denial preserves that restriction
-        # (including native AskUserQuestion) while giving the SDK a real control
-        # callback, so it keeps stdin alive for background agents and later turns.
+    questions: dict[str, asyncio.Future[dict[str, str]]] = {}
+
+    async def handle_tool_permission(tool: str, tool_input: dict[str, Any], context: Any) -> Any:
+        if tool == 'AskUserQuestion' and spec.control_directory and not spec.auto:
+            identifier = context.tool_use_id
+            items = tool_input.get('questions')
+            if not isinstance(identifier, str) or not isinstance(items, list) or not items or questions:
+                return PermissionResultDeny(message='Invalid or concurrent native question')
+            future: asyncio.Future[dict[str, str]] = asyncio.get_running_loop().create_future()
+            questions[identifier] = future
+            status = 'cancelled'
+            emit({'type':'system', 'subtype':'coderfleet_question_pending', 'task_id':spec.task_id,
+                  'tool_call_id':identifier, 'questions':items,
+                  'deadline':(datetime.now(timezone.utc) + timedelta(seconds=spec.question_timeout_seconds)).isoformat()})
+            try:
+                answers = await asyncio.wait_for(future, timeout=spec.question_timeout_seconds)
+                status = 'answered'
+                return PermissionResultAllow(updated_input={**tool_input, 'answers':answers})
+            except TimeoutError:
+                status = 'timed_out'
+                return PermissionResultDeny(message='User question timed out; no answer was provided')
+            finally:
+                questions.pop(identifier, None)
+                emit({'type':'system', 'subtype':'coderfleet_question_closed', 'task_id':spec.task_id,
+                      'tool_call_id':identifier, 'status':status})
         return PermissionResultDeny(message="Interactive tool approval is unavailable for this Task; use configured permissions or pre-approved tools.")
 
     options = ClaudeAgentOptions(
@@ -260,22 +295,101 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         setting_sources=["user", "project", "local"],
         permission_mode="bypassPermissions" if spec.auto else "acceptEdits",
         allowed_tools=spec.mcp_options["allowed_tools"],
-        disallowed_tools=spec.mcp_options["disallowed_tools"], mcp_servers=spec.mcp_options["mcp_servers"],
+        disallowed_tools=[name for name in spec.mcp_options['disallowed_tools']
+                          if name != 'AskUserQuestion' or spec.auto or not spec.control_directory],
+        mcp_servers=spec.mcp_options["mcp_servers"],
         resume=spec.session_id or None, fork_session=bool(spec.fork_session_id),
         session_id=spec.fork_session_id or None, resume_session_at=spec.resume_session_at or None,
         max_buffer_size=16 * 1024 * 1024, include_partial_messages=False, stderr=stderr,
-        can_use_tool=reject_unapproved,
+        can_use_tool=handle_tool_permission,
     )
     prompt = spec.prompt
     if spec.images:
         prompt += "\n\n[Attached images:\n" + "\n".join(spec.images) + "]"
     transport = CapturingTransport(SubprocessCLITransport(prompt=prompt, options=_configure_can_use_tool(options)), spec, errors)
+    client = ClaudeSDKClient(options=options, transport=transport)
+    mailbox: Any = None
+    if spec.control_directory:
+        module_spec = importlib.util.spec_from_file_location("_coderfleet_sdk_control", spec.control_module)
+        if module_spec is None or module_spec.loader is None:
+            raise ValueError("SDK control protocol module is unavailable")
+        protocol = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(protocol)
+        mailbox = protocol.ControlMailbox(Path(spec.control_directory), spec.task_id, spec.control_token)
+        mailbox.publish("starting")
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     received_signal = 0
     succeeded = False
     known_children: set[int] = set()
     escalation: asyncio.TimerHandle | None = None
+    consumer: asyncio.Task[None] | None = None
+    controller: asyncio.Task[None] | None = None
+    accepting = False
+    interrupted = False
+    command_lock = asyncio.Lock()
+
+    async def consume() -> None:
+        async for _message in client.receive_messages():
+            pass
+
+    async def control() -> None:
+        nonlocal accepting, interrupted
+        while True:
+            for command in mailbox.pending():
+                async with command_lock:
+                    mailbox.claim(command['id'])
+                    if not accepting:
+                        mailbox.acknowledge(command['id'], error='Task is no longer accepting commands')
+                    elif command['kind'] == 'ping':
+                        mailbox.acknowledge(command['id'], {'connected': True})
+                    elif command['kind'] == 'message':
+                        text = command.get('payload', {}).get('text')
+                        if not isinstance(text, str) or not text.strip():
+                            mailbox.acknowledge(command['id'], error='A non-empty text message is required')
+                        else:
+                            # ClaudeSDKClient.query() in the pinned release does
+                            # not reopen the lifecycle gate as stream_input does.
+                            # Inputs can merge into the current turn, so counting
+                            # one Result per message would leave a finished run open.
+                            engine = client._query
+                            if engine is None:
+                                raise RuntimeError('SDK client disconnected')
+                            engine._reopen_run()
+                            engine._result_received = False
+                            engine._clear_run_end_ceiling()
+                            await client.query(text)
+                            emit({'type':'system', 'subtype':'coderfleet_message_accepted', 'task_id':spec.task_id,
+                                  'request_id':command['id'], 'text':text})
+                            mailbox.acknowledge(command['id'], {'queued_in_sdk': True})
+                    elif command['kind'] == 'interrupt':
+                        await client.interrupt()
+                        interrupted = True
+                        accepting = False
+                        for future in list(questions.values()):
+                            future.cancel()
+                        emit({'type':'system', 'subtype':'coderfleet_interrupted', 'task_id':spec.task_id})
+                        mailbox.acknowledge(command['id'], {'interrupted': True})
+                        mailbox.close()
+                    elif command['kind'] == 'answer':
+                        payload = command.get('payload', {})
+                        waiting = questions.get(payload.get('tool_call_id'))
+                        answers = payload.get('answers')
+                        if waiting is None or waiting.done():
+                            mailbox.acknowledge(command['id'], error='Question is no longer waiting for an answer')
+                        elif not isinstance(answers, dict) or not answers or not all(
+                            isinstance(key, str) and (isinstance(value, str) or (
+                                isinstance(value, list) and all(isinstance(item, str) for item in value)))
+                            for key, value in answers.items()
+                        ):
+                            mailbox.acknowledge(command['id'], error='Answers must contain text or text selections')
+                        else:
+                            waiting.set_result({key: ', '.join(value) if isinstance(value, list) else value
+                                               for key, value in answers.items()})
+                            mailbox.acknowledge(command['id'], {'answered': True})
+                    else:
+                        mailbox.acknowledge(command['id'], error='Unsupported worker command')
+            await asyncio.sleep(0.03)
 
     def force_stop() -> None:
         signal_processes(known_children | owned_processes(), signal.SIGKILL)
@@ -296,24 +410,63 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
 
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop, signum)
-    responses = query(prompt=prompt, options=options, transport=transport)
     try:
-        async for _message in responses:
-            pass
-        if transport.cancelled:
+        await client.connect()
+        await client.query(prompt)
+        consumer = asyncio.create_task(consume())
+        if mailbox:
+            accepting = True
+            mailbox.publish("accepting")
+            emit({'type': 'system', 'subtype': 'coderfleet_control_ready', 'task_id': spec.task_id})
+            controller = asyncio.create_task(control())
+        # The pinned SDK owns full-run completion, including background agents.
+        # receive_response() stops at one ResultMessage and is too early here.
+        while not consumer.done():
+            engine = client._query
+            if transport.results and engine is not None and engine._run_ended_event.is_set() and not questions:
+                async with command_lock:
+                    if questions or not engine._run_ended_event.is_set():
+                        continue
+                    accepting = False
+                    if mailbox:
+                        mailbox.close()
+                await engine.wait_for_result_and_end_input()
+                break
+            if controller is not None and controller.done():
+                await controller  # A broken control channel must fail visibly.
+            await asyncio.sleep(0.02)
+        await consumer
+        if interrupted or transport.cancelled:
             return 143
         if transport.failed or not transport.results:
             errors.show("Claude SDK run failed or ended without a terminal result; see the task diagnostic log.", spec.task_id)
             return 1
         succeeded = True
         return 0
+    except ResultError:
+        # The native CLI can exit 1 with an aborted result when interrupt lands
+        # during a tool call. Preserve that raw result but report cancellation.
+        if interrupted and transport.cancelled:
+            return 143
+        raise
     except asyncio.CancelledError:
         if not received_signal:
             raise
         return 128 + received_signal
     finally:
         try:
-            await asyncio.wait_for(responses.aclose(), timeout=3)
+            accepting = False
+            if controller is not None:
+                controller.cancel()
+                with suppress(asyncio.CancelledError):
+                    await controller
+            if mailbox:
+                mailbox.close()
+            await asyncio.wait_for(client.disconnect(), timeout=3)
+            if consumer is not None and not consumer.done():
+                consumer.cancel()
+                with suppress(asyncio.CancelledError):
+                    await consumer
             await asyncio.wait_for(transport.close(), timeout=3)
         finally:
             if received_signal:
@@ -322,7 +475,7 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                 signal_processes(owned_processes(), signal.SIGTERM)
             if escalation is not None:
                 escalation.cancel()
-            transport.write_state("cancelled" if received_signal or transport.cancelled else "done" if succeeded else "failed")
+            transport.write_state("cancelled" if received_signal or transport.cancelled or interrupted else "done" if succeeded else "failed")
             for signum in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(signum)
 

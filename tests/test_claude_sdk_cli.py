@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import json
 import pytest
 from click.testing import CliRunner
 
@@ -124,3 +125,26 @@ def test_task_status_shows_actual_backend_and_versions(monkeypatch) -> None:
     assert "后端：    sdk" in result.output
     assert "SDK 0.2.180" in result.output
     assert "CLI 2.1.321" in result.output
+
+
+@pytest.mark.parametrize('command,args,action', [
+    ('send', ['task-1','supplement','--request-id','same-id'], 'messages'),
+    ('interrupt', ['task-1','--request-id','same-id'], 'interrupt'),
+])
+def test_native_task_commands_authenticate_and_preserve_retry_id(tmp_path, monkeypatch, command, args, action):
+    monkeypatch.setenv('CODERFLEET_WORKSPACE', str(tmp_path))
+    monkeypatch.delenv('CODERFLEET_API_KEY', raising=False)
+    (tmp_path / 'api_key.txt').write_text('test-operator-key')
+    monkeypatch.setattr(task_cmds, '_require_server', lambda: 'http://localhost:8767')
+    calls = []
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        assert kwargs['headers'] == {'Authorization':'Bearer test-operator-key'}
+        assert kwargs['json']['request_id'] == 'same-id'
+        return httpx.Response(200, json={'status':'accepted'})
+    monkeypatch.setattr(httpx, 'post', post)
+    result = CliRunner().invoke(task_cmds.task_group, [command, *args])
+    assert result.exit_code == 0, result.output
+    assert calls[0][0].endswith('/task-1/' + action)
+    if command == 'send':
+        assert calls[0][1]['json']['text'] == 'supplement'

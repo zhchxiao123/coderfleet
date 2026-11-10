@@ -74,7 +74,7 @@ function renderTasks(tasks) {
     const dur = fmtDuration(t.created, t.finished);
     return `
   <tr onclick="openLogModal('${t.id}')">
-    <td><span class="status-dot ${t.status}">${statusLabel(t.status)}</span></td>
+    <td><span class="status-dot ${t.status}">${t.interrupted ? '已中断' : statusLabel(t.status)}</span></td>
     <td class="task-desc-cell"><div class="task-desc-wrap">${convBadge}<div class="task-prompt" title="${esc(t.prompt)}">${esc(t.prompt)}</div></div></td>
     <td><span class="badge ${t.type}">${t.type}</span> <span style="font-size:12px">${esc(t.account)}</span><div>${renderTaskExecutionMetadata(t)}</div></td>
     <td><div class="task-project" title="${esc(t.project)}">${esc(t.project.split('/').pop())}</div></td>

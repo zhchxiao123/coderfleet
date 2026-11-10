@@ -17,6 +17,11 @@ def worker_source() -> bytes:
     return resources.files("coderfleet.data").joinpath("scripts/coderfleet_claude_sdk_worker.py").read_bytes()
 
 
+def control_source() -> bytes:
+    """Return the stdlib-only mailbox resource copied beside each worker."""
+    return resources.files("coderfleet.data").joinpath("scripts/coderfleet_sdk_control.py").read_bytes()
+
+
 def sdk_python(*, local: bool = False, env: Mapping[str, str] | None = None) -> str:
     """Resolve the account's explicit interpreter or its installation default."""
     values = os.environ if env is None else env

@@ -9,10 +9,11 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import click
 import httpx
+from coderfleet.api_client import api_headers as _account_api_headers
 
 from coderfleet.config import container_timezone, ensure_bind_mount_dir, ensure_workspace, load_config, parse_conf, remove_conf_entry, set_config, update_conf_field, write_conf_line
 from coderfleet.account_type_registry import ACCOUNT_TYPES, duplicate_account_types, env_auth_type_ids
@@ -20,18 +21,6 @@ from coderfleet.mounts import parse_mounts
 from coderfleet.ports import allocate_ide_port
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9-]+$")
-
-
-def _account_api_headers(api: str) -> dict[str, str]:
-    """Use explicit remote credentials or the selected local workspace's key."""
-    key = os.environ.get("CODERFLEET_API_KEY")
-    if key is None and urlsplit(api).hostname in {"localhost", "127.0.0.1", "::1"}:
-        from coderfleet.config import get_workspace
-
-        path = get_workspace() / "api_key.txt"
-        if path.is_file():
-            key = path.read_text(encoding="utf-8").strip()
-    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def _container_name(project_name: str, acc_type: str) -> str:

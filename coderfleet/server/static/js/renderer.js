@@ -5,8 +5,7 @@ class ChatLogRenderer {
   // MCP 全名，Claude 侧看到的 Intervention 工具（issue #69 Slice 1 的 ask_user_question
   // 桥接工具）——跟 CC 原生的 'AskUserQuestion' 是两个不同的 tool_use.name，但共用同一套
   // 问答卡片渲染（_toolUseAskUserQuestion），区别只在于：这个工具的卡片在任务运行中、
-  // 还没等到 tool_result 时会渲染成可提交的实时表单，原生那个不会（它由 CLI 自己的终端
-  // 交互作答，不是 CoderFleet 能代答的东西）。
+  // 还没等到 tool_result 时会渲染成可提交的实时表单；SDK 原生提问也走相同表单。
   static INTERVENTION_TOOL_NAME = 'mcp__coderfleet__ask_user_question';
 
   constructor(container, isRunning = false, foldProcess = false, projectName = null, taskId = null) {
@@ -24,7 +23,7 @@ class ChatLogRenderer {
     this._buf = '';          // SSE 行缓冲
     this._jsonLineBuffer = ''; // 跨行 JSON 事件缓冲
     this._footerRendered = false;
-    this.executionBackend = 'cli';
+    this.executionBackend = 'cli'; this.interrupted = false;
     this._isPending = false;   // renderPending() 后首次 push() 时清除占位 pill
     this.isRunning = isRunning;   // 是否正在运行
     this.foldProcess = foldProcess; // 是否折叠最新步骤
@@ -161,7 +160,7 @@ class ChatLogRenderer {
     this._buf = '';
     this._jsonLineBuffer = '';
     this._footerRendered = false;
-    this.executionBackend = 'cli';
+    this.executionBackend = 'cli'; this.interrupted = false;
     this.processWrapper = null;
     this.processBody = null;
     this.toolCount = 0;
@@ -317,7 +316,7 @@ class ChatLogRenderer {
       this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
       this._jsonLineBuffer = '';
       this._footerRendered = false;
-      this.executionBackend = 'cli';
+      this.executionBackend = 'cli'; this.interrupted = false;
       this.processWrapper = null;
       this.processBody = null;
       this.toolCount = 0;
@@ -338,7 +337,7 @@ class ChatLogRenderer {
       this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
       this._jsonLineBuffer = '';
       this._footerRendered = false;
-      this.executionBackend = 'cli';
+      this.executionBackend = 'cli'; this.interrupted = false;
       this.processWrapper = null;
       this.processBody = null;
       this.toolCount = 0;
@@ -478,6 +477,21 @@ class ChatLogRenderer {
   _claudeSys(d) {
     if (d.subtype === 'coderfleet_backend') {
       this.executionBackend = d.execution_backend;
+      return;
+    }
+    if (d.subtype === 'coderfleet_control_ready' || d.subtype === 'coderfleet_question_pending') return;
+    if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || ''); return; }
+    if (d.subtype === 'coderfleet_interrupted') { this.interrupted = true; this._pill('已中断', '原生会话可继续'); return; }
+    if (d.subtype === 'coderfleet_question_closed') {
+      const owner = this._questionRenderer(d.tool_call_id);
+      const e = owner?.toolMap[d.tool_call_id];
+      if (e && e.isLive) {
+        e.isLive = false;
+        const row = document.getElementById(`askq-submit-row-${d.tool_call_id}`);
+        if (row) row.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+        owner._setAskqSubmitStatus(d.tool_call_id,
+          d.status === 'answered' ? '✓ 已回答' : d.status === 'timed_out' ? '等待回答已超时' : '提问已取消', d.status !== 'answered');
+      }
       return;
     }
     if (d.subtype === 'init') {
@@ -1185,7 +1199,7 @@ class ChatLogRenderer {
   _toolUse(block) {
     const { id, name, input } = block;
     if (name === 'AskUserQuestion' || name === ChatLogRenderer.INTERVENTION_TOOL_NAME) {
-      this._toolUseAskUserQuestion(block, name === ChatLogRenderer.INTERVENTION_TOOL_NAME);
+      this._toolUseAskUserQuestion(block, name === ChatLogRenderer.INTERVENTION_TOOL_NAME || this.executionBackend === 'sdk');
       return;
     }
     if (name === 'TodoWrite') { this._toolUseTodoWrite(block); return; }
@@ -1270,7 +1284,8 @@ class ChatLogRenderer {
         const collapsed = subThread.classList.toggle('collapsed');
         subBtn.textContent = collapsed ? '▸ 子agent 会话' : '▾ 子agent 会话';
       });
-      const subRenderer = new ChatLogRenderer(subThread, this.isRunning, false, this.projectName);
+      const subRenderer = new ChatLogRenderer(subThread, this.isRunning, false, this.projectName, this.taskId);
+      subRenderer.executionBackend = this.executionBackend;
       subRenderer.inner = subThread.querySelector('.chat-log');
       this.subagentRenderers[id] = { renderer: subRenderer, toggleRowEl, revealed: false };
     }
@@ -1291,9 +1306,8 @@ class ChatLogRenderer {
   // 交互式提问工具，input 是 1-4 道题（question/header/options/multiSelect）；
   // tool_result 到达前先渲染"等待作答"占位，到达后按题目匹配已选项打勾，
   // 匹配不上（纯文本/自由回复）就整卡底部加一行"回复"，而不是硬套成 JSON 转储。
-  // isIntervention: 这张卡是不是 issue #69 的 Intervention 桥接工具（而不是 CC 原生
-  // AskUserQuestion）——只有它、且任务仍在运行、且还没等到 tool_result 时，才渲染成可
-  // 提交的实时表单；CC 原生那个没有 CoderFleet 能代答的后端，永远只是只读占位。
+  // isIntervention includes MCP questions and SDK-native questions. CLI-native
+  // questions remain read-only; submitting always checks the current Task token.
   _toolUseAskUserQuestion(block, isIntervention = false) {
     const { id, name, input } = block;
     const questions = normalizeAskUserQuestions(input);
@@ -1479,6 +1493,7 @@ class ChatLogRenderer {
   // 任务日志流结束（[DONE]）时调用：还留着未作答实时表单的卡片，禁用输入并提示任务已
   // 结束——不能让它们继续看着像"还能点"，其实这个任务已经没有 CLI 进程在等这个答案了。
   deactivatePendingInterventions() {
+    for (const child of Object.values(this.subagentRenderers)) child.renderer.deactivatePendingInterventions();
     for (const [id, e] of Object.entries(this.toolMap)) {
       if (!e.isLive) continue;
       e.isLive = false;
@@ -1486,6 +1501,15 @@ class ChatLogRenderer {
       if (row) row.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
       this._setAskqSubmitStatus(id, '任务已结束，未作答', true);
     }
+  }
+
+  _questionRenderer(id) {
+    if (this.toolMap[id]) return this;
+    for (const child of Object.values(this.subagentRenderers)) {
+      const owner = child.renderer._questionRenderer(id);
+      if (owner) return owner;
+    }
+    return null;
   }
 
   _fillAskUserAnswers(id, e, text) {
@@ -1896,7 +1920,7 @@ class ChatLogRenderer {
     this._footerRendered = true;
     let status = 'done', label = '✓ 任务完成';
     if (typeof text === 'string') {
-      if (text.includes('killed')) { status = 'killed'; label = '⊘ 任务已终止'; }
+      if (text.includes('killed')) { status = 'killed'; label = this.interrupted ? '⊘ 已中断，会话可继续' : '⊘ 任务已终止'; }
       else if (text.includes('failed') || text.includes('error')) {
         status = 'failed';
         const m = text.match(/\[([^\]]+)\]/);

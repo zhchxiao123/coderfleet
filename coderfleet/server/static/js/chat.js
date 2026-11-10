@@ -47,6 +47,10 @@ async function loadConversations(renderWorkspace = true) {
     tasksCache = tasks;
     updateTaskExecutionMetadata(tasks);
     chatConversationsList = convs;
+    if (!renderWorkspace && currentPage === 'chat' && activeConversationId) {
+      const running = tasks.find(t => t.status === 'running' && (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId));
+      _syncChatSendButton(running?.id || null, _isChatQueueFull(activeConversationId));
+    }
 
     conversationsCache = {};
     convs.forEach(c => { conversationsCache[c.id] = c.name; });
@@ -136,7 +140,7 @@ async function pollChatHeartbeat() {
   heartbeat.forEach(h => {
     const existing = byId.get(h.id);
     if (existing) {
-      if (existing.status !== h.status || existing.finished !== h.finished) {
+      if (existing.status !== h.status || existing.finished !== h.finished || existing.sdk_control_ready !== h.sdk_control_ready) {
         hasNewOrChangedTask = true;
       }
       existing.status = h.status;
@@ -2205,6 +2209,16 @@ function _setChatSendBusy(sendBtn, label) {
 function _syncChatSendButton(runningTaskId, isQueueFull) {
   const btn = document.getElementById('chat-send-btn');
   if (!btn) return;
+  const sdkHost = document.getElementById('sdk-task-controls');
+  const sdkTask = (typeof tasksCache === 'undefined' ? [] : tasksCache).find(t => t.id === runningTaskId) ||
+    (sdkHost ? (tasksCache || []).find(t => (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId) && SDKTaskControls.hasPending(t.id)) : null);
+  if (sdkHost) SDKTaskControls.mount(sdkHost, sdkTask, {
+    read: () => ({ text: document.getElementById('chat-input')?.value || '', hasAttachments: pendingImages.length > 0 || uploadingImages > 0 }),
+    clear: text => {
+      const input = document.getElementById('chat-input');
+      if (input && input.value === text) { input.value = ''; input.dispatchEvent(new Event('input')); }
+    },
+  });
   if (btn.dataset.busy === '1') return; // 发送请求本身正在进行中（发送中.../建会话.../上传中...），由调用方自行管理文案
   const hasInput = _hasChatInputContent();
   if (runningTaskId && !hasInput) {
@@ -2453,6 +2467,7 @@ function buildChatInputHTML(placeholder, hint) {
     <div id="chat-image-previews" class="chat-image-preview-row" style="display:none;"></div>
     <textarea class="chat-input-textarea" id="chat-input" placeholder="${placeholder}" rows="1"></textarea>
     <div id="chat-upload-status" class="chat-upload-status" style="display:none;"></div>
+    <div id="sdk-task-controls" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     <div class="chat-input-actions">
       <div class="chat-input-options">
         <input type="file" id="chat-file-input" multiple style="display:none" onchange="handleFileSelect(this)">

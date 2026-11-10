@@ -798,6 +798,7 @@
   </div>
 
   <div class="input-bar">
+    <div id="sdk-task-controls" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     <div class="image-preview-row" id="image-previews" style="display:none"></div>
     <div class="input-row">
       <input type="file" id="image-file" accept="image/*" multiple style="display:none" onchange="handleFileSelect(this)">
@@ -908,6 +909,7 @@
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
 <script src="/static/js/renderer.js?v=__BUILD__"></script>
+<script src="/static/js/sdk-task-controls.js?v=__BUILD__"></script>
 
 <script>
 // ── State ────────────────────────────────────────────────
@@ -1440,6 +1442,13 @@ function syncMessages(scrollEnd) {
       ? `task-${t.id}` === activeConv.id
       : t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id))
     .sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0));
+  SDKTaskControls.mount(document.getElementById('sdk-task-controls'), ownTasks.find(t => t.status === 'running') || ownTasks.find(t => SDKTaskControls.hasPending(t.id)), {
+    read: () => ({ text: document.getElementById('ta').value, hasAttachments: pendingImages.length > 0 || uploadingImages > 0 }),
+    clear: text => {
+      const input = document.getElementById('ta');
+      if (input.value === text) { input.value = ''; onInput(input); }
+    },
+  });
   const ct = [...mobileInheritedTasks, ...ownTasks];
 
   if (!ct.length) {
@@ -1728,13 +1737,13 @@ function taskActionsHtml(task) {
     const label = status === 'running' ? '终止执行' : status === 'pending' ? '取消排队' : '取消定时';
     return `<div class="task-actions">
       <button class="task-action-btn danger" onclick="event.stopPropagation();killMobileTask('${x(task.id)}')">${label}</button>
-      <span class="task-state-note">${x(mobileTaskStatusLabel(status))}</span>
+      <span class="task-state-note">${x(task.interrupted ? '已中断' : mobileTaskStatusLabel(status))}</span>
     </div>`;
   }
   if (['failed', 'killed'].includes(status)) {
     return `<div class="task-actions">
       <button class="task-action-btn" onclick="event.stopPropagation();retryMobileTask('${x(task.id)}')">重试</button>
-      <span class="task-state-note">${x(mobileTaskStatusLabel(status))}</span>
+      <span class="task-state-note">${x(task.interrupted ? '已中断' : mobileTaskStatusLabel(status))}</span>
     </div>`;
   }
   return '';

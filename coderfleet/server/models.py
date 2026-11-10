@@ -480,6 +480,7 @@ class WebhookDelivery(BaseModel):
 
 
 class PendingIntervention(BaseModel):
+    kind: Literal['mcp', 'native'] = 'mcp'
     tool_call_id: str
     questions:    list[InterventionQuestion]
     # 一次性 token，跟 WorkflowRun.approval_token 是同一套信任模型——防误触/防串号
@@ -512,6 +513,9 @@ class Task(BaseModel):
     cli_version: str = ""
     sdk_source_offset: int = 0
     sdk_log_size: int = 0
+    sdk_control_token: str = ""
+    sdk_control_ready: bool = False
+    interrupted: bool = False
     terminal_notified: bool = False
     # 容器内 container_workdir 在任务开始执行时的 git 快照，仅当该目录是 git 仓库时非空。
     # 探测失败（非 git 目录等）不影响任务本身执行，字段留空。
@@ -647,6 +651,8 @@ class TaskResponse(BaseModel):
     created: str
     finished: Optional[str] = None
     log_path: str
+    sdk_control_ready: bool = False
+    interrupted: bool = False
     archived: bool = False
     auto:     bool = False
     images:   list[str] = []
@@ -693,6 +699,8 @@ class TaskResponse(BaseModel):
             created      = t.created,
             finished     = t.finished,
             log_path     = t.log_path_str,
+            sdk_control_ready = getattr(t, "sdk_control_ready", False),
+            interrupted = t.interrupted,
             archived     = t.archived,
             auto         = getattr(t, "auto", False),
             images       = getattr(t, "images", []),
@@ -732,6 +740,7 @@ class TaskHeartbeat(BaseModel):
     status:          TaskStatus
     conversation_id: str = ""
     finished:        Optional[str] = None
+    sdk_control_ready: bool = False
 
     @classmethod
     def from_task(cls, t: Task) -> "TaskHeartbeat":
@@ -740,6 +749,7 @@ class TaskHeartbeat(BaseModel):
             status          = t.status,
             conversation_id = t.conversation_id,
             finished        = t.finished,
+            sdk_control_ready = t.sdk_control_ready,
         )
 
 

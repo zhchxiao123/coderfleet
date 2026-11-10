@@ -38,7 +38,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from coderfleet.server.models import (
     Account,
@@ -2202,6 +2202,45 @@ async def kill_task(task_id: str):
     return TaskResponse.from_task(task)
 
 
+class SDKCommandRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+class SDKMessageRequest(SDKCommandRequest):
+    text: str = Field(min_length=1, max_length=16000)
+
+
+async def _sdk_task_command(task_id: str, kind: Literal['interrupt', 'message'], payload: dict, request_id: str):
+    try:
+        return await scheduler.sdk_command(task_id, kind, payload, request_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+
+
+@app.post('/api/tasks/{task_id}/interrupt')
+async def interrupt_sdk_task(task_id: str, body: SDKCommandRequest):
+    return await _sdk_task_command(task_id, 'interrupt', {}, body.request_id)
+
+
+@app.post('/api/tasks/{task_id}/messages')
+async def message_sdk_task(task_id: str, body: SDKMessageRequest):
+    return await _sdk_task_command(task_id, 'message', {'text':body.text}, body.request_id)
+
+
+@app.get('/api/tasks/{task_id}/commands/{request_id}')
+async def sdk_task_command_status(task_id: str, request_id: str):
+    try:
+        return scheduler.sdk_command_status(task_id, request_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 class TaskUpdate(BaseModel):
     archived: Optional[bool] = None
     prompt: Optional[str] = None
@@ -2236,11 +2275,13 @@ class TaskAnswerRequest(BaseModel):
 async def answer_task_intervention(task_id: str, body: TaskAnswerRequest):
     """人工回答一个 Intervention（非 auto 任务 CLI 主动暂停问的问题），见 issue #69。"""
     try:
-        scheduler.resolve_intervention(task_id, body.tool_call_id, body.token, body.answers)
+        await scheduler.answer_intervention(task_id, body.tool_call_id, body.token, body.answers)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
     return {"ok": True}
 
 

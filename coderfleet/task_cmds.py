@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 
 import click
 import httpx
+from coderfleet.api_client import api_headers
 
 
 # ── 工具函数 ──────────────────────────────────────────────
@@ -248,7 +250,7 @@ def cmd_task_status(task_id: str) -> None:
     api = _require_server()
 
     try:
-        r = httpx.get(f"{api}/api/tasks/{task_id}", timeout=10)
+        r = httpx.get(f"{api}/api/tasks/{task_id}", timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
 
@@ -259,6 +261,8 @@ def cmd_task_status(task_id: str) -> None:
 
     d = r.json()
     color, label = _STATUS_STYLE.get(d["status"], ("white", d["status"]))
+    if d.get('interrupted'):
+        label = '已中断（会话可继续）'
 
     click.echo()
     click.echo(f"  ID：      {d['id']}")
@@ -378,7 +382,7 @@ def cmd_task_answer(task_id: str, answers_json: str) -> None:
         raise click.ClickException(f"--json 不是合法的 JSON：{e}")
 
     try:
-        r = httpx.get(f"{api}/api/tasks/{task_id}", timeout=10)
+        r = httpx.get(f"{api}/api/tasks/{task_id}", timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
 
@@ -393,7 +397,7 @@ def cmd_task_answer(task_id: str, answers_json: str) -> None:
 
     try:
         r2 = httpx.post(
-            f"{api}/api/tasks/{task_id}/answer", timeout=10,
+            f"{api}/api/tasks/{task_id}/answer", timeout=12, headers=api_headers(api),
             json={
                 "tool_call_id": pending["tool_call_id"],
                 "token": pending["token"],
@@ -407,6 +411,53 @@ def cmd_task_answer(task_id: str, answers_json: str) -> None:
         click.secho("✓ 已提交回答", fg="green")
     else:
         raise click.ClickException(f"提交失败（HTTP {r2.status_code}）：{_http_error_detail(r2)}")
+
+
+def _sdk_command(task_id: str, action: str, request_id: Optional[str], text: Optional[str] = None) -> None:
+    api = _require_server()
+    identifier = request_id or uuid.uuid4().hex
+    body = {'request_id':identifier, **({'text':text} if text is not None else {})}
+    click.echo(f'请求 ID: {identifier}')
+    try:
+        response = httpx.post(f'{api}/api/tasks/{task_id}/{action}', json=body,
+                              timeout=12, headers=api_headers(api))
+    except httpx.RequestError as error:
+        raise click.ClickException(f'结果未知，请用 task command-status {task_id} {identifier} 查询：{error}') from error
+    if response.status_code != 200:
+        raise click.ClickException(_http_error_detail(response))
+    click.echo('✓ SDK 已接收；' + ('当前运行正在中断' if action == 'interrupt' else '消息将在 SDK 调度后处理'))
+
+
+@task_group.command('interrupt')
+@click.argument('task_id')
+@click.option('--request-id', default=None, help='重试时使用相同 ID，避免重复投递')
+def cmd_task_interrupt(task_id: str, request_id: Optional[str]) -> None:
+    """Interrupt the current SDK run while preserving its native session."""
+    _sdk_command(task_id, 'interrupt', request_id)
+
+
+@task_group.command('send')
+@click.argument('task_id')
+@click.argument('text')
+@click.option('--request-id', default=None, help='重试时使用相同 ID，避免重复投递')
+def cmd_task_send(task_id: str, text: str, request_id: Optional[str]) -> None:
+    """Send supplementary text to the running SDK Task."""
+    _sdk_command(task_id, 'messages', request_id, text)
+
+
+@task_group.command('command-status')
+@click.argument('task_id')
+@click.argument('request_id')
+def cmd_task_command_status(task_id: str, request_id: str) -> None:
+    """Read a durable SDK command receipt without replaying it."""
+    api = _require_server()
+    try:
+        response = httpx.get(f'{api}/api/tasks/{task_id}/commands/{request_id}', timeout=10, headers=api_headers(api))
+    except httpx.RequestError as error:
+        raise click.ClickException(str(error)) from error
+    if response.status_code != 200:
+        raise click.ClickException(_http_error_detail(response))
+    click.echo(json.dumps(response.json(), ensure_ascii=False))
 
 
 # ── task clean ────────────────────────────────────────────

@@ -13,7 +13,7 @@ def test_claude_sdk_frontend_behavior() -> None:
     node = shutil.which("node")
     assert node is not None
     result = subprocess.run(
-        [node, "--test", "tests/frontend/claude-sdk.test.cjs", "tests/frontend/claude-sdk-renderer.test.cjs"],
+        [node, "--test", "tests/frontend/claude-sdk.test.cjs", "tests/frontend/claude-sdk-renderer.test.cjs", "tests/frontend/claude-sdk-interactive.test.cjs"],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
         timeout=30, check=False,
     )

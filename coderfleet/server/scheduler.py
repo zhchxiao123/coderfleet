@@ -3628,7 +3628,7 @@ class Scheduler:
         cwd: str, conversation: Optional[Conversation], prompt: str,
         images: list[str],
     ) -> str:
-        from coderfleet.claude_sdk import build_worker_command, worker_source
+        from coderfleet.claude_sdk import build_worker_command, control_source, worker_source
         from coderfleet.account_type_registry import _CF_SEND_SYSTEM_HINT, claude_mcp_options
 
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task.id):
@@ -3638,6 +3638,16 @@ class Scheduler:
         artifact_dir = project_root / ".coderfleet-tasks"
         runtime_dir = Path(execution_root) / ".coderfleet-tasks"
         self._write_sdk_artifact(artifact_dir / filename, source)
+        protocol_source = control_source()
+        protocol_name = f"sdk-control-{hashlib.sha256(protocol_source).hexdigest()[:16]}.py"
+        self._write_sdk_artifact(artifact_dir / protocol_name, protocol_source)
+        current = self.get_task(task.id) or task
+        if not current.sdk_control_token:
+            current.sdk_control_token = secrets.token_hex(32)
+        current.sdk_control_ready = False
+        current.save(self.tasks_dir)
+        task.sdk_control_token = current.sdk_control_token
+        task.sdk_control_ready = False
         pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
         request = {
             "task_id": task.id, "prompt": prompt, "cwd": cwd,
@@ -3645,10 +3655,16 @@ class Scheduler:
             "session_id": (pending_fork.source_session_id if pending_fork else conversation.native_session_id) if conversation else "",
             "fork_session_id": pending_fork.target_session_id if pending_fork else "",
             "resume_session_at": pending_fork.message_uuid if pending_fork else "",
-            "append_system_prompt": _CF_SEND_SYSTEM_HINT,
+            "append_system_prompt": _CF_SEND_SYSTEM_HINT + (
+                '\nWhen you need to ask the operator a question, prefer native AskUserQuestion; its callback is connected to CoderFleet.'
+                if not task.auto else ''),
             "mcp_options": claude_mcp_options(allow_ask_user=not task.auto),
             "diagnostic_path": str(runtime_dir / f"{task.id}.sdk-diagnostic.log"),
             "state_path": str(runtime_dir / f"{task.id}.sdk-state.json"),
+            "control_directory": str(runtime_dir / f"{task.id}.control"),
+            "control_token": task.sdk_control_token,
+            "control_module": str(runtime_dir / protocol_name),
+            "question_timeout_seconds": DEFAULT_INTERVENTION_TIMEOUT_SECONDS,
         }
         self._write_sdk_artifact(
             artifact_dir / f"{task.id}.sdk.json",
@@ -3673,6 +3689,34 @@ class Scheduler:
         for name, value in metadata.items():
             setattr(current, name, value)
             setattr(task, name, value)
+        for line in text.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if (not isinstance(event, dict) or event.get('type') != 'system'
+                    or event.get('task_id') != task.id or current.status != TaskStatus.running):
+                continue
+            if event.get('subtype') == 'coderfleet_control_ready':
+                current.sdk_control_ready = task.sdk_control_ready = True
+            elif event.get('subtype') == 'coderfleet_interrupted':
+                current.interrupted = task.interrupted = True
+                current.sdk_control_ready = task.sdk_control_ready = False
+                current.pending_intervention = task.pending_intervention = None
+            elif event.get('subtype') == 'coderfleet_question_pending' and not current.auto:
+                previous = current.pending_intervention
+                try:
+                    current.pending_intervention = PendingIntervention(
+                        kind='native', tool_call_id=event['tool_call_id'], questions=event['questions'],
+                        deadline=event['deadline'], token=(previous.token if previous and
+                            previous.tool_call_id == event['tool_call_id'] else uuid.uuid4().hex),
+                    )
+                except (KeyError, ValueError):
+                    logger.warning('Invalid SDK question event for Task %s', task.id)
+                task.pending_intervention = current.pending_intervention
+            elif event.get('subtype') == 'coderfleet_question_closed':
+                if current.pending_intervention and current.pending_intervention.tool_call_id == event.get('tool_call_id'):
+                    current.pending_intervention = task.pending_intervention = None
         if source_offset is not None:
             current.sdk_source_offset = task.sdk_source_offset = source_offset
         if log_size is not None:
@@ -3681,9 +3725,72 @@ class Scheduler:
 
     def _finish_sdk_task(self, task: Task, status: TaskStatus) -> Task:
         current = self.get_task(task.id) or task
+        current.sdk_control_ready = False
+        current.pending_intervention = None
         if current.status not in (TaskStatus.done, TaskStatus.failed, TaskStatus.killed):
             current.update_status(status, self.tasks_dir)
+        else:
+            current.save(self.tasks_dir)
         return current
+
+    def _sdk_control_directory(self, task: Task) -> Path:
+        root: Optional[Path]
+        if task.ephemeral:
+            root = Path(task.project) if task.project != 'ephemeral' else self.sessions_dir / f'task-{task.id}'
+        else:
+            root = self._get_project_root(task)
+        if root is None:
+            raise RuntimeError('SDK Task working directory is unavailable')
+        return root / '.coderfleet-tasks' / f'{task.id}.control'
+
+    async def sdk_command(
+        self, task_id: str, kind: Literal['ping', 'answer', 'interrupt', 'message'], payload: dict,
+        request_id: Optional[str] = None, *, timeout: float = 8,
+    ) -> dict:
+        """Deliver a command to this exact worker run and await its durable receipt."""
+        from coderfleet.data.scripts.coderfleet_sdk_control import ControlError, ControlMailbox
+
+        task = self.get_task(task_id)
+        if task is None:
+            raise ValueError(f"任务 '{task_id}' 不存在")
+        if task.execution_backend != 'sdk' or not task.sdk_control_token:
+            raise RuntimeError('当前任务尚不支持运行中交互，请等待就绪或提交新的 SDK 任务')
+        mailbox = ControlMailbox(self._sdk_control_directory(task), task.id, task.sdk_control_token)
+        if request_id and mailbox.has_command(request_id):
+            mailbox.submit(request_id, kind, payload, timeout=timeout)  # Verify identical retry input.
+            reply = mailbox.reply(request_id)
+            if reply:
+                if reply['status'] == 'accepted':
+                    return reply
+                raise ControlError(reply.get('error') or 'SDK command was rejected')
+            if task.status != TaskStatus.running or not task.sdk_control_ready:
+                raise TimeoutError(f'命令 {request_id} 已投递但没有回执，结果未知；不会自动重放')
+        if task.status != TaskStatus.running or not task.sdk_control_ready:
+            raise RuntimeError('当前任务尚不支持运行中交互，请等待就绪或提交新的 SDK 任务')
+        identifier = mailbox.submit(request_id or uuid.uuid4().hex, kind, payload, timeout=timeout)
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            reply = mailbox.reply(identifier)
+            if reply:
+                if reply['status'] != 'accepted':
+                    raise ControlError(reply.get('error') or 'SDK command was rejected')
+                return reply
+            current = self.get_task(task.id)
+            if current is None or current.status != TaskStatus.running:
+                raise TimeoutError(f'任务已结束，命令 {identifier} 未确认送达；不会自动重放')
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(f'命令 {identifier} 尚未收到回执，结果未知；请使用同一请求 ID 查询或重试')
+            await asyncio.sleep(0.03)
+
+    def sdk_command_status(self, task_id: str, request_id: str) -> dict:
+        from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
+        task = self.get_task(task_id)
+        if task is None:
+            raise ValueError(f"任务 '{task_id}' 不存在")
+        if not task.sdk_control_token:
+            raise RuntimeError('当前任务不支持 SDK 交互')
+        mailbox = ControlMailbox(self._sdk_control_directory(task), task.id, task.sdk_control_token)
+        return mailbox.reply(request_id) or {'id':request_id, 'status':'unconfirmed'}
 
     async def _run(
         self,
@@ -5571,6 +5678,23 @@ class Scheduler:
                 t2.save(self.tasks_dir)
 
         return answers
+
+    async def answer_intervention(
+        self, task_id: str, tool_call_id: str, token: str, answers: dict,
+    ) -> None:
+        task = self.get_task(task_id)
+        pending = task.pending_intervention if task else None
+        if pending is None or pending.kind != 'native':
+            self.resolve_intervention(task_id, tool_call_id, token, answers)
+            return
+        if pending.tool_call_id != tool_call_id or pending.token != token:
+            raise RuntimeError('问题或 token 不匹配')
+        await self.sdk_command(task_id, 'answer', {'tool_call_id':tool_call_id, 'answers':answers},
+                               request_id='answer-' + token)
+        current = self.get_task(task_id)
+        if current and current.pending_intervention and current.pending_intervention.token == token:
+            current.pending_intervention = None
+            current.save(self.tasks_dir)
 
     def resolve_intervention(
         self, task_id: str, tool_call_id: str, token: str, answers: dict,
