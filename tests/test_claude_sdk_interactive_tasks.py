@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
 from coderfleet.server import main
 from coderfleet.server.models import AccountType, PendingIntervention, Task, TaskResponse, TaskStatus
-from coderfleet.server.runtime import FakeRuntime
+from coderfleet.server.runtime import FakeProcess, FakeRuntime
 from coderfleet.server.scheduler import Scheduler
 
 
@@ -88,3 +88,111 @@ def test_missing_receipt_after_task_exit_stays_unknown_on_same_id_retry(tmp_path
             request_id='uncertain', text='may have been consumed')))
     assert unknown.value.status_code == 504
     assert len(list(mailbox.requests.glob('*.json'))) == 1
+
+
+@pytest.mark.parametrize('runtime_kind', ['local', 'container'])
+@pytest.mark.parametrize('mode', ['split', 'replay'])
+def test_native_control_events_are_parsed_once_across_stdout_chunks(tmp_path, runtime_kind, mode):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (tmp_path / 'accounts.conf').write_text(
+        f'NAME=one TYPE=claude RUNTIME={runtime_kind} PROXY=off CLAUDE_BACKEND=sdk\n')
+    (tmp_path / 'projects.conf').write_text(f'NAME=repo ACCOUNT=one PATH={repo}\n')
+    observed = []
+
+    class WorkerRuntime(FakeRuntime):
+        async def exec(self, *args, **kwargs):
+            return FakeProcess(stdout_chunks=[b'{"alive":false}'])
+
+        async def run(self, spec):
+            import json
+            request = json.loads(next(tmp_path.rglob('*.sdk.json')).read_text())
+            task_id = request['task_id']
+
+            def event(subtype, **fields):
+                return (json.dumps({'type':'system', 'subtype':subtype, 'task_id':task_id, **fields}) + '\n').encode()
+
+            init = event('init', session_id='11111111-1111-4111-8111-111111111111')
+            ready = event('coderfleet_control_ready')
+            question = event('coderfleet_question_pending', tool_call_id='q-one',
+                questions=[{'question':'Which?'}], deadline='2099-01-01T00:00:00Z')
+            closed = event('coderfleet_question_closed', tool_call_id='q-one', status='answered')
+            chunks = ([init, ready[:15], ready[15:], question, b'\n'] if mode == 'split'
+                      else [ready + question, init, closed, b'\n'])
+
+            class Reader:
+                async def read(self, size):
+                    current = scheduler.get_task(task_id)
+                    observed.append((current.sdk_control_ready, current.pending_intervention))
+                    await asyncio.sleep(0)
+                    return chunks.pop(0) if chunks else b''
+
+            process = FakeProcess()
+            process.stdout = Reader()
+            return process
+
+    runtime = WorkerRuntime()
+    scheduler = Scheduler(tmp_path, runtime=runtime, local_runtime=runtime)
+
+    async def drive():
+        task = await scheduler.submit('fixture', project_name='repo', conversation_name='Review', ephemeral=True)
+        await asyncio.wait_for(scheduler._running[task.id], timeout=2)
+        return task.id
+
+    task_id = asyncio.run(drive())
+    assert scheduler.get_task(task_id).status == TaskStatus.done, (scheduler.tasks_dir / f'{task_id}.log').read_text()
+    if mode == 'split':
+        assert observed[3][0], 'Complete control-ready event must survive arbitrary stdout boundaries'
+        assert observed[4][1].tool_call_id == 'q-one'
+    else:
+        assert observed[1][1].tool_call_id == 'q-one'
+        assert observed[3][1] is None
+        assert observed[-1][1] is None, 'Closed questions must never replay from an old session scan'
+
+
+def test_native_answer_retry_recovers_accepted_receipt_after_question_and_task_close(tmp_path, monkeypatch):
+    scheduler, mailbox = running_task(tmp_path)
+    monkeypatch.setattr(main, 'scheduler', scheduler)
+    body = main.TaskAnswerRequest(tool_call_id='native-question', token='question-token', answers={'Which?':'Mac'})
+    mailbox.submit('answer-question-token', 'answer', {'tool_call_id':'native-question', 'answers':body.answers})
+    mailbox.claim('answer-question-token')
+    mailbox.acknowledge('answer-question-token', {'answered':True})
+    task = scheduler.get_task('interactive')
+    task.pending_intervention = None
+    task.update_status(TaskStatus.done, scheduler.tasks_dir)
+    assert asyncio.run(main.answer_task_intervention('interactive', body)) == {'ok':True}
+    with pytest.raises(HTTPException) as changed:
+        asyncio.run(main.answer_task_intervention('interactive', main.TaskAnswerRequest(
+            tool_call_id='native-question', token='question-token', answers={'Which?':'Linux'})))
+    assert changed.value.status_code == 409
+    assert len(list(mailbox.requests.glob('*.json'))) == 1
+
+
+def test_definitively_rejected_native_answer_can_be_corrected_without_replaying_unknown_input(tmp_path, monkeypatch):
+    scheduler, mailbox = running_task(tmp_path)
+    monkeypatch.setattr(main, 'scheduler', scheduler)
+    mailbox.submit('answer-question-token', 'answer', {'tool_call_id':'native-question', 'answers':{'Which?':'old'}})
+    mailbox.acknowledge('answer-question-token', error='Control command expired before delivery')
+
+    async def drive():
+        reply = asyncio.create_task(main.answer_task_intervention('interactive', main.TaskAnswerRequest(
+            tool_call_id='native-question', token='question-token', answers={'Which?':'Mac'})))
+        for _ in range(100):
+            commands = mailbox.pending()
+            if commands:
+                assert len(commands) == 1
+                assert commands[0]['id'] == 'answer-question-token-2'
+                mailbox.acknowledge(commands[0]['id'], {'answered':True})
+                break
+            await asyncio.sleep(.001)
+        return await reply
+
+    assert asyncio.run(drive()) == {'ok':True}
+    assert mailbox.reply('answer-question-token')['status'] == 'rejected'
+    assert len(list(mailbox.requests.glob('*.json'))) == 2
+
+
+def test_invalid_native_answer_is_rejected_before_it_reserves_a_delivery_identity():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        main.TaskAnswerRequest(tool_call_id='native-question', token='question-token', answers={'Which?':123})

@@ -10,8 +10,8 @@ const SDKTaskControls = {
   primaryAction(task, draft, { queued = false, scheduled = false } = {}) {
     if (draft.uploading) return 'uploading';
     const hasInput = !!draft.text.trim() || draft.hasAttachments;
+    if (task && this.hasPending(task.id) && (task.status !== 'running' || queued || scheduled || draft.hasAttachments)) return 'check';
     if (hasInput && (queued || scheduled)) return 'queue';
-    if (task && this.hasPending(task.id) && task.status !== 'running') return 'check';
     if (hasInput && draft.hasAttachments) return 'queue';
     if (task?.status === 'running' && task.execution_backend === 'sdk') {
       if (!task.sdk_control_ready) return 'connecting';

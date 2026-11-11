@@ -487,6 +487,7 @@ def test_ephemeral_keep_container_via_fake_runtime(
     ))
 
     # seam 记录：一次 detached run（启动会话容器）+ 一次 exec（跑任务）
+    assert rt.removed == ["coderfleet-eph-session-conv-eph"]
     assert len(rt.runs) == 1 and rt.runs[0].detached is True and rt.runs[0].remove is False
     assert rt.runs[0].name == "coderfleet-eph-session-conv-eph"
     assert len(rt.execs) == 1 and rt.execs[0][0] == "coderfleet-eph-session-conv-eph"

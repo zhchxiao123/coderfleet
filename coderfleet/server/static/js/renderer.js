@@ -485,10 +485,10 @@ class ChatLogRenderer {
     if (d.subtype === 'coderfleet_question_closed') {
       const owner = this._questionRenderer(d.tool_call_id);
       const e = owner?.toolMap[d.tool_call_id];
-      if (e && e.isLive) {
+      if (e) {
         e.isLive = false;
-        const row = document.getElementById(`askq-submit-row-${d.tool_call_id}`);
-        if (row) row.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+        e.answerAttempt = null;
+        owner._disableAskqInputs(d.tool_call_id);
         owner._setAskqSubmitStatus(d.tool_call_id,
           d.status === 'answered' ? '✓ 已回答' : d.status === 'timed_out' ? '等待回答已超时' : '提问已取消', d.status !== 'answered');
       }
@@ -1389,9 +1389,17 @@ class ChatLogRenderer {
       wrap, name: displayName, input,
       askQuestions: questions,
       isLive,
+      nativeQuestion: name === 'AskUserQuestion' && this.executionBackend === 'sdk',
     };
 
     if (isLive) {
+      questions.forEach((q, i) => {
+        if (!q.options?.length) return;
+        const other = document.getElementById(`askq-other-${id}-${i}`);
+        const text = document.getElementById(`askq-text-${id}-${i}`);
+        text.addEventListener('input', () => { other.checked = !!text.value.trim(); });
+        other.addEventListener('change', () => { if (other.checked) text.focus(); });
+      });
       const submitBtn = document.getElementById(`askq-submit-btn-${id}`);
       submitBtn.addEventListener('click', e => {
         e.stopPropagation();
@@ -1400,7 +1408,7 @@ class ChatLogRenderer {
     }
   }
 
-  // 单个问题的实时输入控件：有 options 就单选/多选，没有就自由文本。
+  // 有选项的问题也保留“其他”回答；多选时可把自由输入和已有选项一起提交。
   _buildLiveAskqInputs(id, i, q) {
     const groupName = `askq-radio-${id}-${i}`;
     if (q.options && q.options.length) {
@@ -1412,7 +1420,13 @@ class ChatLogRenderer {
       <span class="askq-live-option-label">${esc(o.label)}</span>
       ${o.description ? `<span class="askq-live-option-desc">${esc(o.description)}</span>` : ''}
     </label>`).join('')
-      }</div>`;
+      }
+    <label class="askq-live-option">
+      <input type="${inputType}" name="${groupName}" value="" id="askq-other-${id}-${i}">
+      <span class="askq-live-option-label">其他</span>
+    </label>
+    <input type="text" class="askq-live-text" id="askq-text-${id}-${i}" aria-label="其他回答：${esc(q.question)}" placeholder="输入其他回答…">
+  </div>`;
     }
     return `<input type="text" class="askq-live-text" id="askq-text-${id}-${i}" placeholder="输入回答…">`;
   }
@@ -1422,8 +1436,10 @@ class ChatLogRenderer {
     const answers = {};
     questions.forEach((q, i) => {
       if (q.options && q.options.length) {
+        const other = document.getElementById(`askq-other-${id}-${i}`);
+        const customText = (document.getElementById(`askq-text-${id}-${i}`)?.value || '').trim();
         const checked = [...document.querySelectorAll(`input[name="askq-radio-${id}-${i}"]:checked`)]
-          .map(el => el.value);
+          .map(el => el === other ? customText : el.value).filter(Boolean);
         if (!checked.length) return;
         answers[q.question] = q.multiSelect ? checked : checked[0];
       } else {
@@ -1448,39 +1464,59 @@ class ChatLogRenderer {
       this._setAskqSubmitStatus(id, '请至少回答一个问题', true);
       return;
     }
+    const answerIdentity = JSON.stringify(answers);
+    if (e.answerAttempt && e.answerAttempt.answers !== answerIdentity) {
+      this._setAskqSubmitStatus(id, '上次回答结果尚未确认，请保留原回答并重试', true);
+      return;
+    }
 
     const submitBtn = document.getElementById(`askq-submit-btn-${id}`);
     if (submitBtn) submitBtn.disabled = true;
     this._setAskqSubmitStatus(id, '提交中…', false);
 
+    let definitiveFailure = false;
     try {
       if (!this.taskId) throw new Error('缺少 task id，无法提交');
-      const detailResp = await fetch(`${API}/api/tasks/${this.taskId}`);
-      if (!detailResp.ok) throw new Error(`获取任务详情失败（HTTP ${detailResp.status}）`);
-      const detail = await detailResp.json();
-      const pending = detail.pending_intervention;
-      if (!pending || pending.tool_call_id !== id) {
-        throw new Error('这个问题已经不再等待回答了（可能已被回答或已超时）');
+      let body = e.answerAttempt?.body;
+      if (!body) {
+        const detailResp = await fetch(`${API}/api/tasks/${this.taskId}`);
+        if (!detailResp.ok) throw new Error(`获取任务详情失败（HTTP ${detailResp.status}）`);
+        const detail = await detailResp.json();
+        const pending = detail.pending_intervention;
+        if (!pending || pending.tool_call_id !== id) {
+          throw new Error('这个问题已经不再等待回答了（可能已被回答或已超时）');
+        }
+        body = JSON.stringify({ tool_call_id: id, token: pending.token, answers });
+        if (e.nativeQuestion) e.answerAttempt = {body, answers:answerIdentity};
       }
 
       const answerResp = await fetch(`${API}/api/tasks/${this.taskId}/answer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool_call_id: id, token: pending.token, answers }),
+        body,
       });
       if (!answerResp.ok) {
+        definitiveFailure = answerResp.status >= 400 && answerResp.status < 500;
         const detailErr = await answerResp.json().catch(() => ({}));
         throw new Error(detailErr.detail || `提交失败（HTTP ${answerResp.status}）`);
       }
 
+      e.answerAttempt = null;
+      if (!e.isLive) return; // A streamed close/Task end already owns the final status.
       e.isLive = false;
       this._setAskqSubmitStatus(id, '✓ 已提交，等待任务处理…', false);
-      const row = document.getElementById(`askq-submit-row-${id}`);
-      if (row) row.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+      this._disableAskqInputs(id);
     } catch (err) {
+      if (definitiveFailure) e.answerAttempt = null;
+      if (!e.isLive) return; // Never reopen a question after its authoritative close.
       this._setAskqSubmitStatus(id, `✗ ${err.message || '提交失败'}`, true);
       if (submitBtn) submitBtn.disabled = false;
     }
+  }
+
+  _disableAskqInputs(id) {
+    const wrap = this.toolMap[id]?.wrap;
+    if (wrap) wrap.querySelectorAll('input, .askq-submit-btn').forEach(el => { el.disabled = true; });
   }
 
   _setAskqSubmitStatus(id, text, isError) {
@@ -1497,8 +1533,7 @@ class ChatLogRenderer {
     for (const [id, e] of Object.entries(this.toolMap)) {
       if (!e.isLive) continue;
       e.isLive = false;
-      const row = document.getElementById(`askq-submit-row-${id}`);
-      if (row) row.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+      this._disableAskqInputs(id);
       this._setAskqSubmitStatus(id, '任务已结束，未作答', true);
     }
   }

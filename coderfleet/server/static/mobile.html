@@ -913,8 +913,8 @@
 <script src="/static/js/shared/image-upload.js?v=20260528-imagefix"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
-<script src="/static/js/renderer.js?v=__BUILD__"></script>
-<script src="/static/js/sdk-task-controls.js?v=__BUILD__-3"></script>
+<script src="/static/js/renderer.js?v=__BUILD__-4"></script>
+<script src="/static/js/sdk-task-controls.js?v=__BUILD__-4"></script>
 
 <script>
 // ── State ────────────────────────────────────────────────
@@ -1930,6 +1930,7 @@ function _mobileSDKEditor() {
 }
 
 async function _performMobileSDKAction(task, action) {
+  if (!task || _mobileComposerTask()?.id !== task.id) { updateSendState(); return; }
   const button = document.getElementById('btn-send');
   if (!button || button.dataset.busy === '1') return;
   button.dataset.busy = '1'; button.disabled = true;
@@ -2004,6 +2005,8 @@ function startNew(proj) {
   closeSheet();
   pendingProj = proj;
   activeConv  = null;
+  const queue = document.getElementById('mobile-queue-mode');
+  if (queue) queue.checked = false;
 
   document.getElementById('chat-ttl').textContent = '新对话';
   document.getElementById('chat-sub').textContent = proj.name;
@@ -2108,6 +2111,7 @@ function toggleMobileProjPin() {
 
 // ── Navigation ────────────────────────────────────────────
 function showChat() {
+  updateSendState();
   document.getElementById('v-chat').classList.remove('slide-out');
   bindMobileChatScroll();
 }

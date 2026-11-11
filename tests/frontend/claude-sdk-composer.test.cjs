@@ -12,6 +12,8 @@ class Element {
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren() { this.children = []; }
   dispatchEvent() {}
+  focus() {}
+  querySelectorAll() { return []; }
   addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
 }
 
@@ -22,13 +24,15 @@ function desktop() {
   const context = vm.createContext({
     document:{getElementById:id=>nodes.get(id)||null,createElement:()=>new Element(),addEventListener(){}},
     localStorage:{getItem:()=>null},sessionStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
-    crypto:require('node:crypto'),Event:class {}, API:'',console,setTimeout,clearTimeout,alert(){},confirmDialog:async()=>false,
+    crypto:require('node:crypto'),Event:class {}, API:'',esc:value=>String(value),console,setTimeout,clearTimeout,alert(){},confirmDialog:async()=>false,
     fetch:async(url,options)=>{calls.push({url,body:options?.body?JSON.parse(options.body):null});return{ok:true,json:async()=>url==='/api/tasks'?{id:'queued-task',status:'pending',type:'claude'}:{status:'accepted'}};},
   });
   for (const file of ['state.js','sdk-task-controls.js','chat.js']) vm.runInContext(fs.readFileSync('coderfleet/server/static/js/'+file,'utf8'),context,{filename:file});
   vm.runInContext(`activeConversationId='conv-one';currentChatTaskId='task-one';tasksCache=[{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}];`,context);
+  const loadConversations = context.loadConversations;
+  const selectConversation = context.selectConversation;
   vm.runInContext(`selectConversation=async()=>{};loadConversations=()=>{};loadTasks=()=>{};loadProjectsDashboard=()=>{};renderImagePreviews=()=>{};`,context);
-  return {context,nodes,calls};
+  return {context,nodes,calls,loadConversations,selectConversation};
 }
 
 test('desktop supplementary send uses the actual desktop upload state', async () => {
@@ -204,4 +208,190 @@ test('typing enables the primary button when no Task is running', () => {
   nodes.get('chat-input').value='新的任务';
   nodes.get('chat-input').listeners.input[0]();
   assert.equal(nodes.get('chat-send-btn').disabled,false);
+});
+
+
+test('desktop heartbeat updates connecting to interrupt while logs are streaming, without reloading the workspace', async () => {
+  const {context,nodes,loadConversations} = desktop();
+  vm.runInContext('tasksCache[0].sdk_control_ready=false;chatFollowMode=true;_syncChatSendButton(currentChatTaskId,false)',context);
+  assert.equal(nodes.get('chat-send-btn').dataset.action,'connecting');
+  nodes.get('chat-input').value='';
+  const timers=[];
+  context.window={addEventListener(){}};
+  context.setInterval=(callback,delay)=>timers.push({callback,delay});
+  const initializers=['updateThemeIcon','initSidebarState','initChatSidebarState','initTopbarTabs','initBottomTerminalDrawer','initChatSortBtn','checkHealth','refreshGlobalCaches','loadAccountOptions','resizeBottomTerminal','disconnectAllBottomTerminals'];
+  for (const name of initializers) context[name]=()=>{};
+  context.getApiKey=()=>true;
+  vm.runInContext(fs.readFileSync('coderfleet/server/static/js/app.js','utf8'),context,{filename:'app.js'});
+  context.loadConversations=loadConversations;
+  for (const name of ['updateTaskExecutionMetadata','syncConversationTabLabels','renderTopbarTabs','renderConversations']) context[name]=()=>{};
+  let workspaceReloads=0;
+  context.selectConversation=async()=>{workspaceReloads++;};
+  context.fetch=async url=>({ok:true,json:async()=> {
+    if (url==='/api/tasks/heartbeat') return [{id:'task-one',conversation_id:'conv-one',status:'running',sdk_control_ready:true}];
+    if (url==='/api/tasks?limit=1000') return [{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}];
+    return [];
+  }});
+  const poll=context.pollChatHeartbeat;
+  let heartbeatWork;
+  context.pollChatHeartbeat=()=>{heartbeatWork=poll();return heartbeatWork;};
+  timers.find(timer=>timer.delay===5000).callback();
+  assert.ok(heartbeatWork,'The active log stream must not suppress task state polling');
+  await heartbeatWork;
+  await new Promise(setImmediate);
+  assert.equal(nodes.get('chat-send-btn').dataset.action,'interrupt');
+  assert.equal(nodes.get('chat-send-btn').disabled,false);
+  assert.equal(workspaceReloads,0,'Readiness updates must retain the existing editor and question forms');
+});
+
+
+test('an unknown delivery cannot be replayed as a queued or scheduled Task after exit', async () => {
+  for (const mode of ['chat-queue-mode','chat-schedule-checkbox']) {
+    const {context,nodes,calls} = desktop();
+    context.fetch=async (url,options)=> {
+      calls.push({url,body:options?.body?JSON.parse(options.body):null});
+      if (options && url.endsWith('/messages')) throw new Error('response lost');
+      return {ok:true,json:async()=>({status:'unconfirmed'})};
+    };
+    nodes.get('chat-input').value='结果未知';
+    vm.runInContext('_syncChatSendButton(currentChatTaskId,false)',context);
+    await nodes.get('chat-send-btn').onclick();
+    vm.runInContext("tasksCache[0].status='done';currentChatTaskId=null",context);
+    nodes.get(mode).checked=true;
+    vm.runInContext('_syncChatSendButton(null,false)',context);
+    assert.equal(nodes.get('chat-send-btn').dataset.action,'check');
+    await nodes.get('chat-send-btn').onclick();
+    assert.equal(calls.some(call=>call.url==='/api/tasks'),false);
+    assert.match(calls.at(-1).url,/\/commands\//);
+    assert.equal(nodes.get('chat-input').value,'结果未知');
+  }
+});
+
+test('mobile new-chat navigation clears the previous Task action and queue preference', async () => {
+  const {context,nodes,calls} = mobile();
+  for (const id of ['proj-sheet','chat-ttl','chat-sub','chat-body','chat-empty','v-chat']) nodes.set(id,new Element());
+  context.bindMobileChatScroll=()=>{};
+  nodes.get('mobile-queue-mode').checked=true;
+  vm.runInContext("updateSendState();startNew({name:'Other project'})",context);
+  assert.equal(nodes.get('btn-send').dataset.action,'empty');
+  assert.equal(nodes.get('btn-send').disabled,true);
+  assert.equal(nodes.get('mobile-queue-mode').checked,false);
+  await nodes.get('btn-send').onclick();
+  assert.deepEqual(calls,[],'A click in a new chat must never interrupt the previous Task');
+});
+
+test('a stale desktop Task ID cannot dispatch an action outside the active conversation', async () => {
+  const {context,nodes,calls} = desktop();
+  vm.runInContext("activeConversationId='other-conversation';_syncChatSendButton(currentChatTaskId,false)",context);
+  assert.equal(nodes.get('chat-send-btn').dataset.action,'empty');
+  await nodes.get('chat-send-btn').onclick();
+  assert.deepEqual(calls,[]);
+});
+
+
+test('pending to running heartbeat starts the workspace once and preserves the editor on readiness-only updates', async () => {
+  const {context,nodes,loadConversations} = desktop();
+  context.loadConversations=loadConversations;
+  for (const name of ['updateTaskExecutionMetadata','syncConversationTabLabels','renderTopbarTabs','renderConversations']) context[name]=()=>{};
+  let reloads=0;
+  context.selectConversation=async()=>{reloads++;};
+  vm.runInContext("tasksCache[0].status='pending';tasksCache[0].sdk_control_ready=false;currentChatTaskId=null",context);
+  nodes.get('chat-input').value='草稿保留';
+  context.fetch=async url=>({ok:true,json:async()=>url.includes('/api/tasks') ?
+    [{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}] : []});
+  await vm.runInContext('pollChatHeartbeat()',context);
+  assert.equal(reloads,1,'A pending Task starting must open its log stream');
+  assert.equal(nodes.get('chat-input').value,'草稿保留');
+  assert.equal(nodes.get('chat-send-btn').dataset.action,'message');
+});
+
+test('switching conversations rejects a captured interrupt while the next workspace is loading', async () => {
+  const {context,nodes,calls,selectConversation} = desktop();
+  context.selectConversation=selectConversation;
+  for (const name of ['upsertConversationTab','renderTopbarTabs','rerenderChatProjectList','renderChatWorkspace','syncBottomTerminalProjectFromContext']) context[name]=()=>{};
+  vm.runInContext("chatConversationsList=[{id:'other-conversation'}];_syncChatSendButton(currentChatTaskId,false)",context);
+  const staleClick=nodes.get('chat-send-btn').onclick;
+  let release;
+  context.fetch=async()=>({ok:true,json:async()=>await new Promise(resolve=>{release=resolve;})});
+  const selection=vm.runInContext("selectConversation('other-conversation')",context);
+  await new Promise(setImmediate);
+  await staleClick();
+  assert.deepEqual(calls,[],'Navigation must revoke the previous Task capability before the new fetch completes');
+  release([]);
+  await selection;
+});
+
+
+test('a transient full-list failure cannot erase the heartbeat-confirmed running SDK Task', async () => {
+  const {context,nodes,loadConversations} = desktop();
+  context.loadConversations=loadConversations;
+  for (const name of ['updateTaskExecutionMetadata','syncConversationTabLabels','renderTopbarTabs','renderConversations']) context[name]=()=>{};
+  nodes.set('chat-history-list',new Element());
+  vm.runInContext('tasksCache[0].sdk_control_ready=false;_syncChatSendButton(currentChatTaskId,false)',context);
+  context.fetch=async url=>{
+    if(url==='/api/tasks?limit=1000') throw new Error('temporary connection loss');
+    return {ok:true,json:async()=>url==='/api/tasks/heartbeat' ?
+      [{id:'task-one',conversation_id:'conv-one',status:'running',sdk_control_ready:true}] : []};
+  };
+  await vm.runInContext('pollChatHeartbeat()',context);
+  assert.equal(nodes.get('chat-send-btn').dataset.action,'interrupt');
+  nodes.get('chat-input').value='仍然补充给当前任务';
+  vm.runInContext('_syncChatSendButton(currentChatTaskId,false)',context);
+  assert.equal(nodes.get('chat-send-btn').dataset.action,'message');
+});
+
+
+test('a delayed startup heartbeat cannot rebuild a different conversation after navigation', async () => {
+  const {context,loadConversations}=desktop();
+  context.loadConversations=loadConversations;
+  for(const name of ['updateTaskExecutionMetadata','syncConversationTabLabels','renderTopbarTabs','renderConversations']) context[name]=()=>{};
+  vm.runInContext("tasksCache[0].status='pending';currentChatTaskId=null",context);
+  const reloads=[];
+  context.selectConversation=async id=>reloads.push(id);
+  let release;
+  context.fetch=async url=>({ok:true,json:async()=>{
+    if(url==='/api/tasks/heartbeat') return [{id:'task-one',conversation_id:'conv-one',status:'running',sdk_control_ready:true}];
+    if(url==='/api/tasks?limit=1000') return await new Promise(resolve=>{release=resolve;});
+    return [];
+  }});
+  const polling=vm.runInContext('pollChatHeartbeat()',context);
+  await new Promise(setImmediate);
+  vm.runInContext("activeConversationId='other-conversation';currentChatTaskId=null",context);
+  release([{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}]);
+  await polling;
+  assert.deepEqual(reloads,[],'A startup refresh belongs only to the conversation that observed it');
+});
+
+
+function workspaceHarness() {
+  const result=desktop();
+  const {context,nodes,selectConversation}=result;
+  for(const id of ['chat-workspace','chat-content','chat-status-text']) nodes.set(id,new Element());
+  context.ChatLogRenderer=class {};
+  context.fmtTime=()=>'';
+  context.getChatAccount=async()=>null;
+  for(const name of ['buildChatUsagePillHtml','_gitBranchBadgeForConversation','restoreFilePanelIfOpen',
+    'bindChatTextareaEvents','renderQueuePanel','upsertConversationTab','renderTopbarTabs',
+    'rerenderChatProjectList','syncBottomTerminalProjectFromContext']) context[name]=()=>'';
+  context.selectConversation=selectConversation;
+  context.fetch=async()=>({ok:true,json:async()=>[]});
+  vm.runInContext("tasksCache=[];pendingImages=[{container_path:'/workspace/next-draft.png'}]",context);
+  return result;
+}
+
+test('same-conversation startup and finish refreshes preserve visible draft attachments',async()=>{
+  const {context}=workspaceHarness();
+  let previewRefreshes=0;
+  context.renderImagePreviews=()=>{previewRefreshes++;};
+  await vm.runInContext("renderChatWorkspace({id:'conv-one',project_name:'project'})",context);
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(pendingImages)',context)),
+    [{container_path:'/workspace/next-draft.png'}]);
+  assert.equal(previewRefreshes,1,'Retained attachments must also remain visible in the new editor');
+});
+
+test('explicit navigation clears draft attachments from the previous conversation',async()=>{
+  const {context}=workspaceHarness();
+  vm.runInContext("chatConversationsList=[{id:'other-conversation',project_name:'other-project'}]",context);
+  await vm.runInContext("selectConversation('other-conversation')",context);
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(pendingImages)',context)),[]);
 });

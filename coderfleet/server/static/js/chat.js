@@ -28,7 +28,7 @@ async function _autoTitleConversation(convId, promptText) {
 }
 
 // 加载会话列表及数据
-async function loadConversations(renderWorkspace = true) {
+async function loadConversations(renderWorkspace = true, refreshConversationId = '') {
   // Restore active conversation from sessionStorage on first load after page refresh
   if (activeConversationId === null && renderWorkspace) {
     try {
@@ -39,17 +39,19 @@ async function loadConversations(renderWorkspace = true) {
   try {
     const [convs, projects, tasks] = await Promise.all([
       fetch(`${API}/api/conversations`).then(r => r.json()),
-      fetch(`${API}/api/projects`).then(r => r.json()).catch(() => []),
-      fetch(`${API}/api/tasks?limit=1000`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/api/projects`).then(r => { if (!r.ok) throw new Error('项目列表加载失败'); return r.json(); }),
+      fetch(`${API}/api/tasks?limit=1000`).then(r => { if (!r.ok) throw new Error('任务列表加载失败'); return r.json(); }),
     ]);
-    const shouldRefreshActiveWorkspace = shouldRefreshActiveChatForTaskStatusChange(tasks);
+    if (![convs, projects, tasks].every(Array.isArray)) throw new Error('会话列表响应无效');
+    const shouldRefreshActiveWorkspace = (!!refreshConversationId && activeConversationId === refreshConversationId) || shouldRefreshActiveChatForTaskStatusChange(tasks);
     projectsCache = projects;
     tasksCache = tasks;
     updateTaskExecutionMetadata(tasks);
     chatConversationsList = convs;
     if (!renderWorkspace && currentPage === 'chat' && activeConversationId) {
       const running = tasks.find(t => t.status === 'running' && (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId));
-      _syncChatSendButton(running?.id || null, _isChatQueueFull(activeConversationId));
+      currentChatTaskId = running?.id || null;
+      _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
     }
 
     conversationsCache = {};
@@ -133,7 +135,7 @@ async function pollChatHeartbeat() {
   }
   if (!Array.isArray(heartbeat)) return;
 
-  const needsActiveWorkspaceRefresh = shouldRefreshActiveChatForTaskStatusChange(heartbeat);
+  const refreshConversationId = shouldRefreshActiveChatForTaskStatusChange(heartbeat) ? activeConversationId : '';
 
   const byId = new Map(tasksCache.map(t => [t.id, t]));
   let hasNewOrChangedTask = false;
@@ -145,15 +147,23 @@ async function pollChatHeartbeat() {
       }
       existing.status = h.status;
       existing.finished = h.finished;
+      existing.sdk_control_ready = h.sdk_control_ready;
     } else {
       // 心跳里出现了缓存里没有的任务 id：说明有新任务提交了，侧边栏的
       // 「最近访问」需要用一次全量刷新去拿到它所属会话的最新排序时间。
       hasNewOrChangedTask = true;
     }
   });
-  if (currentPage === 'chat') renderConversations(chatConversationsList, projectsCache, tasksCache);
+  if (currentPage === 'chat') {
+    renderConversations(chatConversationsList, projectsCache, tasksCache);
+    if (activeConversationId) {
+      const running = tasksCache.find(t => t.status === 'running' && (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId));
+      currentChatTaskId = running?.id || null;
+      _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
+    }
+  }
 
-  if (needsActiveWorkspaceRefresh || hasNewOrChangedTask) loadConversations(false);
+  if (refreshConversationId || hasNewOrChangedTask) await loadConversations(false, refreshConversationId);
 }
 
 // 以项目大标题分组渲染会话列表
@@ -810,6 +820,7 @@ function toggleChatProjectItems(encodedProjectName) {
 // 选择会话
 async function selectConversation(convId) {
   stopChatFollow();
+  if (activeConversationId !== convId) pendingImages = [];
   activeConversationId = convId;
   try { sessionStorage.setItem('coderfleet.activeConvId', convId || ''); } catch (_) {}
   activeTabId = upsertConversationTab(convId);
@@ -830,6 +841,7 @@ async function selectConversation(convId) {
     tasksCache = Array.from(byId.values());
   } catch (_) {}
 
+  if (activeConversationId !== convId) return;
   await renderChatWorkspace(conv);
   syncBottomTerminalProjectFromContext();
 }
@@ -1447,9 +1459,9 @@ async function renderChatWorkspace(conv) {
   const savedInput = document.getElementById('chat-input')?.value || '';
 
   currentChatProjectName = conv.project_name || conv.project?.split('/').pop() || '';
-  pendingImages = [];
 
   const chatAccount = await getChatAccount(conv.account);
+  if (activeConversationId !== conv.id) return;
   const chatAccountType = chatAccount?.type || '';
   const modelPillHtml = chatAccountType === 'claude' ? buildChatModelPillHtml() : '';
   const usagePillHtml = buildChatUsagePillHtml(chatAccount);
@@ -1516,6 +1528,7 @@ async function renderChatWorkspace(conv) {
 
   const textarea = document.getElementById('chat-input');
   bindChatTextareaEvents(textarea);
+  renderImagePreviews();
   if (savedInput && textarea) {
     textarea.value = savedInput;
     textarea.style.height = 'auto';
@@ -2221,9 +2234,9 @@ function _resetChatQueueMode() {
 }
 
 function _chatComposerTask(runningTaskId = currentChatTaskId) {
-  return (tasksCache || []).find(t =>
-    (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId) && SDKTaskControls.hasPending(t.id)) ||
-    (tasksCache || []).find(t => t.id === runningTaskId);
+  if (!activeConversationId) return undefined;
+  const own = (tasksCache || []).filter(t => activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId);
+  return own.find(t => SDKTaskControls.hasPending(t.id)) || own.find(t => t.id === runningTaskId);
 }
 
 function _chatSDKEditor() {
@@ -2240,6 +2253,10 @@ function _chatSDKEditor() {
 }
 
 async function _performChatSDKAction(task, action) {
+  if (!task || _chatComposerTask()?.id !== task.id) {
+    _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
+    return;
+  }
   const button = document.getElementById('chat-send-btn');
   if (!button || button.dataset.busy === '1') return;
   button.dataset.busy = '1'; button.disabled = true;

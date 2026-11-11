@@ -791,6 +791,13 @@ def test_run_template_resolves_default_fixed_and_runtime_targets(
         ],
     )
 
+    # Target resolution must not launch real CLI watchers or contact Docker.
+    # _instant_done below owns this test's Task completion.
+    async def _no_execution(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(sched, "_run", _no_execution)
+
     # _wait_for_task_done normally polls until a task reaches a terminal state.
     # In tests there is no real container, so we stub it to immediately mark the
     # task as done and return TaskStatus.done.
@@ -1982,10 +1989,11 @@ def test_ephemeral_task_retention_starts_session_container_then_execs(
 
     asyncio.run(sched._run_ephemeral_task(task, acc, log_path, auto=False, conversation=conversation, session_dir=sched._get_session_dir(conversation.id)))
 
-    assert calls[0][:2] == ("docker", "run")
-    assert "--rm" not in calls[0]
-    assert "-d" in calls[0]
-    assert calls[1][:2] == ("docker", "exec")
+    assert calls[0] == ("docker", "rm", "-f", "coderfleet-eph-session-conv-eph")
+    assert calls[1][:2] == ("docker", "run")
+    assert "--rm" not in calls[1]
+    assert "-d" in calls[1]
+    assert calls[2][:2] == ("docker", "exec")
     saved_conv = sched.get_conversation(conversation.id)
     assert saved_conv is not None
     assert saved_conv.ephemeral_container_name == "coderfleet-eph-session-conv-eph"

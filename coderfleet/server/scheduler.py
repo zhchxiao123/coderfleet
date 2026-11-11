@@ -3305,11 +3305,7 @@ class Scheduler:
             if keep_container:
                 if not self._docker_container_running(container_name):
                     try:
-                        subprocess.run(
-                            ["docker", "rm", "-f", container_name],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
+                        await self.runtime.remove(container_name)
                     except Exception:
                         pass
                     start_proc = await self.runtime.run(ContainerSpec(
@@ -3390,6 +3386,7 @@ class Scheduler:
 
             captured_session_id = ""
             session_scan_buffer = ""
+            sdk_event_buffer = ""
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             import aiofiles
             async with aiofiles.open(log_path, mode="a", encoding="utf-8") as f:
@@ -3415,7 +3412,11 @@ class Scheduler:
                         await f.write(text)
                         await f.flush()
                         if task.execution_backend == "sdk":
-                            self._record_sdk_progress(task, session_scan_buffer + text)
+                            sdk_event_buffer += text
+                            complete, separator, remaining = sdk_event_buffer.rpartition("\n")
+                            if separator:
+                                self._record_sdk_progress(task, complete + "\n")
+                                sdk_event_buffer = remaining
                         if not captured_session_id:
                             session_scan_buffer = (session_scan_buffer + text)[-65536:]
                             captured_session_id = self.extract_native_session_id(
@@ -3438,6 +3439,8 @@ class Scheduler:
                 if final_text:
                     await f.write(final_text)
                     await f.flush()
+                if task.execution_backend == "sdk" and (sdk_event_buffer or final_text):
+                    self._record_sdk_progress(task, sdk_event_buffer + final_text)
 
             await proc.wait()
             rc = proc.returncode if proc.returncode is not None else -1
@@ -5682,15 +5685,36 @@ class Scheduler:
     async def answer_intervention(
         self, task_id: str, tool_call_id: str, token: str, answers: dict,
     ) -> None:
+        from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox, MAX_COMMANDS
+
         task = self.get_task(task_id)
         pending = task.pending_intervention if task else None
-        if pending is None or pending.kind != 'native':
-            self.resolve_intervention(task_id, tool_call_id, token, answers)
-            return
-        if pending.tool_call_id != tool_call_id or pending.token != token:
-            raise RuntimeError('问题或 token 不匹配')
+        identifier = 'answer-' + token
+        existing_delivery = False
+        if task and task.execution_backend == 'sdk' and task.sdk_control_token:
+            mailbox = ControlMailbox(self._sdk_control_directory(task), task.id, task.sdk_control_token)
+            for attempt in range(1, MAX_COMMANDS + 1):
+                identifier = 'answer-' + token + (f'-{attempt}' if attempt > 1 else '')
+                if not mailbox.has_command(identifier):
+                    break
+                receipt = mailbox.reply(identifier)
+                if not receipt or receipt['status'] != 'rejected':
+                    # An accepted or unknown attempt must keep its immutable payload,
+                    # including after question closure or Task completion.
+                    existing_delivery = True
+                    break
+                if not pending or pending.kind != 'native' or pending.token != token:
+                    raise RuntimeError('这个问题已经被回答过或已超时')
+            else:
+                raise RuntimeError('当前问题的回答尝试次数已达上限')
+        if not existing_delivery:
+            if pending is None or pending.kind != 'native':
+                self.resolve_intervention(task_id, tool_call_id, token, answers)
+                return
+            if pending.tool_call_id != tool_call_id or pending.token != token:
+                raise RuntimeError('问题或 token 不匹配')
         await self.sdk_command(task_id, 'answer', {'tool_call_id':tool_call_id, 'answers':answers},
-                               request_id='answer-' + token)
+                               request_id=identifier)
         current = self.get_task(task_id)
         if current and current.pending_intervention and current.pending_intervention.token == token:
             current.pending_intervention = None

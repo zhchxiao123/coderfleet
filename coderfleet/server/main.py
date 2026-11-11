@@ -2268,7 +2268,7 @@ async def update_task(task_id: str, body: TaskUpdate):
 class TaskAnswerRequest(BaseModel):
     tool_call_id: str
     token:        str
-    answers:      dict
+    answers:      dict[str, str | list[str]]
 
 
 @app.post("/api/tasks/{task_id}/answer")
