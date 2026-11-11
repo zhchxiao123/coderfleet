@@ -34,22 +34,23 @@
 - 前端真实调用方/渲染器/回执专项：36 项通过。证据 `.scratch/native-logic-audit-20261110/frontend-green.log`。
 - Task/API、分块事件、原生答案回执与 Runtime 清理专项：12 项通过；UI/API 组合检查上一轮 88 项通过。证据 `focused-final.log` 和执行输出。
 - 真实固定版 SDK + 受控 CLI 的原生交互：9 项通过，涵盖插话同 ID 重试、当前轮消费、中断、原生答案、超时、auto 不等待人。它不调用模型，不代表真实模型验收。
-- 完整最终套件：866 通过、35 跳过、1 项进程观测超时，耗时 224.73 秒；唯一超时项 test_controller_does_not_signal_saved_group_with_wrong_launch_token 独立复测 1.00 秒通过。不能写成一次全量全绿。日志 full-suite-complete.log / observer-recheck.log。
+- 环境恢复后的完整最终套件：**902 项全部通过，无跳过**，耗时 189.15 秒；明确启用固定版 SDK 与隔离容器测试。6 条既有弃用/事件循环清理警告不影响结果。日志 full-suite-recovered.log。早期无容器环境的全量为 866 通过、35 跳过、1 项观测超时；独立复查及恢复后完整重跑均通过，早期日志保留。
 - 四项仓库 guard 通过。
 
-## 环境限制与未完成验收
+## 环境恢复后的补充验收
 
-本次真实模型验收采用新容器、指定账号凭据只读挂载、现有 container→relay→宿主代理。测试不使用 standalone sleep，以原生问题等待作为可确定的中断/插话窗口。
+首轮 Docker/OrbStack 的 inspect 及 socket 健康检查持续超时，部分 local 进程检查也超时。恢复后重跑，隔离容器和 local 的真实 SDK + 受控 CLI 生命周期验收 **16 项通过**（61.92 秒），包括持续容器跟随/恢复、临时释放/保留/TTL、local resume/fork、停止与崩溃清理；未以超时期间的业务 result 冒充 Task 已结束。
 
-但 Docker/OrbStack 在创建测试容器前即持续超时：docker inspect 30 秒超时、socket /_ping 5 秒无响应，多次复查一致。未创建该次测试容器，未调用模型，未停止/重建现有容器。因此本次容器生命周期、真实模型、代理出口链路不能标记通过。
+真实模型使用授权账号、新会话和新隔离容器，凭据只读挂载，走现有 container→relay→宿主代理，不使用 standalone sleep。四个 Task 验收通过：
 
-启用全部真实 SDK 的全量尝试中，部分 local 集成/停止用例遇到进程观测超时：现有 BSD ps 环境扫描在 1 秒内未完成，导致 20 秒 Task 验收期限失败；同一 local 普通请求独立重跑通过，resume 重跑仍出现观测超时。这些用例当前不能宣称通过，也不因业务 result 已出现而伪造 Task 完成。原生 worker 的独立协议验收 9 项通过。
+1. 原生 AskUserQuestion 等待期间取消宿主 watcher 并重新接管，回答后得到 NATIVE_QUESTION_OK Alpha。
+2. 另一原生问题等待时调用 SDK interrupt，Task 为 killed 且 interrupted=true，保留原生 session。
+3. 同 Conversation 恢复后得到 RESUME_AFTER_INTERRUPT_OK，session 与中断前一致。
+4. 等待原生问题期间补充消息，同 ID 重试只接收一次；自定义答案提交后得到 SUPPLEMENT_INPUT_OK；Task 结束后重试原答案返回原回执。
 
-另修正了既有模板目标解析测试误启动真实 watcher 的测试隔离问题，保留目标映射断言。最终核心全量使用明确不可达的测试 Docker socket，避免非容器用例意外访问卡住的 daemon；可选 SDK/container 验收按各自开关单独列证据。浏览器实点未在本次执行，前端证据来自真实页面脚本调用链。
+测试容器已经清理。前后快照证明 5 个既有工作容器及 relay 的 ID、PID、启动时间完全一致。证据 real-acceptance-recovered.log、real-40bdad66/results.json、before.json、after.json。未挂载生产项目或创建业务通知。
 
-## 后续复测入口
-
-Docker 恢复后执行本目录对应 scratch 中的 real_acceptance.py，并用 SDK_TEST_IMAGE 运行完整容器套件。真实 SDK/local 完整验收需在进程观测能稳定完成的环境重跑；保留现有超时语义，不把未知存活状态误判为已结束。首次刷新用于加载新版脚本，后续新 Task 的就绪切换无需刷新。
+既有模板目标解析测试已改为不启动真实 watcher，保留目标映射断言。早期核心全量与环境恢复后明确启用 SDK/容器的完整重跑分开记账；最终完整套件 902 项通过，没有把跳过算作通过。浏览器实点未在本次执行，前端证据来自真实页面脚本调用链。
 
 ## 本机交付
 
