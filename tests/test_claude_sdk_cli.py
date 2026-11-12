@@ -148,3 +148,48 @@ def test_native_task_commands_authenticate_and_preserve_retry_id(tmp_path, monke
     assert calls[0][0].endswith('/task-1/' + action)
     if command == 'send':
         assert calls[0][1]['json']['text'] == 'supplement'
+
+
+def test_task_run_selects_initial_model_and_sdk_options_together(tmp_path,monkeypatch):
+    monkeypatch.setattr(task_cmds,'_require_server',lambda:'http://test')
+    config=tmp_path/'sdk.json';config.write_text('{"max_turns":3,"thinking":{"type":"adaptive"}}')
+    captured=[]
+    def post(url,**kwargs):
+        captured.append(kwargs['json'])
+        return httpx.Response(201,json={'id':'one','account':'alice','type':'claude','project':'/workspace','status':'pending'})
+    monkeypatch.setattr(httpx,'post',post)
+    result=CliRunner().invoke(task_cmds.task_group,['run','review','--project','repo','--model','sonnet','--sdk-options',str(config)])
+    assert result.exit_code==0,result.output
+    assert captured==[{'prompt':'review','auto':False,'model':'sonnet','project_name':'repo',
+        'sdk_options':{'max_turns':3,'thinking':{'type':'adaptive'}}}]
+
+
+@pytest.mark.parametrize('command',[
+    ['run','review','--project','repo'],['list'],['logs','one'],['logs','one','-f'],
+    ['fork','conversation','--after-task','one'],
+])
+@pytest.mark.parametrize('api,key,expected',[
+    ('http://localhost:8767',None,'Bearer local-test-key'),
+    ('https://remote.example',None,''),
+    ('https://remote.example','explicit-key','Bearer explicit-key'),
+])
+def test_task_entry_points_use_endpoint_scoped_auth(tmp_path,monkeypatch,command,api,key,expected):
+    monkeypatch.setenv('CODERFLEET_WORKSPACE',str(tmp_path))
+    (tmp_path/'api_key.txt').write_text('local-test-key')
+    if key is None: monkeypatch.delenv('CODERFLEET_API_KEY',raising=False)
+    else: monkeypatch.setenv('CODERFLEET_API_KEY',key)
+    monkeypatch.setattr(task_cmds,'_require_server',lambda:api)
+    seen=[]
+    def respond(request):
+        seen.append(request)
+        assert request.headers.get('Authorization','')==expected
+        if command[0]=='run': return httpx.Response(201,json={'id':'one','account':'alice','type':'claude','project':'/workspace','status':'pending'})
+        if command[0]=='fork': return httpx.Response(201,json={'id':'forked'})
+        if command[0]=='list': return httpx.Response(200,json=[])
+        return httpx.Response(200,text='data: [DONE]\n\n' if '-f' in command else 'fixture output')
+    with httpx.Client(transport=httpx.MockTransport(respond),trust_env=False) as client:
+        for method in ('get','post','put','patch','delete','stream'):
+            monkeypatch.setattr(httpx,method,getattr(client,method))
+        result=CliRunner().invoke(task_cmds.task_group,command)
+    assert result.exit_code==0,result.output
+    assert len(seen)==1

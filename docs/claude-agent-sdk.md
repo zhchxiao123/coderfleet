@@ -94,7 +94,7 @@ coderfleet task interrupt <task-id> --request-id my-interrupt-1
 coderfleet task command-status <task-id> my-message-1
 ```
 
-这些交互命令和 status/answer 在本机读取当前工作区 API key，远端使用显式 `CODERFLEET_API_KEY`。非默认端口继续设置 `CODERFLEET_API`。
+全部 Task HTTP 命令在本机读取当前工作区 API key，远端使用显式 `CODERFLEET_API_KEY`；本机密钥不会自动发送给远端。非默认端口继续设置 `CODERFLEET_API`。
 
 补充消息默认只发文字；勾选原生附件插话后，新 worker 可接收本项目已上传附件，默认发送行为仍保留排队。“已接收”表示已交给当前 SDK 输入；模型可能在当前轮次内消费，也可能在后续轮次处理，不承诺立即抢占。每条投递带请求 ID；同 ID、同内容重试返回原回执，不重复发送。超时或连接丢失时保留草稿，用原 ID 查询或重试，不自动转成新 Task。
 
@@ -145,7 +145,7 @@ SDK 的 result 表示一次 turn 结束；后台 agent 的后续 turn 结束前�
 
 ## SDK 参数与扩展
 
-桌面和移动输入框中的“SDK 参数”提供 JSON 编辑器；CLI 使用 `coderfleet task run '要求' --project <项目> --sdk-options /absolute/options.json`。留空继承会话参数，显式 `{}` 恢复默认。参数保存在 Task 快照中，重试保留原快照；运行中的切换模型/权限不修改账号默认值。
+桌面和移动输入框中的“SDK 参数”提供 JSON 编辑器；CLI 使用 `coderfleet task run '要求' --project <项目> --model sonnet --sdk-options /absolute/options.json`。留空继承会话参数，显式 `{}` 恢复默认。参数保存在 Task 快照中，重试保留原快照；运行中的切换模型/权限不修改账号默认值。
 
 ```json
 {

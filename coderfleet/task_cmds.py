@@ -90,6 +90,7 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
         response = httpx.post(
             f"{api}/api/conversations/{conversation_id}/fork",
             json={"task_id": task_id, "name": name}, timeout=30,
+            headers=api_headers(api),
         )
     except httpx.RequestError as err:
         raise click.ClickException(f"请求失败：{err}") from err
@@ -109,6 +110,7 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
 @click.option("--type", "prefer_type", default=None,
               type=click.Choice(["codex", "claude", "opencode"]), help="指定账号类型")
 @click.option("--auto", is_flag=True, help="全自动模式（跳过权限确认）")
+@click.option("--model", default="", help="本次 Task 使用的模型名称")
 @click.option("--sdk-options", type=click.Path(exists=True,dir_okay=False,path_type=Path), help="SDK 参数 JSON 文件（保存在 Task 快照）")
 @click.option("--conversation", "conversation_id", default=None, help="续接已有任务链 ID")
 @click.option("--new-chain", "conversation_name", default=None, help="新建任务链并命名")
@@ -121,6 +123,7 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
 def cmd_task_run(
     prompt: str,
     sdk_options: Optional[Path],
+    model: str,
     prefer_project: Optional[str],
     account: Optional[str],
     prefer_type: Optional[str],
@@ -136,6 +139,8 @@ def cmd_task_run(
     api = _require_server()
 
     body: dict = {"prompt": prompt, "auto": auto}
+    if model.strip():
+        body["model"] = model.strip()
     if sdk_options is not None:
         from coderfleet.data.scripts.coderfleet_sdk_features import validate_options
         try:
@@ -170,7 +175,7 @@ def cmd_task_run(
         body["output_dir"] = str(Path(output_dir).expanduser().resolve())
 
     try:
-        r = httpx.post(f"{api}/api/tasks", json=body, timeout=10)
+        r = httpx.post(f"{api}/api/tasks", json=body, timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
 
@@ -221,7 +226,7 @@ def cmd_task_list(
         params["include_archived"] = "true"
 
     try:
-        r = httpx.get(f"{api}/api/tasks", params=params, timeout=10)
+        r = httpx.get(f"{api}/api/tasks", params=params, timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
 
@@ -336,7 +341,7 @@ def cmd_task_logs(task_id: str, follow: bool) -> None:
         click.secho("实时跟踪日志（Ctrl+C 退出）...", dim=True)
         url = f"{api}/api/tasks/{task_id}/logs/stream?tail=80"
         try:
-            with httpx.stream("GET", url, timeout=None) as r:
+            with httpx.stream("GET", url, timeout=None, headers=api_headers(api)) as r:
                 if r.status_code == 404:
                     raise click.ClickException(f"任务 '{task_id}' 不存在")
                 for line in r.iter_lines():
@@ -350,7 +355,7 @@ def cmd_task_logs(task_id: str, follow: bool) -> None:
             raise click.ClickException(f"请求失败：{e}")
     else:
         try:
-            r = httpx.get(f"{api}/api/tasks/{task_id}/logs", timeout=30)
+            r = httpx.get(f"{api}/api/tasks/{task_id}/logs", timeout=30, headers=api_headers(api))
         except httpx.RequestError as e:
             raise click.ClickException(f"请求失败：{e}")
 
@@ -371,7 +376,7 @@ def cmd_task_kill(task_id: str) -> None:
     api = _require_server()
 
     try:
-        r = httpx.delete(f"{api}/api/tasks/{task_id}", timeout=10)
+        r = httpx.delete(f"{api}/api/tasks/{task_id}", timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
 
@@ -598,7 +603,7 @@ def cmd_task_clean(keep: int) -> None:
     api = _require_server()
 
     try:
-        r = httpx.post(f"{api}/api/tasks/clean", params={"keep": keep}, timeout=10)
+        r = httpx.post(f"{api}/api/tasks/clean", params={"keep": keep}, timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
 

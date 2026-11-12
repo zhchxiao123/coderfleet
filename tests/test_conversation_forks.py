@@ -137,7 +137,8 @@ def test_fork_cli_uses_same_endpoint(monkeypatch):
     calls = []
     monkeypatch.setattr(task_cmds, "_require_server", lambda: "http://test")
 
-    def post(url, *, json, timeout):
+    def post(url, *, json, timeout, headers):
+        assert headers == {}
         calls.append((url, json))
         return httpx.Response(201, json={"id": "child"})
 
