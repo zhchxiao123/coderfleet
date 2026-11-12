@@ -13,7 +13,7 @@ class Element {
 function controls(fetch) {
   const storage = new Map();
   const context = vm.createContext({fetch, crypto:require('node:crypto'), document:{createElement:()=>new Element()},
-    sessionStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)}});
+    sessionStorage:{get length(){return storage.size;},key:index=>[...storage.keys()][index],getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)}});
   vm.runInContext(fs.readFileSync('coderfleet/server/static/js/sdk-task-controls.js','utf8'), context);
   return vm.runInContext('SDKTaskControls', context);
 }
@@ -71,4 +71,53 @@ test('composer actions reveal receipt checks only while delivery is unconfirmed'
   assert.equal(receipt.hidden,true);
   assert.equal(text,'');
   assert.match(status.textContent,/已送达当前任务/);
+});
+
+test('runtime controls preserve uncertain input and query receipts without replay',async()=>{
+  let calls=0; const requests=[];
+  const ui=controls(async(url,options)=>{
+    if(!options) return {ok:true,json:async()=>({status:'accepted'})};
+    requests.push(JSON.parse(options.body));
+    assert.match(url,/sdk-control$/);
+    if(++calls===1) throw new Error('response lost');
+    return {ok:true,json:async()=>({status:'accepted',result:{value:{totalTokens:42}}})};
+  });
+  await assert.rejects(ui.executeControl('one','set_model',{model:'sonnet'}));
+  await assert.rejects(ui.executeControl('one','set_model',{model:'opus'}),/尚未确认/);
+  await ui.executeControl('one','set_model',{model:'sonnet'});
+  assert.equal(requests[0].request_id,requests[1].request_id);
+  assert.equal(ui.pending('one','control-set_model'),null);
+});
+
+test('native attachments are opt-in and old workers retain queue behavior',()=>{
+  const ui=controls();
+  const task={id:'one',status:'running',execution_backend:'sdk',sdk_control_ready:true};
+  const draft={text:'',hasAttachments:true,nativeAttachments:true,images:['/workspace/.coderfleet-uploads/one.png']};
+  assert.equal(ui.primaryAction(task,draft),'queue');
+  task.sdk_capabilities=['multimodal_input'];
+  assert.equal(ui.primaryAction(task,draft),'message');
+  assert.equal(ui.primaryAction(task,{...draft,nativeAttachments:false}),'queue');
+});
+
+test('attachment delivery retries preserve exact filenames and do not resend changed input',async()=>{
+  const requests=[]; const ui=controls(async(_url,options)=>{
+    requests.push(JSON.parse(options.body));
+    if(requests.length===1) throw new Error('response lost');
+    return {ok:true,json:async()=>({status:'accepted'})};
+  });
+  const images=['/workspace/.coderfleet-uploads/one.png'];
+  await assert.rejects(ui.execute('one','message','',images));
+  await assert.rejects(ui.execute('one','message','',[]),/尚未确认/);
+  await ui.execute('one','message','',images);
+  assert.deepEqual(requests[0],requests[1]);
+});
+
+
+test('unknown runtime settings do not block a new message after the old Task ends',async()=>{
+  const ui=controls(async()=>{throw new Error('response lost');});
+  await assert.rejects(ui.executeControl('one','set_model',{model:'sonnet'}));
+  const task={id:'one',status:'done',execution_backend:'sdk',sdk_control_ready:false};
+  assert.equal(ui.hasPending('one'),true);
+  assert.equal(ui.hasPendingDelivery('one'),false);
+  assert.equal(ui.primaryAction(task,{text:'next instruction',hasAttachments:false}),'queue');
 });

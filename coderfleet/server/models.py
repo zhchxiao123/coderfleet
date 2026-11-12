@@ -283,6 +283,7 @@ class Conversation(BaseModel):
     project:           str
     project_name:      str = ""
     native_session_id: str = ""
+    sdk_options: dict = Field(default_factory=dict)
     fork: Optional[ConversationFork] = None
     status:            ConversationStatus = ConversationStatus.active
     mode:              ConversationMode   = ConversationMode.chat
@@ -480,9 +481,12 @@ class WebhookDelivery(BaseModel):
 
 
 class PendingIntervention(BaseModel):
-    kind: Literal['mcp', 'native'] = 'mcp'
+    kind: Literal['mcp', 'native', 'permission'] = 'mcp'
     tool_call_id: str
-    questions:    list[InterventionQuestion]
+    questions:    list[InterventionQuestion] = Field(default_factory=list)
+    tool_name: str = ""
+    tool_input: dict = Field(default_factory=dict)
+    decision_reason: str = ""
     # 一次性 token，跟 WorkflowRun.approval_token 是同一套信任模型——防误触/防串号
     # 的一致性保护，不是防外部攻击的秘密。
     token:        str
@@ -515,6 +519,11 @@ class Task(BaseModel):
     sdk_log_size: int = 0
     sdk_control_token: str = ""
     sdk_control_ready: bool = False
+    sdk_capabilities: list[str] = Field(default_factory=list)
+    sdk_permission_mode: str = ""
+    sdk_options: dict = Field(default_factory=dict)
+    sdk_checkpoints: list[str] = Field(default_factory=list)
+    sdk_action: dict = Field(default_factory=dict)
     interrupted: bool = False
     terminal_notified: bool = False
     # 容器内 container_workdir 在任务开始执行时的 git 快照，仅当该目录是 git 仓库时非空。
@@ -622,6 +631,7 @@ class TaskCreateRequest(BaseModel):
     conversation_id:   Optional[str] = None
     conversation_name: Optional[str] = None
     images:  list[str] = []              # 容器内图片路径列表（--image 参数）
+    sdk_options: Optional[dict] = None
     model:   str = ""                    # CLI 模型名（Claude Code 支持 --model）
     execute_at: Optional[str] = None     # 定时执行时间
     # DAG / workflow fields
@@ -652,6 +662,11 @@ class TaskResponse(BaseModel):
     finished: Optional[str] = None
     log_path: str
     sdk_control_ready: bool = False
+    sdk_capabilities: list[str] = Field(default_factory=list)
+    sdk_permission_mode: str = ""
+    sdk_options: dict = Field(default_factory=dict)
+    sdk_checkpoints: list[str] = Field(default_factory=list)
+    sdk_action: dict = Field(default_factory=dict)
     interrupted: bool = False
     archived: bool = False
     auto:     bool = False
@@ -700,6 +715,11 @@ class TaskResponse(BaseModel):
             finished     = t.finished,
             log_path     = t.log_path_str,
             sdk_control_ready = getattr(t, "sdk_control_ready", False),
+            sdk_capabilities = t.sdk_capabilities,
+            sdk_permission_mode = t.sdk_permission_mode,
+            sdk_options = t.sdk_options,
+            sdk_checkpoints = t.sdk_checkpoints,
+            sdk_action = t.sdk_action,
             interrupted = t.interrupted,
             archived     = t.archived,
             auto         = getattr(t, "auto", False),
@@ -741,6 +761,9 @@ class TaskHeartbeat(BaseModel):
     conversation_id: str = ""
     finished:        Optional[str] = None
     sdk_control_ready: bool = False
+    sdk_capabilities: list[str] = Field(default_factory=list)
+    sdk_permission_mode: str = ""
+    model: str = ""
 
     @classmethod
     def from_task(cls, t: Task) -> "TaskHeartbeat":
@@ -750,6 +773,9 @@ class TaskHeartbeat(BaseModel):
             conversation_id = t.conversation_id,
             finished        = t.finished,
             sdk_control_ready = t.sdk_control_ready,
+            sdk_capabilities = t.sdk_capabilities,
+            sdk_permission_mode = t.sdk_permission_mode,
+            model = t.model,
         )
 
 
@@ -799,6 +825,7 @@ class ConversationResponse(BaseModel):
     project:           str
     project_name:      str = ""
     native_session_id: str
+    sdk_options: dict = Field(default_factory=dict)
     fork: Optional[ConversationFork] = None
     status:            ConversationStatus
     mode:              ConversationMode = ConversationMode.chat
@@ -824,6 +851,7 @@ class ConversationResponse(BaseModel):
             project_name      = c.project_name,
             native_session_id = c.native_session_id,
             fork              = c.fork,
+            sdk_options       = c.sdk_options,
             status            = c.status,
             mode              = c.mode,
             tmux_session      = c.tmux_session,

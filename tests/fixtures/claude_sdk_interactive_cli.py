@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import select
 import sys
+import time
 
 if '--version' in sys.argv:
     print('2.1.321 (Claude Code)')
@@ -18,7 +19,19 @@ def result(text='answer', aborted=False):
           'is_error':bool(error), 'errors':['aborted during tool use'] if error else [], 'num_turns':1, 'session_id':'11111111-1111-4111-8111-111111111111',
           'result':text, 'terminal_reason':'aborted_streaming' if aborted else 'completed'})
 
+def ask_permission():
+    tool = os.environ.get('FAKE_INTERACTIVE_PERMISSION') or 'AskUserQuestion'
+    questions = [{'question':'Which targets?', 'header':'Targets', 'multiSelect':True,
+                  'options':[{'label':'Mac','description':'desktop'}, {'label':'Linux','description':'server'}]}]
+    tool_input = {'questions':questions} if tool == 'AskUserQuestion' else {'command':'printf approved'} if tool == 'Bash' else {'plan':'Read-only analysis then implement the approved change'}
+    emit({'type':'assistant','uuid':'22222222-2222-4222-8222-222222222222','message':{'model':'fixture','content':[{'type':'tool_use','id':'native-question','name':tool,'input':tool_input}]}})
+    emit({'type':'control_request','request_id':'permission-question','request':{'subtype':'can_use_tool','tool_name':tool,'tool_use_id':'native-question','input':tool_input}})
+
+capture_args=os.environ.get('FAKE_INTERACTIVE_ARGV')
+if capture_args: Path(capture_args).write_text(json.dumps(sys.argv[1:]))
+
 queued = []
+delayed = []
 asked = False
 while True:
     ready, _, _ = select.select([sys.stdin], [], [], .03)
@@ -29,7 +42,16 @@ while True:
         message = json.loads(line)
         if message['type'] == 'control_request':
             subtype = message['request']['subtype']
-            emit({'type':'control_response','response':{'subtype':'success','request_id':message['request_id'],'response':{}}})
+            capture=os.environ.get('FAKE_INTERACTIVE_CONTROL_LOG')
+            if capture:
+                with open(capture,'a') as stream: stream.write(json.dumps(message['request'])+'\n')
+            response={'mcpServers':[{'name':'fixture-server','status':'connected'}]} if subtype=='mcp_status' else {'categories':[],'totalTokens':42,'maxTokens':1000,'percentage':4.2} if subtype=='get_context_usage' else {}
+            reply={'type':'control_response','response':{'subtype':'success','request_id':message['request_id'],'response':response}}
+            if subtype=='set_permission_mode' and os.environ.get('FAKE_INTERACTIVE_PERMISSION_BEFORE_MODE_RESPONSE'):
+                ask_permission();delayed.append((time.monotonic()+.2,reply))
+            else: emit(reply)
+            if subtype == 'set_permission_mode' and os.environ.get('FAKE_INTERACTIVE_PERMISSION_AFTER_MODE') and not os.environ.get('FAKE_INTERACTIVE_PERMISSION_BEFORE_MODE_RESPONSE'):
+                ask_permission()
             if subtype == 'interrupt':
                 queued.clear()
                 result(aborted=True)
@@ -37,16 +59,17 @@ while True:
                 emit({'type':'system','subtype':'session_state_changed','state':'idle','sdk_host_only':True})
         elif message['type'] == 'user':
             queued.append(message['message']['content'])
+            if os.environ.get('FAKE_INTERACTIVE_REWIND'):
+                emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
             emit({'type':'system','subtype':'session_state_changed','state':'running','sdk_host_only':True})
-            if os.environ.get('FAKE_INTERACTIVE_QUESTION') and not asked:
+            if (os.environ.get('FAKE_INTERACTIVE_QUESTION') or os.environ.get('FAKE_INTERACTIVE_PERMISSION')) and not asked:
                 asked = True
-                questions = [{'question':'Which targets?', 'header':'Targets', 'multiSelect':True,
-                              'options':[{'label':'Mac','description':'desktop'}, {'label':'Linux','description':'server'}]}]
-                emit({'type':'assistant','uuid':'22222222-2222-4222-8222-222222222222','message':{'model':'fixture','content':[{'type':'tool_use','id':'native-question','name':'AskUserQuestion','input':{'questions':questions}}]}})
-                emit({'type':'control_request','request_id':'permission-question','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','tool_use_id':'native-question','input':{'questions':questions}}})
+                if not os.environ.get('FAKE_INTERACTIVE_PERMISSION_AFTER_MODE'): ask_permission()
         elif message['type'] == 'control_response':
             Path(os.environ['FAKE_INTERACTIVE_ANSWER']).write_text(json.dumps(message['response']))
             Path(os.environ['FAKE_CLAUDE_RELEASE_GATE']).write_text('answered')
+    for due,reply in delayed[:]:
+        if time.monotonic()>=due: emit(reply);delayed.remove((due,reply))
     if queued and Path(os.environ['FAKE_CLAUDE_RELEASE_GATE']).exists():
         prompt = queued.pop(0)
         if os.environ.get('FAKE_INTERACTIVE_COALESCE'):

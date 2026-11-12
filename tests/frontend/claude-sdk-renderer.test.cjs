@@ -16,13 +16,18 @@ class Element {
   }
   set innerHTML(value) { this._html = value; this.children = []; }
   get innerHTML() { return this._html + this.children.map(child => child.innerHTML).join(''); }
-  appendChild(child) { this.children.push(child); return child; }
+  appendChild(child) {
+    if (child.parentNode) child.parentNode.children = child.parentNode.children.filter(item=>item!==child);
+    child.parentNode=this; this.children.push(child); return child;
+  }
   addEventListener(type, handler) { this.listeners[type] = handler; }
   focus() {}
   querySelectorAll() { return []; }
   querySelector(selector) {
     if (selector === '.chat-log') return this.log || (this.log = new Element());
-    return new Element();
+    this.queries ||= new Map();
+    if (!this.queries.has(selector)) this.queries.set(selector,new Element());
+    return this.queries.get(selector);
   }
 }
 
@@ -240,4 +245,52 @@ test('Task completion disables all unanswered native question inputs', () => {
   assert.equal(input.disabled,true);
   assert.equal(button.disabled,true);
   assert.equal(result.toolMap['ended-one'].isLive,false);
+});
+
+
+test('SDK partial text is visible before the final block and settles into one reply', () => {
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'});
+  push({type:'stream_event',event:{type:'message_start',message:{id:'message-one',model:'fixture'}}});
+  push({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
+  push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'正在'}}});
+  const reply=result.lastBubbleEl;
+  assert.ok(reply,'A text delta must be visible before an AssistantMessage is complete');
+  assert.equal(reply.querySelector('.bubble-content').textContent,'正在');
+  push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'回答'}}});
+  assert.equal(reply.querySelector('.bubble-content').textContent,'正在回答');
+  push({type:'assistant',message:{id:'message-one',model:'fixture',content:[{type:'text',text:'正在回答'}]}});
+  push({type:'result',subtype:'success',result:'正在回答',is_error:false});
+  assert.equal(result.lastBubbleEl,reply);
+  assert.equal(container.log.children.filter(child=>child.className.includes('ai-reply')).length,1,'Partial, assistant and result must not create duplicate answers');
+  assert.match(reply.querySelector('.bubble-content').innerHTML,/正在回答/);
+});
+
+
+test('native tool and plan approval cards submit scoped decisions and close authoritatively',async()=>{
+  const requests=[];
+  const {result,getElementById}=renderer(async(url,options)=>{
+    requests.push({url,options});
+    return {ok:true,json:async()=>options ? {ok:true} : {pending_intervention:{kind:'permission',tool_call_id:'permission-one',token:'permission-token'}}};
+  });
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_permission_pending',tool_call_id:'permission-one',tool_name:'ExitPlanMode',tool_input:{plan:'Implement after review'},deadline:'2099-01-01T00:00:00Z'}));
+  assert.ok(result.permissionMap?.['permission-one'],'A native approval request must be actionable');
+  assert.match(result.permissionMap['permission-one'].wrap.innerHTML,/批准计划/);
+  getElementById('permission-allow-permission-one').listeners.click({stopPropagation(){}});
+  await new Promise(setImmediate);
+  assert.equal(requests[1].url,'/api/tasks/task-one/approval');
+  assert.deepEqual(JSON.parse(requests[1].options.body),{tool_call_id:'permission-one',token:'permission-token',decision:'allow',message:''});
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_permission_closed',tool_call_id:'permission-one',status:'approved'}));
+  assert.equal(result.permissionMap['permission-one'].isLive,false);
+  assert.match(getElementById('permission-status-permission-one').textContent,/已批准/);
+});
+
+
+test('multiple SDK text blocks do not duplicate the final aggregate reply',()=>{
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  for (const text of ['first block','second block']) result.push(JSON.stringify({type:'assistant',message:{id:'same-message',content:[{type:'text',text}]}}));
+  result.push(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'first block\nsecond block'}));
+  assert.equal(container.log.children.filter(child=>child.className.includes('ai-reply')).length,2,JSON.stringify({parts:result.lastSDKTextParts,id:result.lastSDKMessageId,text:result.lastSDKText,last:result.lastBubbleEl._bubbleText,backend:result.executionBackend}));
 });

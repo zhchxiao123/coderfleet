@@ -109,6 +109,7 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
 @click.option("--type", "prefer_type", default=None,
               type=click.Choice(["codex", "claude", "opencode"]), help="指定账号类型")
 @click.option("--auto", is_flag=True, help="全自动模式（跳过权限确认）")
+@click.option("--sdk-options", type=click.Path(exists=True,dir_okay=False,path_type=Path), help="SDK 参数 JSON 文件（保存在 Task 快照）")
 @click.option("--conversation", "conversation_id", default=None, help="续接已有任务链 ID")
 @click.option("--new-chain", "conversation_name", default=None, help="新建任务链并命名")
 @click.option("--at", "execute_at", default=None, help="定时执行时间（ISO 8601）")
@@ -119,6 +120,7 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
               help="宿主机目录，挂载为容器内 /output（用于收集文件产出）")
 def cmd_task_run(
     prompt: str,
+    sdk_options: Optional[Path],
     prefer_project: Optional[str],
     account: Optional[str],
     prefer_type: Optional[str],
@@ -134,6 +136,12 @@ def cmd_task_run(
     api = _require_server()
 
     body: dict = {"prompt": prompt, "auto": auto}
+    if sdk_options is not None:
+        from coderfleet.data.scripts.coderfleet_sdk_features import validate_options
+        try:
+            body["sdk_options"] = validate_options(json.loads(sdk_options.read_text()))
+        except (OSError,ValueError) as error:
+            raise click.ClickException(str(error)) from error
 
     if prefer_project:
         field, value = _resolve_project_field(prefer_project)
@@ -295,14 +303,23 @@ def cmd_task_status(task_id: str) -> None:
         click.echo(f"  任务链：  {d['conversation_id']}")
     if d.get("native_session_id"):
         click.echo(f"  会话ID：  {d['native_session_id']}")
+    if d.get("sdk_options"):
+        click.echo("  SDK 参数：" + json.dumps(d["sdk_options"],ensure_ascii=False))
+    if d.get("sdk_checkpoints"):
+        click.echo("  文件检查点：" + ", ".join(d["sdk_checkpoints"]))
     click.echo(f"  任务描述：{d['prompt']}")
     pending = d.get("pending_intervention")
     if pending:
         click.echo()
-        click.secho("  ⏸ 待回答：", fg="yellow")
-        for q in pending.get("questions", []):
-            click.echo(f"    - {q.get('question', '')}")
-        click.echo(f"    （coderfleet task answer {task_id} --json '<回答 JSON>'）")
+        if pending.get('kind') == 'permission':
+            click.secho('  ⏸ 待授权：' + pending.get('tool_name',''),fg='yellow')
+            click.echo(json.dumps(pending.get('tool_input',{}),ensure_ascii=False))
+            click.echo(f'    （coderfleet task approve {task_id} --decision allow|deny）')
+        else:
+            click.secho("  ⏸ 待回答：", fg="yellow")
+            for q in pending.get("questions", []):
+                click.echo(f"    - {q.get('question', '')}")
+            click.echo(f"    （coderfleet task answer {task_id} --json '<回答 JSON>'）")
     click.echo()
 
 
@@ -372,7 +389,9 @@ def cmd_task_kill(task_id: str) -> None:
 @click.argument("task_id")
 @click.option("--json", "answers_json", required=True,
               help='JSON 格式的回答，形如 \'{"问题原文": "选项label"}\'')
-def cmd_task_answer(task_id: str, answers_json: str) -> None:
+@click.option("--tool-call-id",default=None,help="与 --token 一起精确重试")
+@click.option("--token",default=None,help="与 --tool-call-id 一起精确重试")
+def cmd_task_answer(task_id: str, answers_json: str, tool_call_id: Optional[str], token: Optional[str]) -> None:
     """Answer a task's pending Intervention question."""
     api = _require_server()
 
@@ -381,19 +400,24 @@ def cmd_task_answer(task_id: str, answers_json: str) -> None:
     except json.JSONDecodeError as e:
         raise click.ClickException(f"--json 不是合法的 JSON：{e}")
 
-    try:
-        r = httpx.get(f"{api}/api/tasks/{task_id}", timeout=10, headers=api_headers(api))
-    except httpx.RequestError as e:
-        raise click.ClickException(f"请求失败：{e}")
+    if bool(tool_call_id) != bool(token): raise click.ClickException('--tool-call-id 和 --token 必须一起提供')
+    pending = {'tool_call_id':tool_call_id,'token':token} if token else None
+    if pending is None:
+        try:
+            r = httpx.get(f"{api}/api/tasks/{task_id}", timeout=10, headers=api_headers(api))
+        except httpx.RequestError as e:
+            raise click.ClickException(f"请求失败：{e}")
 
-    if r.status_code == 404:
-        raise click.ClickException(f"任务 '{task_id}' 不存在")
-    if r.status_code != 200:
-        raise click.ClickException(f"查询失败（HTTP {r.status_code}）")
+        if r.status_code == 404:
+            raise click.ClickException(f"任务 '{task_id}' 不存在")
+        if r.status_code != 200:
+            raise click.ClickException(f"查询失败（HTTP {r.status_code}）")
 
-    pending = r.json().get("pending_intervention")
-    if not pending:
-        raise click.ClickException(f"任务 '{task_id}' 当前没有待回答的问题")
+        pending = r.json().get("pending_intervention")
+        if not pending:
+            raise click.ClickException(f"任务 '{task_id}' 当前没有待回答的问题")
+
+    click.echo(f'问题标识: {pending["tool_call_id"]}  token: {pending["token"]}')
 
     try:
         r2 = httpx.post(
@@ -405,7 +429,7 @@ def cmd_task_answer(task_id: str, answers_json: str) -> None:
             },
         )
     except httpx.RequestError as e:
-        raise click.ClickException(f"请求失败：{e}")
+        raise click.ClickException("结果未知，请使用输出的问题标识、token 和原回答重试") from e
 
     if r2.status_code == 200:
         click.secho("✓ 已提交回答", fg="green")
@@ -413,10 +437,11 @@ def cmd_task_answer(task_id: str, answers_json: str) -> None:
         raise click.ClickException(f"提交失败（HTTP {r2.status_code}）：{_http_error_detail(r2)}")
 
 
-def _sdk_command(task_id: str, action: str, request_id: Optional[str], text: Optional[str] = None) -> None:
+def _sdk_command(task_id: str, action: str, request_id: Optional[str], text: Optional[str] = None, images: tuple[str,...] = ()) -> None:
     api = _require_server()
     identifier = request_id or uuid.uuid4().hex
-    body = {'request_id':identifier, **({'text':text} if text is not None else {})}
+    body: dict = {'request_id':identifier, **({'text':text} if text is not None else {})}
+    if images: body['images'] = list(images)
     click.echo(f'请求 ID: {identifier}')
     try:
         response = httpx.post(f'{api}/api/tasks/{task_id}/{action}', json=body,
@@ -438,11 +463,115 @@ def cmd_task_interrupt(task_id: str, request_id: Optional[str]) -> None:
 
 @task_group.command('send')
 @click.argument('task_id')
-@click.argument('text')
+@click.argument('text',default='')
+@click.option('--image','images',multiple=True,help='已上传的 /workspace/.coderfleet-uploads/ 文件路径')
 @click.option('--request-id', default=None, help='重试时使用相同 ID，避免重复投递')
-def cmd_task_send(task_id: str, text: str, request_id: Optional[str]) -> None:
+def cmd_task_send(task_id: str, text: str, request_id: Optional[str], images: tuple[str,...]) -> None:
     """Send supplementary text to the running SDK Task."""
-    _sdk_command(task_id, 'messages', request_id, text)
+    _sdk_command(task_id, 'messages', request_id, text,images)
+
+
+@task_group.command('approve')
+@click.argument('task_id')
+@click.option('--decision', type=click.Choice(['allow','deny']), required=True)
+@click.option('--message', default='', help='拒绝理由或给模型的反馈')
+@click.option('--input-json', default=None, help='批准时修改工具参数，必须为 JSON 对象')
+@click.option('--tool-call-id', default=None, help='与 --token 一起用于精确重试')
+@click.option('--token', default=None, help='与 --tool-call-id 一起用于精确重试')
+def cmd_task_approve(task_id: str, decision: str, message: str, input_json: Optional[str], tool_call_id: Optional[str], token: Optional[str]) -> None:
+    """Approve or deny one native tool/plan request."""
+    api = _require_server()
+    if bool(tool_call_id) != bool(token):
+        raise click.ClickException('--tool-call-id 和 --token 必须一起提供')
+    body: dict = {'decision':decision,'message':message}
+    if input_json is not None:
+        try:
+            body['updated_input'] = json.loads(input_json)
+            if not isinstance(body['updated_input'],dict): raise ValueError('必须为 JSON 对象')
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+    try:
+        if not token:
+            detail = httpx.get(f'{api}/api/tasks/{task_id}',headers=api_headers(api),timeout=10)
+            if detail.status_code != 200: raise click.ClickException(_http_error_detail(detail))
+            pending = detail.json().get('pending_intervention')
+            if not pending or pending.get('kind') != 'permission': raise click.ClickException('当前没有待批准的工具')
+            tool_call_id,token = pending['tool_call_id'],pending['token']
+        click.echo(f'问题标识: {tool_call_id}  token: {token}')
+        body.update(tool_call_id=tool_call_id,token=token)
+        response = httpx.post(f'{api}/api/tasks/{task_id}/approval',json=body,headers=api_headers(api),timeout=12)
+    except httpx.RequestError as error:
+        raise click.ClickException('结果未知，请使用相同的问题标识、token 和决定重试') from error
+    if response.status_code != 200: raise click.ClickException(_http_error_detail(response))
+    click.echo('✓ 已提交授权决定')
+
+
+@task_group.command('sdk')
+@click.argument('task_id')
+@click.argument('operation')
+@click.option('--json', 'arguments_json', default='{}', help='SDK 操作参数 JSON 对象')
+@click.option('--request-id', default=None, help='重试使用同一 ID')
+def cmd_task_sdk(task_id: str, operation: str, arguments_json: str, request_id: Optional[str]) -> None:
+    """Control the running SDK: model, permissions, MCP, context, or background tasks."""
+    from coderfleet.data.scripts.coderfleet_sdk_control import validate_control, ControlError
+    try:
+        arguments = validate_control(operation,json.loads(arguments_json))
+    except (ValueError, ControlError) as error:
+        raise click.ClickException(str(error)) from error
+    api = _require_server()
+    identifier = request_id or uuid.uuid4().hex
+    click.echo(f'请求 ID: {identifier}')
+    try:
+        response = httpx.post(f'{api}/api/tasks/{task_id}/sdk-control',headers=api_headers(api),timeout=12,
+            json={'request_id':identifier,'operation':operation,'arguments':arguments})
+    except httpx.RequestError as error:
+        raise click.ClickException(f'结果未知，请用 task command-status {task_id} {identifier} 查询') from error
+    if response.status_code != 200: raise click.ClickException(_http_error_detail(response))
+    click.echo(json.dumps(response.json(),ensure_ascii=False))
+
+
+@task_group.command('session')
+@click.argument('task_id')
+@click.argument('operation')
+@click.option('--json','arguments_json',default='{}',help='原生会话操作参数')
+@click.option('--request-id',default=None,help='查询或重试必须保留同一 ID')
+def cmd_task_session(task_id: str, operation: str, arguments_json: str, request_id: Optional[str]) -> None:
+    """Inspect/manage the native session bound to this Task, in its account runtime."""
+    from coderfleet.data.scripts.coderfleet_sdk_features import SESSION_SCHEMAS, validate
+    if operation not in SESSION_SCHEMAS: raise click.ClickException('未知操作：' + ', '.join(SESSION_SCHEMAS))
+    try:
+        arguments = json.loads(arguments_json)
+        validate(arguments,SESSION_SCHEMAS[operation],'arguments')
+    except ValueError as error: raise click.ClickException(str(error)) from error
+    api = _require_server()
+    identifier = request_id or uuid.uuid4().hex
+    click.echo('请求 ID: ' + identifier)
+    try:
+        r = httpx.post(f'{api}/api/tasks/{task_id}/sdk-session',headers=api_headers(api),timeout=55,
+            json={'operation':operation,'arguments':arguments,'request_id':identifier})
+    except httpx.RequestError as error:
+        raise click.ClickException('结果未知，使用相同操作、参数和请求 ID 查询') from error
+    if r.status_code != 200: raise click.ClickException(_http_error_detail(r))
+    click.echo(json.dumps(r.json(),ensure_ascii=False,indent=2))
+
+
+@task_group.command('rewind')
+@click.argument('task_id')
+@click.argument('checkpoint')
+@click.option('--request-id',default=None,help='创建恢复 Task 的幂等 ID')
+@click.option('--yes',is_flag=True,help='确认恢复所跟踪的文件修改')
+def cmd_task_rewind(task_id: str, checkpoint: str, request_id: Optional[str], yes: bool) -> None:
+    """Create a tracked recovery Task; conversation history is preserved."""
+    if not yes: click.confirm('恢复检查点跟踪的文件？Bash、子 Agent 或外部副作用不在保证范围。',abort=True)
+    api = _require_server()
+    identifier = request_id or uuid.uuid4().hex
+    click.echo('请求 ID: ' + identifier)
+    try:
+        r = httpx.post(f'{api}/api/tasks/{task_id}/sdk-rewind',headers=api_headers(api),timeout=15,
+            json={'user_message_id':checkpoint,'request_id':identifier})
+    except httpx.RequestError as error: raise click.ClickException('结果未知，保留同一请求 ID 重试') from error
+    if r.status_code != 200: raise click.ClickException(_http_error_detail(r))
+    click.echo('恢复 Task：' + r.json()['id'])
 
 
 @task_group.command('command-status')

@@ -39,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from coderfleet.data.scripts.coderfleet_sdk_control import ControlOperation
 
 from coderfleet.server.models import (
     Account,
@@ -899,6 +900,7 @@ async def create_task(req: TaskCreateRequest):
             project_name      = req.project_name,
             images            = req.images,
             model             = req.model,
+            sdk_options       = req.sdk_options,
             execute_at        = req.execute_at,
             parent_task_id = req.parent_task_id,
             depends_on     = req.depends_on,
@@ -2207,7 +2209,8 @@ class SDKCommandRequest(BaseModel):
 
 
 class SDKMessageRequest(SDKCommandRequest):
-    text: str = Field(min_length=1, max_length=16000)
+    text: str = Field(default="", max_length=16000)
+    images: list[str] = Field(default_factory=list,max_length=20)
 
 
 async def _sdk_task_command(task_id: str, kind: Literal['interrupt', 'message'], payload: dict, request_id: str):
@@ -2228,7 +2231,35 @@ async def interrupt_sdk_task(task_id: str, body: SDKCommandRequest):
 
 @app.post('/api/tasks/{task_id}/messages')
 async def message_sdk_task(task_id: str, body: SDKMessageRequest):
-    return await _sdk_task_command(task_id, 'message', {'text':body.text}, body.request_id)
+    if not body.text.strip() and not body.images: raise HTTPException(status_code=422,detail='请输入消息或选择附件')
+    if any(not _re.fullmatch(r'/workspace/\.coderfleet-uploads/[A-Za-z0-9_.-]+',path) for path in body.images):
+        raise HTTPException(status_code=422,detail='原生附件必须来自本项目上传')
+    payload = {'text':body.text,**({'images':body.images} if body.images else {})}
+    return await _sdk_task_command(task_id, 'message', payload, body.request_id)
+
+
+@app.get('/api/sdk/capabilities')
+async def sdk_capabilities():
+    from coderfleet.data.scripts.coderfleet_sdk_control import CONTROL_SCHEMAS
+    from coderfleet.data.scripts.coderfleet_sdk_features import OPTIONS_SCHEMA, SESSION_SCHEMAS
+    return {'sdk_version':'0.2.180','cli_version':'2.1.321','controls':CONTROL_SCHEMAS,'options':OPTIONS_SCHEMA,'sessions':SESSION_SCHEMAS}
+
+
+class SDKControlRequest(SDKCommandRequest):
+    operation: ControlOperation
+    arguments: dict = Field(default_factory=dict)
+
+
+@app.post('/api/tasks/{task_id}/sdk-control')
+async def control_sdk_task(task_id: str, body: SDKControlRequest):
+    try:
+        return await scheduler.sdk_control(task_id, body.operation, body.arguments, body.request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail=str(error))
 
 
 @app.get('/api/tasks/{task_id}/commands/{request_id}')
@@ -2239,6 +2270,35 @@ async def sdk_task_command_status(task_id: str, request_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+class SDKSessionRequest(BaseModel):
+    operation: str
+    arguments: dict = Field(default_factory=dict)
+    request_id: str = Field(min_length=1,max_length=128)
+
+
+@app.post('/api/tasks/{task_id}/sdk-session')
+async def sdk_session_operation(task_id: str, body: SDKSessionRequest):
+    try:
+        return await scheduler.sdk_session(task_id,body.operation,body.arguments,body.request_id)
+    except ValueError as error: raise HTTPException(status_code=400,detail=str(error))
+    except RuntimeError as error: raise HTTPException(status_code=409,detail=str(error))
+    except TimeoutError as error: raise HTTPException(status_code=504,detail=str(error))
+
+
+class SDKRewindRequest(BaseModel):
+    user_message_id: str
+    request_id: str = Field(min_length=1,max_length=128)
+
+
+@app.post('/api/tasks/{task_id}/sdk-rewind',response_model=TaskResponse)
+async def rewind_sdk_task(task_id: str, body: SDKRewindRequest):
+    try:
+        task = await scheduler.rewind_sdk_files(task_id,body.user_message_id,body.request_id)
+        return TaskResponse.from_task(task)
+    except ValueError as error: raise HTTPException(status_code=400,detail=str(error))
+    except RuntimeError as error: raise HTTPException(status_code=409,detail=str(error))
 
 
 class TaskUpdate(BaseModel):
@@ -2283,6 +2343,28 @@ async def answer_task_intervention(task_id: str, body: TaskAnswerRequest):
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e))
     return {"ok": True}
+
+
+class TaskApprovalRequest(BaseModel):
+    tool_call_id: str
+    token: str
+    decision: Literal['allow', 'deny']
+    message: str = Field(default='', max_length=16000)
+    updated_input: Optional[dict] = None
+
+
+@app.post('/api/tasks/{task_id}/approval')
+async def approve_task_intervention(task_id: str, body: TaskApprovalRequest):
+    try:
+        await scheduler.approve_intervention(task_id, body.tool_call_id, body.token,
+                                             body.decision, body.message, body.updated_input)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail=str(error))
+    return {'ok':True}
 
 
 @app.post("/api/tasks/{task_id}/retry", response_model=TaskResponse)

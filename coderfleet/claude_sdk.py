@@ -22,6 +22,11 @@ def control_source() -> bytes:
     return resources.files("coderfleet.data").joinpath("scripts/coderfleet_sdk_control.py").read_bytes()
 
 
+def features_source() -> bytes:
+    """Return validated options and worker-only extension support."""
+    return resources.files("coderfleet.data").joinpath("scripts/coderfleet_sdk_features.py").read_bytes()
+
+
 def sdk_python(*, local: bool = False, env: Mapping[str, str] | None = None) -> str:
     """Resolve the account's explicit interpreter or its installation default."""
     values = os.environ if env is None else env

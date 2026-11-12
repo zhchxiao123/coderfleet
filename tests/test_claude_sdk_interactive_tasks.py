@@ -196,3 +196,62 @@ def test_invalid_native_answer_is_rejected_before_it_reserves_a_delivery_identit
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         main.TaskAnswerRequest(tool_call_id='native-question', token='question-token', answers={'Which?':123})
+
+
+def test_operator_can_approve_pending_tool_through_task_api_and_retry_after_close(tmp_path, monkeypatch):
+    scheduler, mailbox = running_task(tmp_path)
+    monkeypatch.setattr(main, 'scheduler', scheduler)
+    task = scheduler.get_task('interactive')
+    task.auto=True;task.sdk_permission_mode='bypassPermissions';task.save(scheduler.tasks_dir)
+    # The SDK can request manual input before the mode-change receipt arrives.
+    scheduler._record_sdk_progress(task, '{"type":"system","subtype":"coderfleet_permission_pending","task_id":"interactive","tool_call_id":"bash-one","tool_name":"Bash","tool_input":{"command":"printf approved"},"deadline":"2099-01-01T00:00:00Z"}\n')
+    pending=scheduler.get_task(task.id).pending_intervention
+    assert pending and pending.kind=='permission'
+    assert pending.tool_input=={'command':'printf approved'}
+
+    async def drive():
+        body=main.TaskApprovalRequest(tool_call_id='bash-one',token=pending.token,decision='allow')
+        request=asyncio.create_task(main.approve_task_intervention(task.id,body))
+        for _ in range(100):
+            commands=mailbox.pending()
+            if commands:
+                assert commands[0]['kind']=='approval'
+                assert commands[0]['payload']=={'tool_call_id':'bash-one','decision':'allow','message':''}
+                mailbox.acknowledge(commands[0]['id'],{'approved':True})
+                break
+            await asyncio.sleep(.001)
+        assert await request=={'ok':True}
+        scheduler._record_sdk_progress(task, '{"type":"system","subtype":"coderfleet_permission_closed","task_id":"interactive","tool_call_id":"bash-one","status":"approved"}\n')
+        assert await main.approve_task_intervention(task.id,body)=={'ok':True}
+        with pytest.raises(HTTPException) as changed:
+            await main.approve_task_intervention(task.id,main.TaskApprovalRequest(tool_call_id='bash-one',token=pending.token,decision='deny'))
+        assert changed.value.status_code==409
+    asyncio.run(drive())
+    assert scheduler.get_task(task.id).pending_intervention is None
+    assert len(list(mailbox.requests.glob('*.json')))==1
+
+
+def test_control_updates_are_persisted_and_receipt_retry_does_not_reapply_current_account_gates(tmp_path,monkeypatch):
+    scheduler,mailbox=running_task(tmp_path)
+    task=scheduler.get_task('interactive');task.sdk_capabilities=['control'];task.save(scheduler.tasks_dir)
+    monkeypatch.setattr(main,'scheduler',scheduler)
+    mailbox.submit('mode-one','control',{'operation':'set_permission_mode','arguments':{'mode':'bypassPermissions'}})
+    mailbox.acknowledge('mode-one',{'operation':'set_permission_mode','value':None})
+    # This retry must return the original receipt even if the account was removed.
+    result=asyncio.run(main.control_sdk_task('interactive',main.SDKControlRequest(request_id='mode-one',operation='set_permission_mode',arguments={'mode':'bypassPermissions'})))
+    assert result['status']=='accepted'
+    scheduler._record_sdk_progress(task,'{"type":"system","subtype":"coderfleet_control_applied","task_id":"interactive","operation":"set_model","arguments":{"model":"sonnet"}}\n')
+    assert scheduler.get_task(task.id).model=='sonnet'
+    with pytest.raises(HTTPException) as rejected:
+        asyncio.run(main.control_sdk_task('interactive',main.SDKControlRequest(request_id='mode-new',operation='set_permission_mode',arguments={'mode':'bypassPermissions'})))
+    assert rejected.value.status_code==409
+
+
+def test_checkpoint_capture_and_rewind_rejects_unrelated_uuid_before_delivery(tmp_path):
+    scheduler,mailbox=running_task(tmp_path)
+    task=scheduler.get_task('interactive');task.sdk_capabilities=['control'];task.save(scheduler.tasks_dir)
+    scheduler._record_sdk_progress(task,'{"type":"system","subtype":"coderfleet_checkpoint","task_id":"interactive","user_message_id":"checkpoint-one"}\n')
+    assert scheduler.get_task(task.id).sdk_checkpoints==['checkpoint-one']
+    with pytest.raises(RuntimeError,match='检查点'):
+        asyncio.run(scheduler.sdk_control(task.id,'rewind_files',{'user_message_id':'foreign'},'rewind-foreign'))
+    assert not mailbox.pending()

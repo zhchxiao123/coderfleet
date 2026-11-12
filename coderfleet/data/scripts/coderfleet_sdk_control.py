@@ -13,11 +13,48 @@ from typing import Any, Literal
 
 MAX_PAYLOAD_BYTES = 64 * 1024
 MAX_COMMANDS = 256
-CommandKind = Literal['ping', 'answer', 'interrupt', 'message']
+CommandKind = Literal['ping', 'answer', 'interrupt', 'message', 'approval', 'control', 'session']
 
 
 class ControlError(RuntimeError):
     """A control request is invalid, unavailable, or no longer deliverable."""
+
+
+ControlOperation = Literal['set_model', 'set_permission_mode', 'get_mcp_status', 'get_server_info',
+    'get_context_usage', 'reconnect_mcp_server', 'toggle_mcp_server', 'stop_task', 'rewind_files']
+PERMISSION_MODES = ('default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk', 'auto')
+CONTROL_SCHEMAS: dict[str, Any] = {
+    'set_model': {'title':'切换当前模型','properties':{'model':{'type':['string','null'],'title':'模型名称（留空恢复默认）'}}},
+    'set_permission_mode': {'title':'切换权限模式','properties':{'mode':{'type':'string','title':'权限模式','enum':list(PERMISSION_MODES)}}},
+    'get_mcp_status': {'title':'查看 MCP 连接','properties':{}},
+    'get_server_info': {'title':'查看命令与能力','properties':{}},
+    'get_context_usage': {'title':'查看上下文用量','properties':{}},
+    'reconnect_mcp_server': {'title':'重连 MCP','properties':{'server_name':{'type':'string','title':'MCP 服务器名称'}}},
+    'toggle_mcp_server': {'title':'启用或关闭 MCP','properties':{'server_name':{'type':'string','title':'MCP 服务器名称'},'enabled':{'type':'boolean','title':'启用'}}},
+    'stop_task': {'title':'停止一个后台任务','properties':{'task_id':{'type':'string','title':'SDK 后台任务 ID'}}},
+    'rewind_files': {'title':'恢复文件检查点','properties':{'user_message_id':{'type':'string','title':'检查点消息 UUID'}},'confirm':'将恢复此检查点跟踪的文件修改，确定继续？'},
+}
+CONTROL_OPERATIONS = tuple(CONTROL_SCHEMAS)
+
+
+def validate_control(operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Validate before reserving identity; UI and callers share this definition."""
+    if operation not in CONTROL_SCHEMAS or not isinstance(arguments, dict):
+        raise ControlError('Unsupported SDK operation or arguments')
+    properties = CONTROL_SCHEMAS[operation]['properties']
+    if set(arguments) != set(properties):
+        raise ControlError('Unsupported SDK operation arguments')
+    for key,value in arguments.items():
+        schema = properties[key]
+        if schema['type'] == 'boolean':
+            if not isinstance(value,bool): raise ControlError(f'{key} must be a boolean')
+        elif value is None and isinstance(schema['type'],list) and 'null' in schema['type']:
+            continue
+        elif not isinstance(value,str) or not value.strip() or len(value)>512:
+            raise ControlError(f'{key} must be non-empty text of at most512 characters')
+        if 'enum' in schema and value not in schema['enum']:
+            raise ControlError(f'Unsupported {key}')
+    return dict(arguments)
 
 
 class ControlMailbox:
@@ -88,7 +125,7 @@ class ControlMailbox:
 
     def submit(self, command_id: str, kind: CommandKind, payload: dict[str, Any], *, timeout: float = 10) -> str:
         identifier = self._identifier(command_id)
-        if kind not in {'ping', 'answer', 'interrupt', 'message'}:
+        if kind not in {'ping', 'answer', 'interrupt', 'message', 'approval', 'control', 'session'}:
             raise ControlError('Unsupported worker command')
         if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_PAYLOAD_BYTES:
             raise ControlError('Control payload is too large')

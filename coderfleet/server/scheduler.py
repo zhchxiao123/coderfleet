@@ -130,6 +130,7 @@ class Scheduler:
         # task_id → asyncio.Task（后台运行的协程）
         self._running: dict[str, asyncio.Task] = {}
         self._sdk_launching: set[str] = set()
+        self._sdk_native_busy: set[tuple[str,str]] = set()
         self._loop_task: Optional[asyncio.Task] = None
         # 任务终态通知渠道（Web Push / Telegram …），由 main.py 在启动时注册
         self._notifiers: list = []
@@ -906,6 +907,8 @@ class Scheduler:
 
     async def clone_task_for_retry(self, original: Task, *, automatic: bool = False) -> Task:
         """Clone a terminal task through the normal submission path."""
+        if original.sdk_action:
+            raise ValueError('文件恢复操作不能自动重放，请检查结果后使用新的恢复请求')
         new_task = await self.submit(
             prompt=original.prompt,
             account_name=original.account,
@@ -914,6 +917,7 @@ class Scheduler:
             conversation_id=original.conversation_id or None,
             images=list(getattr(original, "images", [])),
             model=getattr(original, "model", ""),
+            sdk_options=original.sdk_options,
             pipeline_id=original.pipeline_id or None,
             parent_task_id=original.parent_task_id or None,
             depends_on=[],
@@ -1880,9 +1884,11 @@ class Scheduler:
             dt = datetime.fromisoformat(execute_at)
         except ValueError as err:
             raise RuntimeError("定时时间格式无效，请选择有效的未来时间") from err
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
         if dt <= datetime.now():
             raise RuntimeError("定时时间必须晚于当前时间")
-        return execute_at
+        return dt.isoformat()
 
     # ── 提交任务 ──────────────────────────────────────────
 
@@ -2022,6 +2028,8 @@ class Scheduler:
             if fresh is None or fresh.status != TaskStatus.pending:
                 return
             task = fresh
+            if self._sdk_workspace_busy(self._sdk_workspace_key(task)):
+                return
 
             acc = next((a for a in self.get_accounts() if a.name == task.account), None)
             if acc is None:
@@ -2152,11 +2160,15 @@ class Scheduler:
         ephemeral_retention: Optional[str]    = None,
         ephemeral_ttl_minutes: Optional[int]  = None,
         continuation_id: str                  = "",
+        sdk_options: Optional[dict]           = None,
+        sdk_action: Optional[dict]            = None,
     ) -> Task:
         """
         提交任务，异步在后台执行，立即返回 Task 对象。
         调用方可以通过 task.id 跟踪进度。
         """
+        from coderfleet.data.scripts.coderfleet_sdk_features import validate_options
+        options = validate_options(sdk_options or {})
         scheduled_execute_at = self._validate_future_execute_at(execute_at)
         selected_model = model.strip()
         is_pending = False
@@ -2191,6 +2203,11 @@ class Scheduler:
                     ephemeral_retention = getattr(conversation, "ephemeral_retention", "release_on_finish")
                 if ephemeral_ttl_minutes is None:
                     ephemeral_ttl_minutes = getattr(conversation, "ephemeral_ttl_minutes", 120)
+
+        if sdk_options is None and conversation is not None:
+            options = validate_options(conversation.sdk_options)
+        if "permission_mode" in options:
+            auto = options["permission_mode"] == "bypassPermissions"
 
         selected_project: Optional[Project] = None
         if project_name:
@@ -2234,6 +2251,12 @@ class Scheduler:
                 raise RuntimeError(
                     f"没有匹配的可用账号{('（' + hint_str + '）') if hint_str else ''}"
                 )
+
+        if options and (acc.type.value != 'claude' or acc.claude_backend != 'sdk'):
+            raise ValueError('sdk_options requires a Claude SDK account')
+        if options.get('permission_mode') in {'auto','bypassPermissions'}:
+            gate = self.check_local_sandbox_gate(acc, True) or self.check_local_root_gate(acc, True)
+            if gate: raise ValueError(gate)
 
         # ── Ephemeral 路径：跳过持久容器，直接 docker run --rm（或 LocalRuntime）──
         # 触发条件：显式传 ephemeral=True / execution_mode=ephemeral，
@@ -2340,6 +2363,12 @@ class Scheduler:
             elif conversation:
                 session_dir = self._get_session_dir(conversation.id)
 
+            if sdk_action:
+                origin = self.get_task(sdk_action['source_task_id'])
+                if origin is None or origin.account != acc.name: raise ValueError('恢复来源 Task 不可用')
+                session_dir = self._sdk_control_directory(origin).parent.parent
+                if not session_dir.is_dir(): raise ValueError('来源工作区已释放，无法恢复文件')
+
             task_project = str(session_dir) if session_dir else "ephemeral"
             proj_name    = (selected_project.name if selected_project else
                             (conversation.project_name if conversation else ""))
@@ -2361,6 +2390,8 @@ class Scheduler:
                 account      = acc.name,
                 type         = acc.type,
                 execution_backend = acc.claude_backend,
+                sdk_options = options,
+                sdk_action = dict(sdk_action or {}),
                 execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
@@ -2384,9 +2415,10 @@ class Scheduler:
                 task_secrets   = dict(secrets),
                 continuation_id = continuation_id,
             )
+            self._assert_sdk_workspace_available(task)
             task.save(self.tasks_dir)
             if conversation:
-                conversation.touch(self.conversations_dir, last_task_id=task.id)
+                self._touch_submitted_conversation(conversation.id,task)
             if dag_pipeline:
                 self._register_task_in_pipeline(task_id, dag_pipeline)
             if card_id:
@@ -2441,6 +2473,8 @@ class Scheduler:
                 account      = acc.name,
                 type         = acc.type,
                 execution_backend = acc.claude_backend,
+                sdk_options = options,
+                sdk_action = dict(sdk_action or {}),
                 execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
@@ -2458,9 +2492,10 @@ class Scheduler:
                 execution_mode = "persistent",
                 continuation_id = continuation_id,
             )
+            self._assert_sdk_workspace_available(task)
             task.save(self.tasks_dir)
             if conversation:
-                conversation.touch(self.conversations_dir, last_task_id=task.id)
+                self._touch_submitted_conversation(conversation.id,task)
             if dag_pipeline:
                 self._register_task_in_pipeline(task_id, dag_pipeline)
             if card_id:
@@ -2481,6 +2516,8 @@ class Scheduler:
                 account      = acc.name,
                 type         = acc.type,
                 execution_backend = acc.claude_backend,
+                sdk_options = options,
+                sdk_action = dict(sdk_action or {}),
                 execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
@@ -2497,9 +2534,10 @@ class Scheduler:
                 execution_mode = "persistent",
                 continuation_id = continuation_id,
             )
+            self._assert_sdk_workspace_available(task)
             task.save(self.tasks_dir)
             if conversation:
-                conversation.touch(self.conversations_dir, last_task_id=task.id)
+                self._touch_submitted_conversation(conversation.id,task)
             if dag_pipeline:
                 self._register_task_in_pipeline(task_id, dag_pipeline)
             if card_id:
@@ -2522,6 +2560,8 @@ class Scheduler:
             account      = acc.name,
             type         = acc.type,
             execution_backend = acc.claude_backend,
+                sdk_options = options,
+                sdk_action = dict(sdk_action or {}),
             execution_runtime = acc.runtime.value,
             prompt       = prompt,
             project      = task_project,
@@ -2538,9 +2578,10 @@ class Scheduler:
             execution_mode = "persistent",
             continuation_id = continuation_id,
         )
+        self._assert_sdk_workspace_available(task)
         task.save(self.tasks_dir)
         if conversation:
-            conversation.touch(self.conversations_dir, last_task_id=task.id)
+            self._touch_submitted_conversation(conversation.id,task)
         if dag_pipeline:
             self._register_task_in_pipeline(task_id, dag_pipeline)
         if card_id:
@@ -2618,6 +2659,7 @@ class Scheduler:
             id=self.new_conversation_id(), name=name.strip() or f"{source.name} · 分叉",
             account=source.account, type=source.type, project=source.project,
             project_name=source.project_name,
+            sdk_options=task.sdk_options,
             fork=ConversationFork(
                 source_conversation_id=source.id, source_task_id=task_id,
                 source_session_id=point["source_session_id"], message_uuid=point["message_uuid"],
@@ -2677,6 +2719,7 @@ class Scheduler:
             project          = task.project,
             project_name     = project.name,
             native_session_id = task.native_session_id,
+            sdk_options = task.sdk_options,
             last_task_id     = task_id,
         )
         conversation.save(self.conversations_dir)
@@ -3003,6 +3046,24 @@ class Scheduler:
             pass
         return None
 
+    def _apply_runtime_proxy(self, acc: Account, env: dict[str,str], network: Optional[str]) -> None:
+        cfg = load_config(self.workspace_dir)
+        is_local = acc.runtime == AccountRuntime.local
+        proxy_active = (acc.proxy != AccountProxy.off) if is_local else bool(network)
+        if proxy_active:
+            relay_ip   = cfg.get("RELAY_IP",           "172.21.0.2")
+            relay_port = cfg.get("RELAY_LISTEN_PORT",  "7890")
+            proxy_url  = f"http://{relay_ip}:{relay_port}"
+            no_proxy   = cfg.get("NO_PROXY", "localhost,127.0.0.1")
+            for ev in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy",
+                       "HTTP_PROXY", "http_proxy"):
+                env[ev] = proxy_url
+            env["NO_PROXY"] = no_proxy
+            env["no_proxy"] = no_proxy
+            env["CODERFLEET_RELAY_IP"] = relay_ip
+            env["CODERFLEET_RELAY_PORT"] = relay_port
+
+
     def _runtime_for(self, acc: Account) -> "ContainerRuntime":
         """按账号选 runtime —— 一个 Scheduler 实例里 local 账号和 container 账号可以并存。"""
         return self._local_runtime if acc.runtime == AccountRuntime.local else self.runtime
@@ -3227,19 +3288,7 @@ class Scheduler:
             # 变量单看账号自己的 proxy 设置；network 变量只用来控制 ContainerSpec.network（对
             # LocalRuntime 是死字段），不再兼职当"要不要设代理"的判断依据。
             network = None if is_local else self._get_ephemeral_network(acc)
-            proxy_active = (acc.proxy != AccountProxy.off) if is_local else bool(network)
-            if proxy_active:
-                relay_ip   = cfg.get("RELAY_IP",           "172.21.0.2")
-                relay_port = cfg.get("RELAY_LISTEN_PORT",  "7890")
-                proxy_url  = f"http://{relay_ip}:{relay_port}"
-                no_proxy   = cfg.get("NO_PROXY", "localhost,127.0.0.1")
-                for ev in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy",
-                           "HTTP_PROXY", "http_proxy"):
-                    env[ev] = proxy_url
-                env["NO_PROXY"] = no_proxy
-                env["no_proxy"] = no_proxy
-                env["CODERFLEET_RELAY_IP"] = relay_ip
-                env["CODERFLEET_RELAY_PORT"] = relay_port
+            self._apply_runtime_proxy(acc,env,network)
 
             # Standard env vars (matching compose.py baseline — always set for all types)
             if is_local:
@@ -3631,7 +3680,7 @@ class Scheduler:
         cwd: str, conversation: Optional[Conversation], prompt: str,
         images: list[str],
     ) -> str:
-        from coderfleet.claude_sdk import build_worker_command, control_source, worker_source
+        from coderfleet.claude_sdk import build_worker_command, control_source, worker_source, features_source
         from coderfleet.account_type_registry import _CF_SEND_SYSTEM_HINT, claude_mcp_options
 
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task.id):
@@ -3644,6 +3693,9 @@ class Scheduler:
         protocol_source = control_source()
         protocol_name = f"sdk-control-{hashlib.sha256(protocol_source).hexdigest()[:16]}.py"
         self._write_sdk_artifact(artifact_dir / protocol_name, protocol_source)
+        feature_source = features_source()
+        feature_name = f"sdk-features-{hashlib.sha256(feature_source).hexdigest()[:16]}.py"
+        self._write_sdk_artifact(artifact_dir / feature_name, feature_source)
         current = self.get_task(task.id) or task
         if not current.sdk_control_token:
             current.sdk_control_token = secrets.token_hex(32)
@@ -3652,6 +3704,9 @@ class Scheduler:
         task.sdk_control_token = current.sdk_control_token
         task.sdk_control_ready = False
         pending_fork = conversation.fork if conversation and not conversation.native_session_id else None
+        owner = self.find_project_for_path(task.project,acc.name) if acc.runtime == AccountRuntime.local else None
+        scope_root = owner.path if owner else execution_root
+        interactive = not task.auto and task.sdk_options.get('permission_mode') != 'dontAsk'
         request = {
             "task_id": task.id, "prompt": prompt, "cwd": cwd,
             "model": task.model, "auto": task.auto, "images": images,
@@ -3660,13 +3715,18 @@ class Scheduler:
             "resume_session_at": pending_fork.message_uuid if pending_fork else "",
             "append_system_prompt": _CF_SEND_SYSTEM_HINT + (
                 '\nWhen you need to ask the operator a question, prefer native AskUserQuestion; its callback is connected to CoderFleet.'
-                if not task.auto else ''),
-            "mcp_options": claude_mcp_options(allow_ask_user=not task.auto),
+                if interactive else ''),
+            "mcp_options": claude_mcp_options(allow_ask_user=interactive),
             "diagnostic_path": str(runtime_dir / f"{task.id}.sdk-diagnostic.log"),
             "state_path": str(runtime_dir / f"{task.id}.sdk-state.json"),
             "control_directory": str(runtime_dir / f"{task.id}.control"),
             "control_token": task.sdk_control_token,
             "control_module": str(runtime_dir / protocol_name),
+            "features_module": str(runtime_dir / feature_name),
+            "attachment_root": str(Path(scope_root) / ".coderfleet-uploads"),
+            "project_root": scope_root,
+            "sdk_options": task.sdk_options,
+            "sdk_action": task.sdk_action,
             "question_timeout_seconds": DEFAULT_INTERVENTION_TIMEOUT_SECONDS,
         }
         self._write_sdk_artifact(
@@ -3700,13 +3760,27 @@ class Scheduler:
             if (not isinstance(event, dict) or event.get('type') != 'system'
                     or event.get('task_id') != task.id or current.status != TaskStatus.running):
                 continue
-            if event.get('subtype') == 'coderfleet_control_ready':
+            if event.get('subtype') == 'coderfleet_checkpoint':
+                identifier = event.get('user_message_id')
+                if isinstance(identifier,str) and identifier not in current.sdk_checkpoints:
+                    current.sdk_checkpoints = task.sdk_checkpoints = [*current.sdk_checkpoints,identifier]
+            elif event.get('subtype') == 'coderfleet_control_ready':
                 current.sdk_control_ready = task.sdk_control_ready = True
+                capabilities = event.get('capabilities', [])
+                if isinstance(capabilities,list) and all(isinstance(value,str) for value in capabilities):
+                    current.sdk_capabilities = task.sdk_capabilities = capabilities
+                current.sdk_permission_mode = task.sdk_permission_mode = event.get('permission_mode','')
+            elif event.get('subtype') == 'coderfleet_control_applied':
+                arguments = event.get('arguments', {})
+                if event.get('operation') == 'set_model' and 'model' in arguments:
+                    current.model = task.model = arguments['model'] or ''
+                elif event.get('operation') == 'set_permission_mode' and 'mode' in arguments:
+                    current.sdk_permission_mode = task.sdk_permission_mode = arguments['mode']
             elif event.get('subtype') == 'coderfleet_interrupted':
                 current.interrupted = task.interrupted = True
                 current.sdk_control_ready = task.sdk_control_ready = False
                 current.pending_intervention = task.pending_intervention = None
-            elif event.get('subtype') == 'coderfleet_question_pending' and not current.auto:
+            elif event.get('subtype') == 'coderfleet_question_pending':
                 previous = current.pending_intervention
                 try:
                     current.pending_intervention = PendingIntervention(
@@ -3717,7 +3791,19 @@ class Scheduler:
                 except (KeyError, ValueError):
                     logger.warning('Invalid SDK question event for Task %s', task.id)
                 task.pending_intervention = current.pending_intervention
-            elif event.get('subtype') == 'coderfleet_question_closed':
+            elif event.get('subtype') == 'coderfleet_permission_pending':
+                previous = current.pending_intervention
+                try:
+                    current.pending_intervention = PendingIntervention(
+                        kind='permission', tool_call_id=event['tool_call_id'], tool_name=event['tool_name'],
+                        tool_input=event['tool_input'], decision_reason=event.get('decision_reason', ''),
+                        deadline=event['deadline'], token=(previous.token if previous and previous.kind == 'permission' and
+                            previous.tool_call_id == event['tool_call_id'] else uuid.uuid4().hex),
+                    )
+                    task.pending_intervention = current.pending_intervention
+                except (KeyError, ValueError):
+                    logger.warning('Invalid SDK permission event for Task %s', task.id)
+            elif event.get('subtype') in {'coderfleet_question_closed', 'coderfleet_permission_closed'}:
                 if current.pending_intervention and current.pending_intervention.tool_call_id == event.get('tool_call_id'):
                     current.pending_intervention = task.pending_intervention = None
         if source_offset is not None:
@@ -3747,7 +3833,7 @@ class Scheduler:
         return root / '.coderfleet-tasks' / f'{task.id}.control'
 
     async def sdk_command(
-        self, task_id: str, kind: Literal['ping', 'answer', 'interrupt', 'message'], payload: dict,
+        self, task_id: str, kind: Literal['ping', 'answer', 'interrupt', 'message', 'approval', 'control'], payload: dict,
         request_id: Optional[str] = None, *, timeout: float = 8,
     ) -> dict:
         """Deliver a command to this exact worker run and await its durable receipt."""
@@ -3770,6 +3856,8 @@ class Scheduler:
                 raise TimeoutError(f'命令 {request_id} 已投递但没有回执，结果未知；不会自动重放')
         if task.status != TaskStatus.running or not task.sdk_control_ready:
             raise RuntimeError('当前任务尚不支持运行中交互，请等待就绪或提交新的 SDK 任务')
+        if kind == 'message' and payload.get('images') and 'multimodal_input' not in task.sdk_capabilities:
+            raise RuntimeError('当前 worker 不支持附件插话，请选择排队发送或启动新的 SDK Task')
         identifier = mailbox.submit(request_id or uuid.uuid4().hex, kind, payload, timeout=timeout)
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
@@ -3784,6 +3872,225 @@ class Scheduler:
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError(f'命令 {identifier} 尚未收到回执，结果未知；请使用同一请求 ID 查询或重试')
             await asyncio.sleep(0.03)
+
+    async def sdk_control(self, task_id: str, operation: str, arguments: dict, request_id: str) -> dict:
+        from coderfleet.data.scripts.coderfleet_sdk_control import validate_control
+        arguments = validate_control(operation, arguments)
+        task = self.get_task(task_id)
+        if task is None:
+            raise ValueError(f"任务 '{task_id}' 不存在")
+        if 'control' not in task.sdk_capabilities:
+            raise RuntimeError('当前 worker 不支持这些控制，请启动新的 SDK Task')
+        if operation == 'rewind_files' and (not task.sdk_options.get('enable_file_checkpointing') or arguments['user_message_id'] not in task.sdk_checkpoints):
+            raise RuntimeError('请选择本 Task 记录的文件检查点')
+        from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
+        mailbox = ControlMailbox(self._sdk_control_directory(task),task.id,task.sdk_control_token)
+        if not mailbox.has_command(request_id) and operation == 'set_permission_mode' and arguments['mode'] in {'auto', 'bypassPermissions'}:
+            account = next((item for item in self.get_accounts() if item.name == task.account), None)
+            if account is None:
+                raise RuntimeError('任务账号不可用')
+            if task.execution_runtime:
+                account = account.model_copy(update={'runtime':AccountRuntime(task.execution_runtime)})
+            gate = self.check_local_sandbox_gate(account, True) or self.check_local_root_gate(account, True)
+            if gate:
+                raise RuntimeError(gate)
+        return await self.sdk_command(task_id, 'control', {'operation':operation,'arguments':arguments}, request_id)
+
+    def _sdk_workspace_busy(self, key: tuple[str,str]) -> bool:
+        lease = Path(key[1])/'.coderfleet-tasks/sdk-session-lease.json'
+        if lease.exists():
+            try:
+                record = json.loads(lease.read_text())
+                source = self.get_task(record['task_id'])
+                if source is None: return True
+                from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
+                mailbox = ControlMailbox(lease.parent/f'{source.id}.sessions',source.id,source.sdk_control_token)
+                identifier = ControlMailbox._identifier(record['request_id'])
+                if mailbox.reply(identifier) or (mailbox.directory/(identifier+'.finished.json')).is_file():
+                    lease.unlink()
+                    self._sdk_native_busy.discard(key)
+                else: return True
+            except (OSError,ValueError,KeyError,TypeError): return True
+        return key in self._sdk_native_busy
+
+    def _assert_sdk_workspace_available(self, task: Task) -> None:
+        key = self._sdk_workspace_key(task)
+        if self._sdk_workspace_busy(key): raise RuntimeError('原生会话修改尚未结束，请稍后提交')
+        if any(t.id != task.id and t.sdk_action and self._task_is_active(t)
+               and self._sdk_workspace_key(t)[1] == key[1] for t in Task.load_all(self.tasks_dir)):
+            raise RuntimeError('此项目正在恢复文件，请等待恢复完成')
+
+    def _touch_submitted_conversation(self, conversation_id: str, task: Task) -> None:
+        current = self.get_conversation(conversation_id)
+        if current is None: return
+        if not task.sdk_action: current.sdk_options = task.sdk_options
+        current.touch(self.conversations_dir,last_task_id=task.id)
+
+    def _sdk_workspace_key(self, task: Task) -> tuple[str,str]:
+        if task.ephemeral:
+            root = Path(task.project) if task.project != 'ephemeral' else self.sessions_dir / f'task-{task.id}'
+        else:
+            root = self._get_project_root(task) or Path(task.project)
+        return task.account,str(root.resolve())
+
+    async def rewind_sdk_files(self, task_id: str, checkpoint: str, request_id: str) -> Task:
+        from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
+        ControlMailbox._identifier(request_id)
+        source = self.get_task(task_id)
+        if source is None: raise ValueError('来源 Task 不存在')
+        if source.execution_backend != 'sdk' or not source.sdk_options.get('enable_file_checkpointing'):
+            raise RuntimeError('来源 Task 未启用文件检查点')
+        if checkpoint not in source.sdk_checkpoints or not source.native_session_id:
+            raise RuntimeError('检查点不属于来源 Task')
+        action = {'operation':'rewind_files','source_session_id':source.native_session_id,
+                  'user_message_id':checkpoint,'request_id':request_id,'source_task_id':source.id}
+        tasks = Task.load_all(self.tasks_dir)
+        for existing in tasks:
+            if existing.sdk_action.get('request_id') == request_id and existing.account == source.account:
+                if existing.sdk_action != action or self._sdk_workspace_key(existing) != self._sdk_workspace_key(source):
+                    raise RuntimeError('恢复请求 ID 已用于其他操作')
+                return existing
+        key = self._sdk_workspace_key(source)
+        if self._sdk_workspace_busy(key) or any(self._task_is_active(t) and self._sdk_workspace_key(t)[1] == key[1] for t in tasks):
+            raise RuntimeError('请先停止此账号在该项目中的任务，再恢复文件')
+        acc = next((a for a in self.get_accounts() if a.name == source.account),None)
+        if acc is None or acc.claude_backend != 'sdk' or acc.runtime.value != source.execution_runtime:
+            raise RuntimeError('来源账号的 SDK 运行位置已改变，无法安全恢复')
+        project = self.find_project_by_name(source.project_name) if source.project_name else None
+        conv = self.get_conversation(source.conversation_id) if source.conversation_id else None
+        local_normal = (acc.runtime == AccountRuntime.local and source.project != 'ephemeral'
+                        and project is not None and not project.ephemeral and not (conv and conv.ephemeral))
+        return await self.submit('[恢复文件检查点] ' + checkpoint,account_name=source.account,
+            project_name=source.project_name or None,prefer_project=source.project,
+            conversation_id=source.conversation_id or None,
+            sdk_options={'enable_file_checkpointing':True,'permission_mode':'dontAsk'},sdk_action=action,
+            ephemeral=False if local_normal else source.ephemeral,execution_mode="persistent" if local_normal else source.execution_mode,
+            ephemeral_retention=source.ephemeral_retention,ephemeral_ttl_minutes=source.ephemeral_ttl_minutes)
+
+    async def sdk_session(self, task_id: str, operation: str, arguments: dict, request_id: str) -> dict:
+        """Scope native transcript helpers to one Task's account and workspace."""
+        from coderfleet.claude_sdk import _command, features_source, control_source
+        from coderfleet.data.scripts.coderfleet_sdk_features import SESSION_SCHEMAS, SESSION_MUTATIONS, validate
+        from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
+        if operation not in SESSION_SCHEMAS: raise ValueError('未知原生会话操作')
+        validate(arguments,SESSION_SCHEMAS[operation],'arguments')
+        source = self.get_task(task_id)
+        if source is None: raise ValueError('来源 Task 不存在')
+        if source.type.value != 'claude' or not source.native_session_id:
+            raise RuntimeError('Task 没有 Claude 原生会话')
+        account = next((a for a in self.get_accounts() if a.name == source.account),None)
+        if account is None: raise RuntimeError('来源账号不存在')
+        if source.execution_runtime and source.execution_runtime != account.runtime.value:
+            raise RuntimeError('来源账号运行位置已改变')
+        if not source.sdk_control_token:
+            source.sdk_control_token = secrets.token_hex(32)
+            source.save(self.tasks_dir)
+        root = self._sdk_control_directory(source).parent.parent
+        key = self._sdk_workspace_key(source)
+        mailbox = ControlMailbox(root / '.coderfleet-tasks' / f'{task_id}.sessions',task_id,source.sdk_control_token)
+        is_new = not mailbox.has_command(request_id)
+        tasks = Task.load_all(self.tasks_dir)
+        mutating = operation in SESSION_MUTATIONS
+        if is_new and mutating:
+            if operation == 'fork':
+                parent = self.get_conversation(source.conversation_id) if source.conversation_id else None
+                project = self.find_project_by_name(source.project_name) if source.project_name else None
+                local_normal = account.runtime == AccountRuntime.local and project is not None and not project.ephemeral and source.project != 'ephemeral'
+                if (parent and parent.ephemeral) or (source.ephemeral and not local_normal):
+                    raise RuntimeError('原生分叉需要普通项目工作区；临时工作区不会被静默替换或复制')
+            if self._sdk_workspace_busy(key) or any(self._task_is_active(t) and self._sdk_workspace_key(t) == key for t in tasks):
+                raise RuntimeError('请先停止此项目的任务，再修改原生会话')
+            if operation == 'delete':
+                if arguments['confirm_session_id'] != source.native_session_id: raise ValueError('删除确认的 session ID 不匹配')
+                references = [t for t in tasks if t.account == source.account and t.native_session_id == source.native_session_id]
+                conversations = [c for c in self.list_conversations(include_archived=True) if c.account == source.account and c.native_session_id == source.native_session_id]
+                if any(not t.archived for t in references) or any(c.status != ConversationStatus.archived for c in conversations):
+                    raise RuntimeError('原生记录仍被未归档的任务或会话引用；归档后才能明确删除')
+            self._sdk_native_busy.add(key)
+            self._write_sdk_artifact(root/'.coderfleet-tasks/sdk-session-lease.json',
+                json.dumps({'task_id':task_id,'request_id':request_id}).encode())
+        process_name = 'coderfleet-sdk-session-' + uuid.uuid4().hex[:12]
+        runtime = self._runtime_for(account)
+        launched = False
+        try:
+            mailbox.publish('accepting')
+            mailbox.submit(request_id,'session',{'operation':operation,'arguments':arguments},timeout=60)
+            prior = mailbox.reply(request_id)
+            if prior: return self._sdk_session_result(source,operation,arguments,request_id,prior)
+            if not is_new: raise TimeoutError('原生操作结果未知，请使用相同 ID 查询，不能自动重放')
+            local = account.runtime == AccountRuntime.local
+            project = self.find_project_for_path(source.project,source.account)
+            cwd = source.project if local else (self.container_workdir_for_project(project,source.project) if project and not source.ephemeral else '/workspace')
+            target_root = str(root) if local else '/workspace'
+            artifact = root / '.coderfleet-tasks'
+            protocol = control_source(); feature = features_source()
+            protocol_name = 'sdk-control-' + hashlib.sha256(protocol).hexdigest()[:16] + '.py'
+            feature_name = 'sdk-features-' + hashlib.sha256(feature).hexdigest()[:16] + '.py'
+            self._write_sdk_artifact(artifact/protocol_name,protocol)
+            self._write_sdk_artifact(artifact/feature_name,feature)
+            owned_ids = {t.native_session_id for t in tasks if t.native_session_id and self._sdk_workspace_key(t) == key}
+            owned_ids.update(c.native_session_id for c in self.list_conversations(include_archived=True)
+                if c.native_session_id and c.account == source.account and (c.project == source.project or c.project_name and c.project_name == source.project_name))
+            request = {'task_id':task_id,'operation':operation,'arguments':arguments,'request_id':request_id,
+                'cwd':cwd,'project_root':project.path if local and project else target_root,
+                'session_id':source.native_session_id,'sdk_options':source.sdk_options,
+                'allowed_session_ids':sorted(owned_ids),
+                'control_token':source.sdk_control_token,
+                'control_directory':str(Path(target_root)/'.coderfleet-tasks'/f'{task_id}.sessions'),
+                'protocol_module':str(Path(target_root)/'.coderfleet-tasks'/protocol_name)}
+            request_name = f'{task_id}.session-{request_id}.json'
+            self._write_sdk_artifact(artifact/request_name,json.dumps(request,ensure_ascii=False).encode(),private=local)
+            command = _command(Path(target_root)/'.coderfleet-tasks'/feature_name,[str(Path(target_root)/'.coderfleet-tasks'/request_name)],local=local)
+            network = None if local else self._get_ephemeral_network(account)
+            if not local and account.proxy != AccountProxy.off and not network:
+                raise RuntimeError('无法确认账号 relay 网络，不能启动外部存储 helper')
+            env = {name:'' for name in ('ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CODE_OAUTH_TOKEN')} if local else {}
+            self._apply_runtime_proxy(account,env,network)
+            if project: env.update(self.get_project_env(project.name))
+            env.update(self.get_account_env(account.name))
+            env.update(source.task_secrets)
+            env['CLAUDE_CONFIG_DIR'] = str(self.local_auth_dir(account)) if local else '/home/byclaw/.claude'
+            if local:
+                proc = await runtime.run(ContainerSpec(image='',command=['bash','-c',command],env=env,workdir=cwd,name=process_name))
+            else:
+                # External stores use the same account network/proxy as model Tasks.
+                proc = await runtime.run(ContainerSpec(image=self._get_account_image(account,project),
+                    command=['bash','-c',command],env=env,workdir=cwd,name=process_name,network=network,remove=True,
+                    mounts=[(str(root),'/workspace'),(str(self.workspace_dir/'accounts'/account.name),'/home/byclaw/.claude')]))
+            launched = True
+            await asyncio.wait_for(proc.communicate(),timeout=45)
+            result = mailbox.reply(request_id)
+            if not result: raise TimeoutError('原生操作结果尚未确认，请保留原请求 ID 查询')
+            return self._sdk_session_result(source,operation,arguments,request_id,result)
+        finally:
+            if launched:
+                await asyncio.wait_for(runtime.remove(process_name),timeout=5)
+                await asyncio.wait_for(proc.wait(),timeout=5)
+            if mutating and is_new:
+                # A receipt or helper completion marker proves the mutation has
+                # returned. Unknown termination stays excluded, even after cleanup.
+                finished = mailbox.directory / (request_id + '.finished.json')
+                if not launched or mailbox.reply(request_id) or finished.is_file():
+                    self._sdk_native_busy.discard(key)
+                    (root/'.coderfleet-tasks/sdk-session-lease.json').unlink(missing_ok=True)
+
+    def _sdk_session_result(self, source: Task, operation: str, arguments: dict, request_id: str, result: dict) -> dict:
+        if operation == 'fork' and result.get('status') == 'accepted':
+            session = result.get('result',{}).get('value',{}).get('session_id')
+            if not isinstance(session,str): raise RuntimeError('SDK 分叉未返回会话 ID')
+            conv_id = 'conv-sdk-' + source.id + '-' + request_id
+            conv = self.get_conversation(conv_id)
+            if conv is None:
+                parent = self.get_conversation(source.conversation_id) if source.conversation_id else None
+                project = self.find_project_by_name(source.project_name) if source.project_name else None
+                account = next((a for a in self.get_accounts() if a.name == source.account),None)
+                semantic_ephemeral = (parent.ephemeral if parent else source.ephemeral and not (account and account.runtime == AccountRuntime.local and project and not project.ephemeral and source.project != 'ephemeral'))
+                conv = Conversation(id=conv_id,name=arguments.get('title') or '原生分叉',account=source.account,
+                    type=source.type,project=source.project,project_name=source.project_name,native_session_id=session,
+                    ephemeral=semantic_ephemeral,ephemeral_retention=source.ephemeral_retention,sdk_options=source.sdk_options)
+                conv.save(self.conversations_dir)
+            return {**result,'conversation_id':conv.id}
+        return result
 
     def sdk_command_status(self, task_id: str, request_id: str) -> dict:
         from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox
@@ -5682,19 +5989,34 @@ class Scheduler:
 
         return answers
 
-    async def answer_intervention(
-        self, task_id: str, tool_call_id: str, token: str, answers: dict,
+    async def answer_intervention(self, task_id: str, tool_call_id: str, token: str, answers: dict) -> None:
+        await self._resolve_sdk_intervention(task_id, tool_call_id, token,
+            {'tool_call_id':tool_call_id, 'answers':answers}, kind='native', command='answer')
+
+    async def approve_intervention(
+        self, task_id: str, tool_call_id: str, token: str, decision: Literal['allow', 'deny'],
+        message: str = '', updated_input: Optional[dict] = None,
+    ) -> None:
+        payload: dict = {'tool_call_id':tool_call_id, 'decision':decision, 'message':message}
+        if updated_input is not None:
+            payload['updated_input'] = updated_input
+        await self._resolve_sdk_intervention(task_id, tool_call_id, token, payload,
+                                              kind='permission', command='approval')
+
+    async def _resolve_sdk_intervention(
+        self, task_id: str, tool_call_id: str, token: str, payload: dict,
+        *, kind: Literal['native', 'permission'], command: Literal['answer', 'approval'],
     ) -> None:
         from coderfleet.data.scripts.coderfleet_sdk_control import ControlMailbox, MAX_COMMANDS
 
         task = self.get_task(task_id)
         pending = task.pending_intervention if task else None
-        identifier = 'answer-' + token
+        identifier = command + '-' + token
         existing_delivery = False
         if task and task.execution_backend == 'sdk' and task.sdk_control_token:
             mailbox = ControlMailbox(self._sdk_control_directory(task), task.id, task.sdk_control_token)
             for attempt in range(1, MAX_COMMANDS + 1):
-                identifier = 'answer-' + token + (f'-{attempt}' if attempt > 1 else '')
+                identifier = command + '-' + token + (f'-{attempt}' if attempt > 1 else '')
                 if not mailbox.has_command(identifier):
                     break
                 receipt = mailbox.reply(identifier)
@@ -5703,17 +6025,19 @@ class Scheduler:
                     # including after question closure or Task completion.
                     existing_delivery = True
                     break
-                if not pending or pending.kind != 'native' or pending.token != token:
+                if not pending or pending.kind != kind or pending.token != token:
                     raise RuntimeError('这个问题已经被回答过或已超时')
             else:
                 raise RuntimeError('当前问题的回答尝试次数已达上限')
         if not existing_delivery:
-            if pending is None or pending.kind != 'native':
-                self.resolve_intervention(task_id, tool_call_id, token, answers)
-                return
+            if pending is None or pending.kind != kind:
+                if kind == 'native':
+                    self.resolve_intervention(task_id, tool_call_id, token, payload['answers'])
+                    return
+                raise RuntimeError('当前工具已经不在等待批准')
             if pending.tool_call_id != tool_call_id or pending.token != token:
                 raise RuntimeError('问题或 token 不匹配')
-        await self.sdk_command(task_id, 'answer', {'tool_call_id':tool_call_id, 'answers':answers},
+        await self.sdk_command(task_id, command, payload,
                                request_id=identifier)
         current = self.get_task(task_id)
         if current and current.pending_intervention and current.pending_intervention.token == token:

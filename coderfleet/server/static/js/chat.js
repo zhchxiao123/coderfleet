@@ -148,6 +148,9 @@ async function pollChatHeartbeat() {
       existing.status = h.status;
       existing.finished = h.finished;
       existing.sdk_control_ready = h.sdk_control_ready;
+      if (h.sdk_capabilities) existing.sdk_capabilities = h.sdk_capabilities;
+      if (h.sdk_permission_mode !== undefined) existing.sdk_permission_mode = h.sdk_permission_mode;
+      if (h.model !== undefined) existing.model = h.model;
     } else {
       // 心跳里出现了缓存里没有的任务 id：说明有新任务提交了，侧边栏的
       // 「最近访问」需要用一次全量刷新去拿到它所属会话的最新排序时间。
@@ -1958,7 +1961,9 @@ async function sendChatMessage() {
   const model = getChatModel();
 
   let executeAt = null;
+  let sdkOptions;
   try {
+    sdkOptions = SDKTaskControls.readOptions();
     executeAt = getChatScheduleExecuteAt();
   } catch (e) {
     alert(e.message);
@@ -1995,6 +2000,7 @@ async function sendChatMessage() {
           images: pendingImages.map(i => i.container_path),
           model,
           execute_at: executeAt,
+          sdk_options: sdkOptions,
         })
       });
       const taskData = await rTask.json();
@@ -2091,6 +2097,7 @@ async function sendChatMessage() {
         images: pendingImages.map(i => i.container_path),
         model,
         execute_at: executeAt,
+        sdk_options: sdkOptions,
       })
     });
     const data = await r.json();
@@ -2236,15 +2243,16 @@ function _resetChatQueueMode() {
 function _chatComposerTask(runningTaskId = currentChatTaskId) {
   if (!activeConversationId) return undefined;
   const own = (tasksCache || []).filter(t => activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId);
-  return own.find(t => SDKTaskControls.hasPending(t.id)) || own.find(t => t.id === runningTaskId);
+  return own.find(t => SDKTaskControls.hasPendingDelivery(t.id)) || own.find(t => t.id === runningTaskId) || own.find(t => SDKTaskControls.hasPending(t.id));
 }
 
 function _chatSDKEditor() {
   const input = document.getElementById('chat-input');
   const conversationId = activeConversationId;
   return {
-    read: () => ({ text: input?.value || '', hasAttachments: pendingImages.length > 0, uploading: chatUploadingImages > 0 }),
-    clear: text => {
+    read: () => ({ text: input?.value || '', hasAttachments: pendingImages.length > 0, uploading: chatUploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked }),
+    clear: (text,images=[]) => {
+      if (activeConversationId === conversationId && images.length) { pendingImages=pendingImages.filter(i=>!images.includes(i.container_path)); renderImagePreviews(); }
       if (activeConversationId === conversationId && input && input.value === text) {
         input.value = ''; input.dispatchEvent(new Event('input'));
       }
@@ -2270,6 +2278,7 @@ async function _performChatSDKAction(task, action) {
 function _syncChatSendButton(runningTaskId, isQueueFull) {
   const btn = document.getElementById('chat-send-btn');
   if (!btn) return;
+  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConversationId || chatNewSessionProject || 'new');
   const sdkHost = document.getElementById('sdk-task-controls');
   const sdkTask = _chatComposerTask(runningTaskId);
   if (sdkHost) SDKTaskControls.mount(sdkHost, sdkTask, _chatSDKEditor());
@@ -2517,6 +2526,7 @@ function buildChatInputHTML(placeholder, hint) {
     <textarea class="chat-input-textarea" id="chat-input" placeholder="${placeholder}" rows="1"></textarea>
     <div id="chat-upload-status" class="chat-upload-status" style="display:none;"></div>
     <div id="sdk-task-controls" class="sdk-task-controls"></div>
+    <div id="sdk-options"></div>
     <div class="chat-input-actions">
       <div class="chat-input-options">
         <input type="file" id="chat-file-input" multiple style="display:none" onchange="handleFileSelect(this)">

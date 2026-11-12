@@ -12,6 +12,7 @@ class ChatLogRenderer {
     this.container = container;   // #log-content div
     this.taskId = taskId;       // 提交 Intervention 答案时要 POST 去哪个任务
     this.inner = null;        // .chat-log div
+    this.permissionMap = {};
     this.toolMap = {};          // tool_use_id → { headerEl, badgeEl, outputEl, exitEl, toolName, input, wrap }
     this.subagentRenderers = {}; // Task/Agent 工具的 tool_use_id → { renderer, toggleRowEl, revealed }
     this.activeMonitorTasks = {}; // Monitor 工具的 task_id → tool_use_id（system task_started/task_notification 用）
@@ -24,6 +25,7 @@ class ChatLogRenderer {
     this._jsonLineBuffer = ''; // 跨行 JSON 事件缓冲
     this._footerRendered = false;
     this.executionBackend = 'cli'; this.interrupted = false;
+    this.streamMessageId = ''; this.streamBlocks = new Map(); this.lastSDKText = null; this.lastSDKMessageId = ''; this.lastSDKTextParts = [];
     this._isPending = false;   // renderPending() 后首次 push() 时清除占位 pill
     this.isRunning = isRunning;   // 是否正在运行
     this.foldProcess = foldProcess; // 是否折叠最新步骤
@@ -408,6 +410,7 @@ class ChatLogRenderer {
     switch (d.type) {
       // Claude
       case 'system': return this._claudeSys(d);
+      case 'stream_event': return this._claudeStream(d.event);
       case 'assistant': return this._claudeAssistant(d.message);
       case 'user': return this._claudeUser(d.message);
       case 'result': return this._claudeResult(d);
@@ -477,9 +480,22 @@ class ChatLogRenderer {
   _claudeSys(d) {
     if (d.subtype === 'coderfleet_backend') {
       this.executionBackend = d.execution_backend;
+      if (this.taskId && typeof SDKTaskControls !== 'undefined' && !this.sdkSessionPanel) {
+        this.sdkSessionPanel = SDKTaskControls.sessionPanel(this.taskId);
+        this._appendToProcess(this.sdkSessionPanel);
+      }
       return;
     }
-    if (d.subtype === 'coderfleet_control_ready' || d.subtype === 'coderfleet_question_pending') return;
+    if (d.subtype === 'mirror_error') { this._pill('会话镜像写入失败','本地记录仍保留，请检查外部存储'); return; }
+    if (d.subtype === 'coderfleet_control_ready' || d.subtype === 'coderfleet_question_pending' || d.subtype === 'coderfleet_checkpoint') return;
+    if (d.subtype === 'coderfleet_control_applied') { this._pill('运行设置已更新',d.operation || ''); return; }
+    if (d.subtype === 'coderfleet_control_unconfirmed') { this._pill('运行操作结果未确认','请检查投递回执'); return; }
+    if (d.subtype === 'coderfleet_files_rewound') { this._pill('文件已恢复',d.user_message_id || ''); return; }
+    if (['hook_started','hook_progress','hook_response','task_progress'].includes(d.subtype)) {
+      this._pill(d.subtype.startsWith('hook_') ? 'Hook 回调' : '后台任务进度', d.hook_name || d.task_id || d.subtype); return;
+    }
+    if (d.subtype === 'coderfleet_permission_pending') return this._permissionPending(d);
+    if (d.subtype === 'coderfleet_permission_closed') return this._closePermission(d.tool_call_id,d.status);
     if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || ''); return; }
     if (d.subtype === 'coderfleet_interrupted') { this.interrupted = true; this._pill('已中断', '原生会话可继续'); return; }
     if (d.subtype === 'coderfleet_question_closed') {
@@ -508,6 +524,7 @@ class ChatLogRenderer {
     // 那需要一整套跨轮次归因的状态机，和这里"事件流直接转 DOM"的架构不是一个量级，
     // 暂不实现；只做最诚实有用的子集：卡片状态灯准确反映"运行中/已结束"。
     if (d.subtype === 'task_started' && d.task_id && d.tool_use_id) {
+      this._pill('后台任务已启动',d.task_id);
       this.activeMonitorTasks[d.task_id] = d.tool_use_id;
       const e = this.toolMap[d.tool_use_id];
       if (e && e.statusEl) {
@@ -537,12 +554,63 @@ class ChatLogRenderer {
     this._pill(`⚠ ${label}`, info.status);
   }
 
+  _claudeStream(event) {
+    if (!event) return;
+    if (event.type === 'message_start') {
+      this.streamMessageId = event.message?.id || `stream-${this.streamBlocks.size}`;
+      this.streamModel = event.message?.model;
+      // Completed entries only support matching a late complete block.
+      while (this.streamBlocks.size > 128) this.streamBlocks.delete(this.streamBlocks.keys().next().value);
+      return;
+    }
+    const key = `${this.streamMessageId}:${event.index ?? 0}`;
+    if (event.type === 'content_block_start') {
+      const block = event.content_block || {};
+      if (['text','thinking'].includes(block.type)) this.streamBlocks.set(key, {
+        messageId:this.streamMessageId, type:block.type, text:block.text || block.thinking || '', node:null, settled:false,
+      });
+      return;
+    }
+    if (event.type !== 'content_block_delta') return;
+    const delta = event.delta || {};
+    if (!['text_delta','thinking_delta'].includes(delta.type)) return;
+    let block = this.streamBlocks.get(key);
+    if (!block) {
+      block = {messageId:this.streamMessageId,type:delta.type === 'text_delta' ? 'text' : 'thinking',text:'',node:null,settled:false};
+      this.streamBlocks.set(key,block);
+    }
+    block.text += delta.text || delta.thinking || '';
+    if (!block.node) block.node = block.type === 'text' ? this._bubble('',this.streamModel) : this._thinking(block.text);
+    if (!block.node) return;
+    block.node.dataset.streaming = 'true';
+    if (block.type === 'text') block.node._bubbleText = block.text;
+    block.node.querySelector(block.type === 'text' ? '.bubble-content' : '.think-bubble').textContent = block.text;
+  }
+
+  _settleStream(message, block) {
+    const entry = [...this.streamBlocks.values()].find(item => !item.settled && item.type === block.type &&
+      (!message.id || item.messageId === message.id));
+    if (!entry?.node) return false;
+    entry.settled = true;
+    entry.text = block.text || block.thinking || '';
+    entry.node.dataset.streaming = 'false';
+    if (block.type === 'text') entry.node._bubbleText = entry.text;
+    entry.node.querySelector(block.type === 'text' ? '.bubble-content' : '.think-bubble').innerHTML =
+      renderMd(block.type === 'text' ? this._injectDownloadCards(entry.text) : entry.text);
+    return true;
+  }
+
   // ── Claude: assistant ─────────────────────────────────────
   _claudeAssistant(msg) {
     if (!msg?.content) return;
+    if (!msg.id || msg.id !== this.lastSDKMessageId) { this.lastSDKTextParts = []; this.lastSDKMessageId = msg.id || ''; }
     for (const b of msg.content) {
-      if (b.type === 'text' && b.text?.trim()) this._bubble(b.text, msg.model);
-      else if (b.type === 'thinking' && b.thinking) this._thinking(b.thinking);
+      if (b.type === 'text' && b.text?.trim()) {
+        if (!this._settleStream(msg,b)) this._bubble(b.text,msg.model);
+        if (this.executionBackend === 'sdk') { this.lastSDKTextParts.push(b.text); this.lastSDKText = this.lastSDKTextParts.join('\n'); }
+      } else if (b.type === 'thinking' && b.thinking) {
+        if (!this._settleStream(msg,b)) this._thinking(b.thinking);
+      }
       else if (b.type === 'tool_use') this._toolUse(b);
     }
   }
@@ -568,8 +636,9 @@ class ChatLogRenderer {
 
   // ── Claude: result ────────────────────────────────────────
   _claudeResult(d) {
+    if (d.structured_output !== undefined) this._bubble("```json\n" + JSON.stringify(d.structured_output,null,2) + "\n```");
     // 1. 如果最终成功且有答复内容，先渲染为 AI 气泡
-    if (!d.is_error && d.result && d.result.trim()) {
+    if (!d.is_error && d.result && d.result.trim() && !(this.executionBackend === 'sdk' && [this.lastSDKText,(this.lastSDKTextParts || []).join(''),(this.lastSDKTextParts || []).join('\n\n')].includes(d.result))) {
       this._bubble(d.result);
     }
 
@@ -1139,14 +1208,15 @@ class ChatLogRenderer {
     </div>
   </div>`;
 
+    el._bubbleText = text;
     el.querySelector('.bubble-copy-btn').addEventListener('click', () => {
-      copyTextToClipboard(text, el.querySelector('.bubble-copy-btn'));
+      copyTextToClipboard(el._bubbleText, el.querySelector('.bubble-copy-btn'));
     });
 
     const tbtn = el.querySelector('.bubble-translate-btn');
     if (tbtn) {
       tbtn.addEventListener('click', () => {
-        toggleBubbleTranslation(tbtn, el.querySelector('.bubble-content'), text);
+        toggleBubbleTranslation(tbtn, el.querySelector('.bubble-content'), el._bubbleText);
       });
     }
 
@@ -1161,6 +1231,7 @@ class ChatLogRenderer {
 
     this.inner.appendChild(el);
     this.lastBubbleEl = el;
+    return el;
   }
 
   // Only the final reply of a completed turn receives the fork action.
@@ -1193,6 +1264,7 @@ class ChatLogRenderer {
     <div class="bubble think-bubble">${renderMd(text)}</div>
   </div>`;
     this._appendNode(el);
+    return el;
   }
 
   // ── 工具调用卡片 ──────────────────────────────────────────
@@ -1514,6 +1586,97 @@ class ChatLogRenderer {
     }
   }
 
+  _permissionPending(event) {
+    const owner = this._questionRenderer(event.tool_call_id);
+    if (owner && owner !== this) return owner._permissionPending(event);
+    const id = event.tool_call_id;
+    if (!id || this.permissionMap[id]) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'askq-wrap sdk-permission-card timeline-node';
+    const plan = event.tool_name === 'ExitPlanMode';
+    wrap.innerHTML = `<div class="askq-title">${plan ? '计划等待批准' : '工具等待授权'} · ${esc(event.tool_name || '')}</div>
+      <pre class="tool-input-code">${esc(JSON.stringify(event.tool_input || {},null,2))}</pre>
+      ${event.decision_reason ? `<p>${esc(event.decision_reason)}</p>` : ''}
+      <details><summary>修改参数或填写拒绝理由</summary>
+        <textarea id="permission-input-${esc(id)}" class="askq-live-text" aria-label="修改工具参数 JSON" placeholder="留空使用原参数"></textarea>
+        <input id="permission-reason-${esc(id)}" class="askq-live-text" aria-label="拒绝理由" placeholder="拒绝理由（可选）"></details>
+      <div class="askq-submit-row"><button class="askq-submit-btn" id="permission-allow-${esc(id)}">${plan ? '批准计划并允许编辑' : '允许本次'}</button>
+        <button class="askq-submit-btn" id="permission-deny-${esc(id)}">拒绝</button>
+        <span id="permission-status-${esc(id)}" role="status">${this.isRunning ? '等待您的决定' : '请求已结束'}</span></div>`;
+    this.permissionMap[id] = {wrap,isLive:this.isRunning,attempt:null};
+    this._appendNode(wrap);
+    for (const [label,decision] of [['allow','allow'],['deny','deny']]) {
+      const button = document.getElementById(`permission-${label}-${id}`);
+      if (button) {
+        button.disabled = !this.isRunning;
+        button.addEventListener('click', event => { event.stopPropagation(); this._submitPermission(id,decision); });
+      }
+    }
+  }
+
+  _permissionOwner(id) {
+    if (this.permissionMap[id]) return this;
+    for (const sub of Object.values(this.subagentRenderers)) {
+      const owner = sub.renderer._permissionOwner(id);
+      if (owner) return owner;
+    }
+    return null;
+  }
+
+  _closePermission(id,status) {
+    const owner = this._permissionOwner(id);
+    if (!owner) return;
+    const entry = owner.permissionMap[id];
+    entry.isLive = false; entry.attempt = null;
+    entry.wrap.querySelectorAll('input, textarea, button').forEach(input => { input.disabled = true; });
+    for (const label of ['allow','deny']) {
+      const button = document.getElementById(`permission-${label}-${id}`);
+      if (button) button.disabled = true;
+    }
+    const text = document.getElementById(`permission-status-${id}`);
+    if (text) text.textContent = {approved:'✓ 已批准',denied:'已拒绝',timed_out:'授权已超时',cancelled:'授权已取消'}[status] || '请求已结束';
+  }
+
+  async _submitPermission(id,decision) {
+    const entry = this.permissionMap[id];
+    if (!entry?.isLive || entry.busy) return;
+    entry.busy = true;
+    const status = document.getElementById(`permission-status-${id}`);
+    let definitive = false;
+    try {
+      const input = (document.getElementById(`permission-input-${id}`)?.value || '').trim();
+      const selection = {decision,message:(document.getElementById(`permission-reason-${id}`)?.value || '').trim()};
+      if (input) {
+        selection.updated_input = JSON.parse(input);
+        if (!selection.updated_input || Array.isArray(selection.updated_input) || typeof selection.updated_input !== 'object') throw new Error('工具参数必须是 JSON 对象');
+      }
+      const identity = JSON.stringify(selection);
+      if (entry.attempt && entry.attempt.identity !== identity) throw new Error('上次决定尚未确认，请先重试原决定');
+      let body = entry.attempt?.body;
+      if (!body) {
+        const detail = await fetch(`${API}/api/tasks/${encodeURIComponent(this.taskId)}`);
+        if (!detail.ok) throw new Error('读取授权状态失败');
+        const pending = (await detail.json()).pending_intervention;
+        if (!entry.isLive) return;
+        if (pending?.kind !== 'permission' || pending.tool_call_id !== id) throw new Error('当前工具已经不在等待授权');
+        body = JSON.stringify({tool_call_id:id,token:pending.token,...selection});
+        entry.attempt = {identity,body};
+      }
+      if (status) status.textContent = '正在提交决定…';
+      const response = await fetch(`${API}/api/tasks/${encodeURIComponent(this.taskId)}/approval`, {
+        method:'POST',headers:{'Content-Type':'application/json'},body,
+      });
+      if (!response.ok) {
+        definitive = response.status >= 400 && response.status < 500;
+        throw new Error((await response.json().catch(()=>({}))).detail || '授权结果未确认，请重试原决定');
+      }
+      if (entry.isLive) this._closePermission(id,decision === 'allow' ? 'approved' : 'denied');
+    } catch (error) {
+      if (definitive) entry.attempt = null;
+      if (entry.isLive && status) status.textContent = error.message;
+    } finally { entry.busy = false; }
+  }
+
   _disableAskqInputs(id) {
     const wrap = this.toolMap[id]?.wrap;
     if (wrap) wrap.querySelectorAll('input, .askq-submit-btn').forEach(el => { el.disabled = true; });
@@ -1529,6 +1692,10 @@ class ChatLogRenderer {
   // 任务日志流结束（[DONE]）时调用：还留着未作答实时表单的卡片，禁用输入并提示任务已
   // 结束——不能让它们继续看着像"还能点"，其实这个任务已经没有 CLI 进程在等这个答案了。
   deactivatePendingInterventions() {
+    for (const entry of this.streamBlocks.values()) if (entry.node && !entry.settled) {
+      this._settleStream({id:entry.messageId},{type:entry.type,text:entry.text,thinking:entry.text});
+    }
+    for (const [id,entry] of Object.entries(this.permissionMap)) if (entry.isLive) this._closePermission(id,'cancelled');
     for (const child of Object.values(this.subagentRenderers)) child.renderer.deactivatePendingInterventions();
     for (const [id, e] of Object.entries(this.toolMap)) {
       if (!e.isLive) continue;

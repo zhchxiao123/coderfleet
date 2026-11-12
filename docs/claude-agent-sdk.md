@@ -76,11 +76,11 @@ coderfleet account backend <account-name> cli
 
 容器继续使用现有网络边界和代理；local 继续遵守现有代理兼容规则、sandbox 确认和 root/auto 门禁。项目工作目录、规则、技能、插件、附件及 MCP 工具使用原布局与权限语义。检查版本或通过离线协议 fixture 不等于认证、代理出口或真实工具验收已经通过。
 
-普通模式仍使用 `acceptEdits`，项目 auto 模式仍对应 `bypassPermissions`；SDK 自身名为 auto 的分类器模式不是项目 auto 的替代项。普通 SDK Task 的原生 AskUserQuestion 通过 `can_use_tool` 等待回答；已有 MCP 人工问答保留，auto 不增加人工等待。其他未被设置或 allowlist 预批准的工具仍明确拒绝，不提供通用权限审批。worker 使用 SDK 的完整运行生命周期，首个 result 不会提前结束仍有后续工作的 Task。
+普通模式仍使用 `acceptEdits`，项目 auto 模式仍对应 `bypassPermissions`；SDK 自身名为 auto 的分类器模式不是项目 auto 的替代项。普通 SDK Task 的原生 AskUserQuestion 通过 `can_use_tool` 等待回答；已有 MCP 人工问答保留，auto 不增加人工等待。其他进入 can_use_tool 的工具显示一次性授权卡，可批准、修改参数或拒绝；ExitPlanMode 批准后切到 session 级 acceptEdits。allow/deny 规则、Hooks 和当前权限模式仍先决定是否需要回调。通过运行设置可切换六种 SDK 权限模式；显式 permission_mode 优先于项目“全自动”预设。worker 使用 SDK 的完整运行生命周期，首个 result 不会提前结束仍有后续工作的 Task。
 
 ## 运行中交互
 
-新 SDK Task 的控制通道就绪后，桌面和移动端复用主发送按钮：有纯文字时点击“发送”或按 Enter 补充到当前 Task；输入框为空时按钮显示方形图标，点击请求原生中断。勾选“排队发送”、设置定时或附带文件时，仍走后续 Task 的提交路径。补充消息不占等待队列名额，队列满时仍可发送。连接尚未就绪或附件正在上传时，界面明确禁用当前动作，不会静默把插话转为排队。
+新 SDK Task 的控制通道就绪后，桌面和移动端复用主发送按钮：有纯文字时点击“发送”或按 Enter 补充到当前 Task；输入框为空时按钮显示方形图标，点击请求原生中断。勾选“排队发送”或设置定时时创建后续 Task。附件默认排队；在“SDK 参数”中勾选“附件随当前任务插话”后，新 worker 可把已上传的 PNG/JPEG/WebP/GIF/PDF 转成原生内容块投递到当前 Task。其他文件保留路径引用；旧 worker 明确保留排队路径。补充消息不占等待队列名额，队列满时仍可发送。连接尚未就绪或附件正在上传时，界面明确禁用当前动作，不会静默把插话转为排队。
 
 就绪状态在日志跟随期间也自动同步，无需刷新页面；切换对话会立即撤销旧 Task 的交互操作。投递失败保留文字；投递结果未知时保留原请求 ID，并显示查询入口。原 Task 已结束但回执缺失时，主按钮先查询状态；勾选排队或定时也不会绕过该检查，避免将同一段文字自动重放为新 Task。
 
@@ -96,7 +96,7 @@ coderfleet task command-status <task-id> my-message-1
 
 这些交互命令和 status/answer 在本机读取当前工作区 API key，远端使用显式 `CODERFLEET_API_KEY`。非默认端口继续设置 `CODERFLEET_API`。
 
-补充消息目前只接受文字，附件继续使用原发送入口排队。“已接收”表示已交给当前 SDK 输入；模型可能在当前轮次内消费，也可能在后续轮次处理，不承诺立即抢占。每条投递带请求 ID；同 ID、同内容重试返回原回执，不重复发送。超时或连接丢失时保留草稿，用原 ID 查询或重试，不自动转成新 Task。
+补充消息默认只发文字；勾选原生附件插话后，新 worker 可接收本项目已上传附件，默认发送行为仍保留排队。“已接收”表示已交给当前 SDK 输入；模型可能在当前轮次内消费，也可能在后续轮次处理，不承诺立即抢占。每条投递带请求 ID；同 ID、同内容重试返回原回执，不重复发送。超时或连接丢失时保留草稿，用原 ID 查询或重试，不自动转成新 Task。
 
 interrupt 使用 SDK 原生控制请求，保留 session ID；完成后 Task 的取消状态带 `interrupted=true`，界面显示“已中断”，Conversation 可接着续聊。中断不会回滚已有文件修改。原来的强制终止仍保留。
 
@@ -141,3 +141,57 @@ SDK 的 result 表示一次 turn 结束；后台 agent 的后续 turn 结束前�
 持久 SDK Task 保存原始日志已消费字节与目标日志已提交字节。服务恢复先丢弃未提交尾部，再续读源文件，避免遗漏停机期间事件或重放已显示日志。新会话在初始化时即保存 session ID，后续失败或停止不会清空它。显式停止会验证 worker 及受管理 CLI 已退出，再释放 Conversation；观测失败时保留运行状态以避免重复执行，且不阻塞其他 Task 的启动恢复。local SDK 不继承服务进程中的其他账号令牌，显式项目、账号与 Task 配置仍按原优先级覆盖。
 
 真实模型验收必须使用经授权的账号和新隔离测试容器，凭据只读挂载，走现有容器 → relay → 宿主代理链路；实际验收记录单独保存。普通工具中断与恢复、原生问题在服务重启后的回答，以及当前轮次消费补充消息，都需要真实 bundled CLI 的证据，离线 fixture 不能替代。
+
+
+## SDK 参数与扩展
+
+桌面和移动输入框中的“SDK 参数”提供 JSON 编辑器；CLI 使用 `coderfleet task run '要求' --project <项目> --sdk-options /absolute/options.json`。留空继承会话参数，显式 `{}` 恢复默认。参数保存在 Task 快照中，重试保留原快照；运行中的切换模型/权限不修改账号默认值。
+
+```json
+{
+  "max_turns": 12,
+  "max_budget_usd": 2,
+  "thinking": {"type": "adaptive"},
+  "effort": "high",
+  "agents": {"reviewer": {"description": "检查代码", "prompt": "检查功能与回归", "model": "sonnet"}},
+  "forward_subagent_text": true,
+  "output_format": {"type": "json_schema", "schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}}
+}
+```
+
+`GET /api/sdk/capabilities` 返回同源配置及操作 schema。支持 tools/allow/deny、system_prompt、fallback_model、轮数/费用/token 预算、thinking/effort、JSON Schema、Skills、插件、AgentDefinition、MCP、sandbox、settings/setting_sources、Hook 事件和增量输出。预算与模型支持仍由固定 SDK/CLI/模型决定；费用统计不是绝对费用承诺。身份、cwd、凭据、原生 session 归属和代理由 CoderFleet 管理，不能通过任意 SDK extra_args 覆盖。
+
+Python 回调通过 `"extension":{"path":"extension.py"}` 显式加载。文件相对配置项目根目录，必须解析在该根内；工厂默认 `create(context)`，可同步或异步，返回 `hooks`、`mcp_servers`、`session_store`。仅账号 worker 执行它，主服务不会 import 项目模块。示例见 [claude_sdk_extension.py](../examples/claude_sdk_extension.py)，包含 Hook 和 SDK 进程内 echo 工具。凭据使用账号/项目环境，避免写入可见的 Task JSON。
+
+`"session_store":{"type":"sqlite"}` 启用账号目录下独立的 SQLite 镜像，保留未知 JSON 字段，跨进程事务追加，按 UUID 幂等；本地原生记录仍保留。也可由工厂提供远程 SessionStore，其管理操作沿用账号运行位置和 relay/代理。支持 `session_store_flush` 与 `load_timeout_ms`。镜像写入失败会显示提示；不能把 Task 成功等同于远程备份始终成功。
+
+## 运行设置与工具批准
+
+运行设置可查询 MCP、初始化能力、上下文占用，切换模型/权限，重连或启停 MCP，以及停止指定原生后台任务。SDK 后台 `task_id` 和 CoderFleet Task ID 是两种标识。操作有持久回执；结果未知时保留同一 ID 和参数查询，不能换 ID 自动重放。
+
+```bash
+coderfleet task approve <task-id> --decision allow
+coderfleet task approve <task-id> --decision deny --message '请先说明修改范围'
+coderfleet task sdk <task-id> get_context_usage
+coderfleet task sdk <task-id> set_model --json '{"model":"sonnet"}' --request-id model-1
+coderfleet task sdk <task-id> toggle_mcp_server --json '{"server_name":"project_tools","enabled":true}'
+coderfleet task send <task-id> '查看图片' --image /workspace/.coderfleet-uploads/image.png --request-id image-1
+```
+
+批准工具可用 `--input-json` 修改输入；原生问题和审批的 CLI 都打印问题标识/token，可通过 `--tool-call-id ... --token ...` 在问题关闭后精确重试。等待最长十分钟，拒绝、超时、中断和结束均关闭表单。
+
+## 原生记录与文件检查点
+
+日志执行过程中的“原生会话与文件恢复”面板和 CLI `task session` 提供当前项目已绑定会话的 info/list/messages/subagents/subagent_messages/rename/tag/fork/delete/import_store。查询固定账号/cwd，不接受浏览器覆盖认证根目录。元数据 helper 不启动模型；使用外部存储时需要对应账号的网络链路。原生分叉会创建可续聊的 Conversation，并保留存储配置；与现有受管分叉一样限定普通项目工作区，临时工作区不会被静默替换。普通 local 项目不因此改成临时项目。
+
+```bash
+coderfleet task session <task-id> messages --json '{"limit":50,"offset":0}'
+coderfleet task session <task-id> tag --json '{"tag":"reviewed"}' --request-id tag-1
+coderfleet task session <task-id> fork --json '{"title":"独立方案"}' --request-id fork-1
+```
+
+修改操作要求工作区空闲，使用持久 lease 与回执；原生删除要求所有引用先归档，且明确确认 session ID。有镜像时同步本地与镜像；不能确认子 Agent 级联删除的 provider 会明确拒绝。部分失败保留未知结果，不能假报成功或自动重放。分叉共享普通项目当前文件，不复制 undo/file-history。
+
+启用 `"enable_file_checkpointing":true` 后，保存重放 user 消息的检查点 UUID。“创建文件恢复任务”或 `coderfleet task rewind <source-task> <checkpoint> --request-id rewind-1` 创建独立 Task：复用来源工作区/账号/session，以空输入恢复，不重放原 prompt；相同请求只创建一次。项目有任务运行时拒绝恢复，恢复期间新任务不能并发修改文件。
+
+SDK **0.2.180 不允许 SessionStore 和文件检查点同时启用**。恢复覆盖 Write/Edit/NotebookEdit 跟踪的修改，不保证任意 Bash、子 Agent 或外部副作用，也不回退对话历史。SDK 的关闭过程需要有限的刷新/退出时间，恢复 Task 的清理单独保留该时限。
