@@ -294,3 +294,35 @@ test('multiple SDK text blocks do not duplicate the final aggregate reply',()=>{
   result.push(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'first block\nsecond block'}));
   assert.equal(container.log.children.filter(child=>child.className.includes('ai-reply')).length,2,JSON.stringify({parts:result.lastSDKTextParts,id:result.lastSDKMessageId,text:result.lastSDKText,last:result.lastBubbleEl._bubbleText,backend:result.executionBackend}));
 });
+
+test('empty signed thinking blocks do not duplicate the later visible streamed thinking',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  const stream=event=>push({type:'stream_event',event});
+  push({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'});
+  stream({type:'message_start',message:{id:'thought-message'}});
+  stream({type:'content_block_start',index:0,content_block:{type:'thinking',thinking:''}});
+  stream({type:'content_block_delta',index:0,delta:{type:'signature_delta',signature:'opaque'}});
+  push({type:'assistant',message:{id:'thought-message',content:[{type:'thinking',thinking:'',signature:'opaque'}]}});
+  stream({type:'content_block_stop',index:0});
+  stream({type:'content_block_start',index:1,content_block:{type:'thinking',thinking:''}});
+  stream({type:'content_block_delta',index:1,delta:{type:'thinking_delta',thinking:'检查 `image` 构建版本。'}});
+  const thoughts=()=>container.log.children.filter(child=>child.className.includes('thought-reply'));
+  assert.equal(thoughts().length,1,'Thinking must be visible during streaming');
+  const node=thoughts()[0];
+  push({type:'assistant',message:{id:'thought-message',content:[{type:'thinking',thinking:'检查 `image` 构建版本。'}]}});
+  assert.equal(thoughts().length,1,'The final thinking block must update the existing stream node');
+  assert.equal(node.dataset.streaming,'false');
+  assert.match(node.querySelector('.think-bubble').innerHTML,/<code>image<\/code>/);
+});
+
+test('routine hook events stay out of the timeline while hook failures remain visible',()=>{
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  const initial=container.log.children.length;
+  for (const subtype of ['hook_started','hook_progress','hook_response']) result.push(JSON.stringify({type:'system',subtype,hook_name:'SessionStart:resume',outcome:'success',exit_code:0}));
+  assert.equal(container.log.children.length,initial);
+  result.push(JSON.stringify({type:'system',subtype:'hook_response',hook_name:'SessionStart:resume',outcome:'error',exit_code:1}));
+  assert.equal(container.log.children.length,initial+1);
+  assert.match(container.log.children.at(-1).innerHTML,/Hook 执行失败/);
+});

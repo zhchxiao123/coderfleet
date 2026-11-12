@@ -480,10 +480,6 @@ class ChatLogRenderer {
   _claudeSys(d) {
     if (d.subtype === 'coderfleet_backend') {
       this.executionBackend = d.execution_backend;
-      if (this.taskId && typeof SDKTaskControls !== 'undefined' && !this.sdkSessionPanel) {
-        this.sdkSessionPanel = SDKTaskControls.sessionPanel(this.taskId);
-        this._appendToProcess(this.sdkSessionPanel);
-      }
       return;
     }
     if (d.subtype === 'mirror_error') { this._pill('会话镜像写入失败','本地记录仍保留，请检查外部存储'); return; }
@@ -491,9 +487,12 @@ class ChatLogRenderer {
     if (d.subtype === 'coderfleet_control_applied') { this._pill('运行设置已更新',d.operation || ''); return; }
     if (d.subtype === 'coderfleet_control_unconfirmed') { this._pill('运行操作结果未确认','请检查投递回执'); return; }
     if (d.subtype === 'coderfleet_files_rewound') { this._pill('文件已恢复',d.user_message_id || ''); return; }
-    if (['hook_started','hook_progress','hook_response','task_progress'].includes(d.subtype)) {
-      this._pill(d.subtype.startsWith('hook_') ? 'Hook 回调' : '后台任务进度', d.hook_name || d.task_id || d.subtype); return;
+    if (['hook_started','hook_progress'].includes(d.subtype)) return;
+    if (d.subtype === 'hook_response') {
+      if (d.outcome === 'error' || d.exit_code > 0) this._pill('Hook 执行失败',d.hook_name || '');
+      return;
     }
+    if (d.subtype === 'task_progress') { this._pill('后台任务进度',d.task_id || ''); return; }
     if (d.subtype === 'coderfleet_permission_pending') return this._permissionPending(d);
     if (d.subtype === 'coderfleet_permission_closed') return this._closePermission(d.tool_call_id,d.status);
     if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || ''); return; }
@@ -588,9 +587,11 @@ class ChatLogRenderer {
   }
 
   _settleStream(message, block) {
-    const entry = [...this.streamBlocks.values()].find(item => !item.settled && item.type === block.type &&
+    const candidates = [...this.streamBlocks.values()].filter(item => item.node && !item.settled && item.type === block.type &&
       (!message.id || item.messageId === message.id));
-    if (!entry?.node) return false;
+    const text = block.text || block.thinking || '';
+    const entry = candidates.find(item => item.text === text) || candidates.find(item => text.startsWith(item.text)) || candidates[0];
+    if (!entry) return false;
     entry.settled = true;
     entry.text = block.text || block.thinking || '';
     entry.node.dataset.streaming = 'false';

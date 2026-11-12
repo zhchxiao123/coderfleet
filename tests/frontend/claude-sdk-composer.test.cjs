@@ -18,11 +18,11 @@ class Element {
 }
 
 function desktop() {
-  const nodes = new Map(['chat-input','chat-send-btn','sdk-task-controls','chat-schedule-checkbox','chat-queue-mode'].map(id=>[id,new Element()]));
+  const nodes = new Map(['chat-input','chat-send-btn','sdk-task-controls','sdk-options','chat-schedule-checkbox','chat-queue-mode'].map(id=>[id,new Element()]));
   const calls = [];
   const storage = new Map();
   const context = vm.createContext({
-    document:{getElementById:id=>nodes.get(id)||null,createElement:()=>new Element(),addEventListener(){}},
+    document:{getElementById:id=>nodes.get(id)||null,createElement:()=>new Element(),createTextNode:text=>Object.assign(new Element(),{textContent:text}),addEventListener(){}},
     localStorage:{getItem:()=>null},sessionStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
     crypto:require('node:crypto'),Event:class {}, API:'',esc:value=>String(value),console,setTimeout,clearTimeout,alert(){},confirmDialog:async()=>false,
     fetch:async(url,options)=>{calls.push({url,body:options?.body?JSON.parse(options.body):null});return{ok:true,json:async()=>url==='/api/tasks'?{id:'queued-task',status:'pending',type:'claude'}:{status:'accepted'}};},
@@ -109,11 +109,11 @@ test('an unconfirmed send after Task exit is checked instead of replayed as a ne
 });
 
 function mobile() {
-  const nodes = new Map(['ta','btn-send','sdk-task-controls','auto-mode','schedule-mode','mobile-queue-mode'].map(id=>[id,new Element()]));
+  const nodes = new Map(['ta','btn-send','sdk-task-controls','sdk-options','auto-mode','schedule-mode','mobile-queue-mode'].map(id=>[id,new Element()]));
   const calls = [];
   const storage = new Map();
   const context = vm.createContext({
-    document:{getElementById:id=>nodes.get(id)||null,createElement:()=>new Element(),documentElement:{clientHeight:800,style:{setProperty(){}}}},
+    document:{getElementById:id=>nodes.get(id)||null,createElement:()=>new Element(),createTextNode:text=>Object.assign(new Element(),{textContent:text}),addEventListener(){},documentElement:{clientHeight:800,style:{setProperty(){}}}},
     window:{innerHeight:800,addEventListener(){},scrollTo(){}},
     localStorage:{getItem:()=>null},sessionStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
     crypto:require('node:crypto'),console,alert(){},
@@ -395,3 +395,19 @@ test('explicit navigation clears draft attachments from the previous conversatio
   await vm.runInContext("selectConversation('other-conversation')",context);
   assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(pendingImages)',context)),[]);
 });
+
+for (const [name,make,refresh] of [['desktop',desktop,'_syncChatSendButton(currentChatTaskId,false)'],['mobile',mobile,'updateSendState()']]) {
+  test(`${name} more menu includes completed own tasks and excludes other conversations`,()=>{
+    const {context,nodes}=make();
+    vm.runInContext(`${name==='desktop'?'tasksCache':'tasks'}.push(
+      {id:'older-task',conversation_id:'conv-one',status:'done',execution_backend:'sdk'},
+      {id:'foreign-task',conversation_id:'another-conversation',status:'running',execution_backend:'sdk'});${refresh}`,context);
+    const host=nodes.get('sdk-options');
+    assert.equal(host.children.length,1);
+    assert.deepEqual([...host._sdkOptionTasks.keys()].sort(),['older-task','task-one']);
+    vm.runInContext(name==='desktop' ? "activeConversationId='another-conversation';currentChatTaskId=null" : "activeConv={id:'another-conversation'}",context);
+    vm.runInContext(refresh,context);
+    assert.deepEqual([...host._sdkOptionTasks.keys()],['foreign-task']);
+    assert.equal(host.children[0].open || false,false,'Navigation closes old controls');
+  });
+}

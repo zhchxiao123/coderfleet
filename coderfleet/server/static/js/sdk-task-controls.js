@@ -130,7 +130,7 @@ const SDKTaskControls = {
   },
   sessionPanel(taskId) {
     const details = document.createElement('details'); details.className = 'sdk-runtime-panel sdk-session-panel';
-    const summary = document.createElement('summary'); summary.textContent = '原生会话与文件恢复'; details.appendChild(summary);
+    const summary = document.createElement('summary'); summary.textContent = '会话记录与文件恢复'; details.appendChild(summary);
     const body = document.createElement('div'); body.className = 'sdk-runtime-body'; details.appendChild(body);
     let loaded = false;
     const load = async()=>{
@@ -201,20 +201,89 @@ const SDKTaskControls = {
     details.addEventListener('toggle',load);
     return details;
   },
-  mountOptions(host, scope) {
-    if (!host || host.dataset.scope === scope) return;
-    host.dataset.scope = scope; host.replaceChildren();
+  mountOptions(host, scope, tasks = []) {
+    if (!host) return;
+    if (host.dataset.scope !== scope) {
+      if (this._openMenu === host._sdkMore) this._openMenu = null;
+      host.dataset.scope = scope; host.replaceChildren();
+      const more = document.createElement('details'); more.className = 'sdk-more';
+      const trigger = document.createElement('summary'); trigger.className = 'sdk-more-trigger';
+      trigger.textContent = '更多'; trigger.title = '更多对话选项'; trigger.setAttribute('aria-label','更多对话选项'); more.appendChild(trigger);
+      const body = document.createElement('div'); body.className = 'sdk-more-body'; body.setAttribute('aria-label','更多对话选项');
+      const heading = document.createElement('div'); heading.className = 'sdk-more-heading';
+      const title = document.createElement('strong'); title.textContent = '对话选项'; heading.appendChild(title);
+      const close = document.createElement('button'); close.type = 'button'; close.className = 'sdk-task-btn'; close.textContent = '关闭';
+      close.onclick = () => { more.open = false; trigger.focus(); }; heading.appendChild(close); body.appendChild(heading);
+      const help = document.createElement('p'); help.textContent = '直接发送即可聊天。运行中发送可补充要求；输入留空时，停止图标用于中断当前任务。'; body.appendChild(help);
+      const picker = document.createElement('label'); picker.className = 'sdk-task-picker'; picker.textContent = '选择任务记录';
+      const select = document.createElement('select'); select.setAttribute('aria-label','选择任务记录'); picker.appendChild(select); body.appendChild(picker);
+      const panels = document.createElement('div'); panels.className = 'sdk-more-task-panels'; body.appendChild(panels);
+      host._sdkTaskPicker = picker; host._sdkTaskSelect = select; host._sdkTaskPanels = panels;
+      host._sdkTaskSelectedByUser = false;
+      select.addEventListener('change',()=>{ host._sdkTaskSelectedByUser = true; this.syncOptionTask(host); });
+      const attachmentLabel = document.createElement('label'); attachmentLabel.className = 'sdk-attachment-option';
+      const nativeAttachments = document.createElement('input'); nativeAttachments.type = 'checkbox'; nativeAttachments.id = 'sdk-native-attachments';
+      attachmentLabel.appendChild(nativeAttachments); attachmentLabel.appendChild(document.createTextNode('附件也补充到当前任务'));
+      attachmentLabel.title = '仅支持新 SDK 任务；默认将附件作为下一轮任务发送。'; body.appendChild(attachmentLabel);
+      body.appendChild(this.optionsPanel(host,scope));
+      more.appendChild(body); host.appendChild(more); host._sdkMore = more;
+      host._sdkTaskIdentity = ''; host._sdkTaskListIdentity = '';
+      more.addEventListener('keydown',event=>{
+        if (event.key === 'Escape') { more.open = false; trigger.focus(); event.stopPropagation(); }
+      });
+      if (!this._dismissMoreInstalled) {
+        document.addEventListener('pointerdown',event=>{
+          if (this._openMenu && !this._openMenu.contains(event.target)) this._openMenu.open = false;
+        });
+        this._dismissMoreInstalled = true;
+      }
+      more.addEventListener('toggle',()=>{
+        if (more.open) {
+          if (this._openMenu && this._openMenu !== more) this._openMenu.open = false;
+          this._openMenu = more;
+        } else if (this._openMenu === more) this._openMenu = null;
+      });
+    }
+    const own = tasks.filter(task=>task.execution_backend === 'sdk').sort((a,b)=>b.id.localeCompare(a.id));
+    host._sdkOptionTasks = new Map(own.map(task=>[task.id,task]));
+    const identity = own.map(task=>`${task.id}:${task.status}`).join(',');
+    if (identity !== host._sdkTaskListIdentity) {
+      const previous = host._sdkTaskSelect.value;
+      host._sdkTaskSelect.replaceChildren();
+      for (const task of own) {
+        const option = document.createElement('option'); option.value = task.id;
+        const label = {running:'运行中',done:'已完成',failed:'失败',killed:'已中断',pending:'等待中'}[task.status] || task.status;
+        option.textContent = `${label} · ${task.id}`; host._sdkTaskSelect.appendChild(option);
+      }
+      if (!host._sdkOptionTasks.has(previous)) host._sdkTaskSelectedByUser = false;
+      host._sdkTaskSelect.value = host._sdkTaskSelectedByUser ? previous : (own.find(task=>task.status === 'running') || own[0])?.id || '';
+      host._sdkTaskListIdentity = identity;
+    }
+    host._sdkTaskPicker.hidden = own.length < 2;
+    this.syncOptionTask(host);
+  },
+  syncOptionTask(host) {
+    const task = host._sdkOptionTasks.get(host._sdkTaskSelect.value);
+    const active = this.canInteract(task);
+    const identity = task ? `${task.id}:${task.status}:${!!active}:${(task.sdk_capabilities || []).join(',')}` : '';
+    if (host._sdkTaskIdentity === identity) return;
+    host._sdkTaskIdentity = identity; host._sdkTaskPanels.replaceChildren();
+    if (!task) return;
+    const note = document.createElement('p');
+    note.textContent = task.status === 'running' ? '以下操作只影响所选任务；无需调整也可继续聊天。' : '查看所选任务的会话记录，或恢复已跟踪的文件。';
+    host._sdkTaskPanels.appendChild(note);
+    if (active && task.sdk_capabilities?.includes('control')) host._sdkTaskPanels.appendChild(this.runtimePanel(task));
+    host._sdkTaskPanels.appendChild(this.sessionPanel(task.id));
+  },
+  optionsPanel(host, scope) {
     const details = document.createElement('details'); details.className = 'sdk-runtime-panel';
-    const summary = document.createElement('summary'); summary.textContent = 'SDK 参数'; details.appendChild(summary);
+    const summary = document.createElement('summary'); summary.textContent = '下次任务的高级设置'; details.appendChild(summary);
     const body = document.createElement('div'); body.className = 'sdk-runtime-body'; details.appendChild(body);
-    const note = document.createElement('p'); note.textContent = '留空继承会话参数，{} 恢复默认；显式 permission_mode 优先于全自动选项。仅适用于 SDK 账号；Python 扩展在账号环境中执行。'; body.appendChild(note);
+    const note = document.createElement('p'); note.textContent = '通常无需填写。仅在新建 SDK 任务时生效，不修改当前运行。留空沿用会话设置，{} 恢复默认；permission_mode 优先于全自动选项。'; body.appendChild(note);
     const input = document.createElement('textarea'); input.rows = 7; input.setAttribute('aria-label','SDK 参数 JSON');
     try { input.value = localStorage.getItem('coderfleet-sdk-options:' + scope) || ''; } catch { input.value = ''; }
     input.addEventListener('input',()=>{ try { localStorage.setItem('coderfleet-sdk-options:' + scope,input.value); } catch {} });
     body.appendChild(input); host._sdkOptions = input;
-    const attachmentLabel=document.createElement('label');
-    const nativeAttachments=document.createElement('input'); nativeAttachments.type='checkbox'; nativeAttachments.id='sdk-native-attachments';
-    attachmentLabel.appendChild(nativeAttachments); attachmentLabel.appendChild(document.createTextNode('附件随当前任务插话（不勾选时排队发送）')); body.appendChild(attachmentLabel);
     const help = document.createElement('pre'); help.className = 'sdk-runtime-output'; body.appendChild(help);
     details.addEventListener('toggle',async()=>{
       if (!details.open || help.textContent) return;
@@ -226,7 +295,7 @@ const SDKTaskControls = {
           '\n示例：' + JSON.stringify({max_turns:12,max_budget_usd:2,thinking:{type:'adaptive'},effort:'high'},null,2);
       } catch (error) { help.textContent = error.message; }
     });
-    host.appendChild(details);
+    return details;
   },
   readOptions() {
     const input = document.getElementById('sdk-options')?._sdkOptions;
@@ -239,7 +308,7 @@ const SDKTaskControls = {
   runtimePanel(task) {
     const details = document.createElement('details');
     details.className = 'sdk-runtime-panel';
-    const summary = document.createElement('summary'); summary.textContent = '运行设置'; details.appendChild(summary);
+    const summary = document.createElement('summary'); summary.textContent = '调整当前运行'; details.appendChild(summary);
     const body = document.createElement('div'); body.className = 'sdk-runtime-body'; details.appendChild(body);
     let loaded = false;
     details.addEventListener('toggle',async()=>{
@@ -300,10 +369,10 @@ const SDKTaskControls = {
     const identity = `${task.id}:${!!active}:${(task.sdk_capabilities || []).join(',')}`;
     if (host.dataset.taskId === identity) {
       host._sdkReceipt.hidden = !this.hasPending(task.id);
-      host.hidden = !host._sdkStatus.textContent && host._sdkReceipt.hidden && !host._sdkRuntime;
+      host.hidden = !host._sdkStatus.textContent && host._sdkReceipt.hidden;
       return;
     }
-    host.replaceChildren(); host.dataset.taskId = identity; host._sdkRuntime = null;
+    host.replaceChildren(); host.dataset.taskId = identity;
     const status = document.createElement('span');
     status.className = 'sdk-task-status';
     status.setAttribute('role', 'status');
@@ -312,7 +381,7 @@ const SDKTaskControls = {
     let receiptButton;
     const syncReceipt = () => {
       if (receiptButton) receiptButton.hidden = !this.hasPending(task.id);
-      host.hidden = !status.textContent && receiptButton.hidden && !host._sdkRuntime;
+      host.hidden = !status.textContent && receiptButton.hidden;
     };
     const action = (kind, label, title, icon, handler) => {
       const button = document.createElement('button');
@@ -340,10 +409,6 @@ const SDKTaskControls = {
     host._sdkStatus = status;
     host._sdkReceipt = receiptButton;
     host.appendChild(status);
-    if (active && task.sdk_capabilities?.includes('control')) {
-      host._sdkRuntime = this.runtimePanel(task);
-      host.appendChild(host._sdkRuntime);
-    }
     syncReceipt();
   },
 };

@@ -145,7 +145,13 @@ SDK 的 result 表示一次 turn 结束；后台 agent 的后续 turn 结束前�
 
 ## SDK 参数与扩展
 
-桌面和移动输入框中的“SDK 参数”提供 JSON 编辑器；CLI 使用 `coderfleet task run '要求' --project <项目> --model sonnet --sdk-options /absolute/options.json`。留空继承会话参数，显式 `{}` 恢复默认。参数保存在 Task 快照中，重试保留原快照；运行中的切换模型/权限不修改账号默认值。
+桌面和移动端把高级能力统一放在输入框工具栏的“更多”中，默认收起。日常聊天直接发送，无需设置。
+
+- “调整当前运行”即时修改所选运行中任务的模型、权限等，不新建任务。
+- “会话记录与文件恢复”查看当前或历史 Task 的会话与检查点；有多条记录时先选择任务。
+- “下次任务的高级设置”提供可选 JSON 编辑器，仅作用于新建 Task，不改变当前运行。附件插话在“更多”中单独勾选。
+
+CLI 使用 `coderfleet task run '要求' --project <项目> --model sonnet --sdk-options /absolute/options.json`。留空继承会话参数，显式 `{}` 恢复默认。参数保存在 Task 快照中，重试保留原快照；运行中的切换模型/权限不修改账号默认值。
 
 ```json
 {
@@ -182,7 +188,7 @@ coderfleet task send <task-id> '查看图片' --image /workspace/.coderfleet-upl
 
 ## 原生记录与文件检查点
 
-日志执行过程中的“原生会话与文件恢复”面板和 CLI `task session` 提供当前项目已绑定会话的 info/list/messages/subagents/subagent_messages/rename/tag/fork/delete/import_store。查询固定账号/cwd，不接受浏览器覆盖认证根目录。元数据 helper 不启动模型；使用外部存储时需要对应账号的网络链路。原生分叉会创建可续聊的 Conversation，并保留存储配置；与现有受管分叉一样限定普通项目工作区，临时工作区不会被静默替换。普通 local 项目不因此改成临时项目。
+“更多”中的“会话记录与文件恢复”面板和 CLI `task session` 提供当前项目已绑定会话的 info/list/messages/subagents/subagent_messages/rename/tag/fork/delete/import_store。查询固定账号/cwd，不接受浏览器覆盖认证根目录。元数据 helper 不启动模型；使用外部存储时需要对应账号的网络链路。原生分叉会创建可续聊的 Conversation，并保留存储配置；与现有受管分叉一样限定普通项目工作区，临时工作区不会被静默替换。普通 local 项目不因此改成临时项目。
 
 ```bash
 coderfleet task session <task-id> messages --json '{"limit":50,"offset":0}'

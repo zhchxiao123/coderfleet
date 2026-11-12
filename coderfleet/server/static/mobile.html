@@ -17,7 +17,7 @@
   <link rel="manifest" href="/static/manifest.json">
   <link rel="stylesheet" href="/static/css/renderer.css">
   <link rel="stylesheet" href="/static/css/turn-actions.css?v=__BUILD__">
-  <link rel="stylesheet" href="/static/css/sdk-task-controls.css?v=__BUILD__-5">
+  <link rel="stylesheet" href="/static/css/sdk-task-controls.css?v=__BUILD__-6">
   <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -818,7 +818,6 @@
       </button>
     </div>
     <div id="sdk-task-controls" class="sdk-task-controls"></div>
-    <div id="sdk-options"></div>
     <div class="compose-options">
       <label class="compose-option">
         <input type="checkbox" id="auto-mode" checked>
@@ -833,6 +832,7 @@
         <span>定时</span>
       </label>
       <input class="compose-time" id="schedule-time" type="datetime-local" style="display:none">
+      <div id="sdk-options"></div>
     </div>
     <div class="upload-status" id="upload-status"></div>
   </div>
@@ -914,8 +914,8 @@
 <script src="/static/js/shared/image-upload.js?v=20260528-imagefix"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
-<script src="/static/js/renderer.js?v=__BUILD__-5"></script>
-<script src="/static/js/sdk-task-controls.js?v=__BUILD__-5"></script>
+<script src="/static/js/renderer.js?v=__BUILD__-6"></script>
+<script src="/static/js/sdk-task-controls.js?v=__BUILD__-6"></script>
 
 <script>
 // ── State ────────────────────────────────────────────────
@@ -1913,10 +1913,14 @@ function updateUploadState() {
   updateSendState();
 }
 
-function _mobileComposerTask() {
-  if (!activeConv) return undefined;
-  const own = tasks.filter(t => activeConv?.isOneOff ? `task-${t.id}` === activeConv.id :
+function _mobileComposerTasks() {
+  if (!activeConv) return [];
+  return tasks.filter(t => activeConv?.isOneOff ? `task-${t.id}` === activeConv.id :
     t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id));
+}
+
+function _mobileComposerTask() {
+  const own = _mobileComposerTasks();
   return own.find(t => SDKTaskControls.hasPendingDelivery(t.id)) || own.find(t => t.status === 'running') || own.find(t => SDKTaskControls.hasPending(t.id));
 }
 
@@ -1945,7 +1949,7 @@ function updateSendState() {
   const ta = document.getElementById('ta');
   const btn = document.getElementById('btn-send');
   if (!btn || !ta) return;
-  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConv?.id || pendingProj?.name || 'new');
+  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConv?.id || pendingProj?.name || 'new', _mobileComposerTasks());
   const task = _mobileComposerTask();
   SDKTaskControls.mount(document.getElementById('sdk-task-controls'), task, _mobileSDKEditor());
   const queue = document.getElementById('mobile-queue-wrap');

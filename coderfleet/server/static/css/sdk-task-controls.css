@@ -85,3 +85,42 @@
 @media(max-width:768px){.sdk-permission-card .askq-submit-btn{min-height:44px}.sdk-permission-card [role=status]{flex-basis:100%}}
 
 .sdk-runtime-panel{width:fit-content;max-width:100%}
+
+/* Advanced controls occupy one toolbar entry, outside the message timeline. */
+#sdk-options { flex:none; margin:0; }
+.input-bar { position:relative; }
+.sdk-more-trigger {
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  min-height:32px; padding:0 8px; border-radius:8px;
+  color:var(--text-2); font:500 12px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; cursor:pointer; list-style:none;
+}
+.sdk-more-trigger::-webkit-details-marker { display:none; }
+.sdk-more-trigger::after { content:'⌄'; font-size:14px; }
+.sdk-more[open] > .sdk-more-trigger,.sdk-more-trigger:hover { background:var(--surface-2); color:var(--text); }
+.sdk-more-trigger:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.sdk-more-body {
+  position:absolute; bottom:calc(100% + 8px); right:0; z-index:30;
+  box-sizing:border-box; display:grid; gap:14px; width:min(520px,100%);
+  max-height:min(65dvh,600px); overflow:auto; overscroll-behavior:contain;
+  padding:16px; border:1px solid var(--border); border-radius:14px;
+  background:var(--surface); color:var(--text-2); font-size:13px;
+  box-shadow:0 8px 32px rgba(15,23,42,.14); text-align:left;
+}
+.sdk-more:not([open]) > .sdk-more-body { display:none; }
+.sdk-more-body p { margin:0; line-height:1.6; }
+.sdk-more-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--text); }
+.sdk-more-task-panels { display:grid; gap:10px; }
+.sdk-more-body .sdk-runtime-panel { width:100%; }
+.sdk-more-body .sdk-runtime-panel > summary { padding:10px 12px; }
+.sdk-more-body .sdk-runtime-body { width:100%; margin-top:6px; }
+.sdk-task-picker { display:grid; gap:6px; }
+.sdk-task-picker[hidden] { display:none; }
+.sdk-task-picker select { width:100%; min-width:0; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--surface-2); color:var(--text); }
+.sdk-attachment-option { display:flex; gap:8px; align-items:center; line-height:1.5; cursor:pointer; }
+.sdk-attachment-option input { accent-color:var(--accent); }
+.compose-options #sdk-options { margin-left:auto; }
+@media (max-width:768px),(pointer:coarse) {
+  .sdk-more-trigger { min-height:44px; min-width:44px; font-size:13px; }
+  .sdk-more-body { left:8px; right:8px; width:auto; padding:14px; }
+  .sdk-more-body summary,.sdk-attachment-option { min-height:44px; }
+}

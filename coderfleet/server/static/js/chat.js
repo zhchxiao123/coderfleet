@@ -2240,9 +2240,13 @@ function _resetChatQueueMode() {
   if (checkbox) checkbox.checked = false;
 }
 
+function _chatComposerTasks() {
+  if (!activeConversationId) return [];
+  return (tasksCache || []).filter(t => activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId);
+}
+
 function _chatComposerTask(runningTaskId = currentChatTaskId) {
-  if (!activeConversationId) return undefined;
-  const own = (tasksCache || []).filter(t => activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId);
+  const own = _chatComposerTasks();
   return own.find(t => SDKTaskControls.hasPendingDelivery(t.id)) || own.find(t => t.id === runningTaskId) || own.find(t => SDKTaskControls.hasPending(t.id));
 }
 
@@ -2278,7 +2282,7 @@ async function _performChatSDKAction(task, action) {
 function _syncChatSendButton(runningTaskId, isQueueFull) {
   const btn = document.getElementById('chat-send-btn');
   if (!btn) return;
-  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConversationId || chatNewSessionProject || 'new');
+  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConversationId || chatNewSessionProject || 'new', _chatComposerTasks());
   const sdkHost = document.getElementById('sdk-task-controls');
   const sdkTask = _chatComposerTask(runningTaskId);
   if (sdkHost) SDKTaskControls.mount(sdkHost, sdkTask, _chatSDKEditor());
@@ -2526,7 +2530,6 @@ function buildChatInputHTML(placeholder, hint) {
     <textarea class="chat-input-textarea" id="chat-input" placeholder="${placeholder}" rows="1"></textarea>
     <div id="chat-upload-status" class="chat-upload-status" style="display:none;"></div>
     <div id="sdk-task-controls" class="sdk-task-controls"></div>
-    <div id="sdk-options"></div>
     <div class="chat-input-actions">
       <div class="chat-input-options">
         <input type="file" id="chat-file-input" multiple style="display:none" onchange="handleFileSelect(this)">
@@ -2546,6 +2549,7 @@ function buildChatInputHTML(placeholder, hint) {
         <span id="chat-status-text" class="chat-status-text">就绪</span>
       </div>
       <div class="chat-input-side">
+        <div id="sdk-options"></div>
         <div class="chat-input-hint">${hint}</div>
         <button class="btn primary chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()">发送</button>
       </div>

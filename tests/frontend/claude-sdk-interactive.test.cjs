@@ -4,19 +4,63 @@ const vm = require('node:vm');
 const test = require('node:test');
 
 class Element {
-  constructor() { this.dataset = {}; this.children = []; this.hidden = false; }
-  setAttribute() {}
+  constructor(tagName = '') { this.tagName = tagName; this.dataset = {}; this.children = []; this.hidden = false; this.value = ''; this.listeners = {}; }
+  setAttribute(name,value) { this[name] = value; }
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren() { this.children = []; }
+  addEventListener(name,listener) { this.listeners[name] = listener; }
+  focus() { this.focused = true; }
+  contains(node) { return this === node || this.children.some(child=>child.contains(node)); }
 }
 
 function controls(fetch) {
   const storage = new Map();
-  const context = vm.createContext({fetch, crypto:require('node:crypto'), document:{createElement:()=>new Element()},
+  const context = vm.createContext({fetch, crypto:require('node:crypto'), document:{createElement:tag=>new Element(tag),createTextNode:text=>Object.assign(new Element(),{textContent:text}),addEventListener(){}},
+    localStorage:{getItem:()=>null,setItem(){}},
     sessionStorage:{get length(){return storage.size;},key:index=>[...storage.keys()][index],getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)}});
   vm.runInContext(fs.readFileSync('coderfleet/server/static/js/sdk-task-controls.js','utf8'), context);
   return vm.runInContext('SDKTaskControls', context);
 }
+
+test('advanced options have one closed entry and keep current versus next-task settings separate',()=>{
+  const ui=controls(async()=>{throw new Error('A closed menu must not fetch capabilities');});
+  const host=new Element();
+  const tasks=[{id:'task-one',status:'running',execution_backend:'sdk',sdk_control_ready:true,sdk_capabilities:['control']},
+    {id:'older-task',status:'done',execution_backend:'sdk'}];
+  ui.mountOptions(host,'conversation',tasks);
+  assert.equal(host.children.length,1);
+  const menu=host.children[0];
+  assert.equal(menu.open || false,false);
+  assert.equal(menu.children[0].textContent,'更多');
+  assert.equal(host._sdkTaskPanels.children.filter(node=>node.tagName==='details').length,2);
+  assert.equal(host._sdkTaskSelect.value,'task-one');
+  host._sdkOptions.value='{"max_turns":5}';
+  menu.open=true;
+  ui.mountOptions(host,'conversation',tasks);
+  assert.equal(host.children[0],menu,'Heartbeats must preserve the open menu and edits');
+  assert.equal(host._sdkOptions.value,'{"max_turns":5}');
+  const next={...tasks[0],id:'next-task'};
+  tasks[0].status='done';tasks.push(next);
+  ui.mountOptions(host,'conversation',tasks);
+  assert.equal(host._sdkTaskSelect.value,'next-task','The default context follows the new running Task');
+  host._sdkTaskSelect.value='older-task';host._sdkTaskSelect.listeners.change();
+  assert.equal(host._sdkTaskPanels.children.filter(node=>node.tagName==='details').length,1,'Finished tasks expose records, not live controls');
+  ui.mountOptions(host,'conversation',tasks);
+  assert.equal(host._sdkTaskSelect.value,'older-task','An explicit history selection survives heartbeats');
+  menu.listeners.keydown({key:'Escape',stopPropagation(){}});
+  assert.equal(menu.open,false);
+  assert.equal(menu.children[0].focused,true);
+  ui.mountOptions(host,'another-conversation',[]);
+  assert.notEqual(host.children[0],menu);
+  assert.equal(host._sdkTaskPanels.children.length,0,'Navigation revokes the old Task panels');
+});
+
+test('a ready SDK task does not add advanced buttons above the composer',()=>{
+  const ui=controls(async()=>{}),host=new Element();
+  ui.mount(host,{id:'task-one',status:'running',execution_backend:'sdk',sdk_control_ready:true,sdk_capabilities:['control']},{clear(){}});
+  assert.equal(host.hidden,true,'Only delivery feedback should occupy the inline control area');
+  assert.equal(host.children.some(node=>node.tagName==='details'),false);
+});
 
 test('unknown delivery retains the original request ID across retries', async () => {
   const sent = [];
