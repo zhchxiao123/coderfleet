@@ -91,7 +91,9 @@ const PlatformAgent = (() => {
     const user=document.createElement('div'),question=document.createElement('p');user.className='platform-user';question.textContent=record.question||'生成 '+record.date+' 的工作日报';user.append(question);
     const assistant=document.createElement('div'),avatar=document.createElement('div'),answer=document.createElement('div');assistant.className='platform-assistant';avatar.className='platform-avatar';avatar.textContent='CF';avatar.setAttribute('aria-label','平台助手');answer.className='platform-answer';
     if(record.answer_markdown){const content=document.createElement('div');content.className='markdown-body';content.innerHTML=markdown(record.answer_markdown);answer.append(content);}
-    else {const status=document.createElement('p');status.className='platform-turn-status';status.setAttribute('role','status');if(active(record.status)){const dot=document.createElement('span');dot.className='platform-activity-dot';dot.setAttribute('aria-hidden','true');status.append(dot);}status.append(document.createTextNode(states[record.status]||record.status));answer.append(status);}
+    else {const status=document.createElement('p');status.className='platform-turn-status';status.setAttribute('role','status');if(active(record.status)){const dot=document.createElement('span');dot.className='platform-activity-dot';dot.setAttribute('aria-hidden','true');status.append(dot);}const progress=record.progress;
+      const label=active(record.status)&&Number.isInteger(progress?.read)&&Number.isInteger(progress?.total)?('已读取 '+progress.read+'/'+progress.total+' 条活动 · '+(progress.phase==='composing'?'正在整理回答…':'继续读取中…')):(states[record.status]||record.status);
+      status.append(document.createTextNode(label));answer.append(status);}
     if(record.error){const error=document.createElement('p');error.textContent=record.error;answer.append(error);}
     if(!active(record.status))answer.append(detailsFor(record));
     assistant.append(avatar,answer);article.append(user,assistant);return article;

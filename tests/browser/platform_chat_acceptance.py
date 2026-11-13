@@ -34,6 +34,8 @@ STATIC = Path.cwd() / "coderfleet/server/static"
 
 
 class Runtime(FakeRuntime):
+    fail_next = False
+
     async def exec(self, *a, **kw):
         return FakeProcess(stdout_chunks=[b'{"alive":false}'])
 
@@ -53,6 +55,48 @@ class Runtime(FakeRuntime):
             ).read_text()
         )
         ids = [row["id"] for row in snapshot["activities"]]
+        if self.fail_next:
+            self.fail_next = False
+            (
+                workspace
+                / ".coderfleet-tasks"
+                / (request["task_id"] + ".platform-progress.json")
+            ).write_text(
+                json.dumps(
+                    {
+                        "task_id": request["task_id"],
+                        "snapshot_fingerprint": snapshot["fingerprint"],
+                        "read": 1,
+                        "total": len(ids),
+                        "phase": "reading",
+                        "turns_used": 3,
+                        "max_turns": 24,
+                    }
+                )
+            )
+            await asyncio.sleep(3)
+            events = [
+                {
+                    "type": "result",
+                    "subtype": "error_max_turns",
+                    "terminal_reason": "max_turns",
+                    "is_error": True,
+                },
+                {
+                    "type": "system",
+                    "subtype": "coderfleet_platform_coverage",
+                    "task_id": request["task_id"],
+                    "snapshot_fingerprint": snapshot["fingerprint"],
+                    "source_ids": ids[:1],
+                    "total": len(ids),
+                },
+            ]
+            return FakeProcess(
+                returncode=1,
+                stdout_chunks=[
+                    ("\n".join(json.dumps(v) for v in events) + "\n").encode()
+                ],
+            )
         events = [
             {
                 "type": "system",
@@ -155,7 +199,7 @@ class CDP:
             await asyncio.sleep(0.1)
         print(
             await self.evaluate(
-                'document.querySelector("#platform-result").innerText+" MESSAGE "+document.querySelector("#platform-message").innerText'
+                'document.body.innerText.slice(0,5000)+" URL "+location.href'
             ),
             flush=True,
         )
@@ -410,6 +454,35 @@ async def main():
             assert await cdp.evaluate(
                 "document.querySelector('.platform-options').getBoundingClientRect().top>=0"
             )
+            # Active reads show real progress; limit failures terminate visibly without replay.
+            await cdp.call(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 1360,
+                    "height": 1050,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            )
+            scheduler.runtime.fail_next = True
+            await cdp.evaluate(
+                "document.querySelector('#platform-more').open=false;PlatformAgent.startNew();document.querySelector('#platform-date').value='2026-11-12';document.querySelector('#platform-question').value='今天做了哪些事情';document.querySelector('#platform-question').dispatchEvent(new Event('input'));document.querySelector('#platform-form').requestSubmit()"
+            )
+            await cdp.until(
+                "document.querySelector('#platform-result').textContent.includes('已读取 1/2 条活动')"
+            )
+            await cdp.until(
+                "document.querySelector('#platform-result')?.textContent.includes('24 轮')"
+            )
+            assert await cdp.evaluate(
+                "document.querySelector('#platform-result').textContent.includes('已读取 1/2 条活动') && document.querySelector('#platform-result').textContent.includes('不会自动重放')"
+            )
+            assert len(list((ROOT / "platform/runs").glob("*/run.json"))) == 7
+            await cdp.call("Page.reload")
+            await cdp.until(
+                "document.querySelector('#platform-result')?.textContent.includes('24 轮')"
+            )
+            assert len(list((ROOT / "platform/runs").glob("*/run.json"))) == 7
             failures = [
                 event
                 for event in cdp.events
@@ -420,6 +493,7 @@ async def main():
                 json.dumps(
                     {
                         "chat_layout": True,
+                        "live_progress_and_limit_error_no_replay": True,
                         "real_followup_context": True,
                         "sources": True,
                         "markdown_sanitized": True,

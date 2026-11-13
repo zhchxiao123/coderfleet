@@ -135,11 +135,14 @@ def configured(tmp_path, monkeypatch, runtime):
 
 
 class ResultRuntime(FakeRuntime):
-    def __init__(self, root, *, unread_citation=False, subset=False):
+    def __init__(
+        self, root, *, unread_citation=False, subset=False, read_limited=False
+    ):
         super().__init__()
         self.root = root
         self.unread_citation = unread_citation
         self.subset = subset
+        self.read_limited = read_limited
 
     async def exec(self, *args, **kwargs):
         return FakeProcess(stdout_chunks=[b'{"alive":false}'])
@@ -171,6 +174,7 @@ class ResultRuntime(FakeRuntime):
                 "snapshot_fingerprint": snapshot["fingerprint"],
                 "manifest_read": True,
                 "source_ids": read,
+                "read_limit_reached": self.read_limited,
             },
             {
                 "type": "result",
@@ -428,3 +432,93 @@ def test_get_follows_a_task_submitted_during_its_discovery_scan(tmp_path, monkey
 
     monkeypatch.setattr(Task, "load_all", discover)
     assert harness.get(identifier)["status"] == "running"
+
+
+def test_limit_failure_exposes_the_real_reason_and_read_coverage(tmp_path, monkeypatch):
+    from coderfleet.server.platform_agent import PlatformRequest
+
+    class LimitedRuntime(ResultRuntime):
+        async def run(self, spec):
+            await super().run(spec)
+            workspace = Path(
+                next(src for src, dst in spec.mounts if dst == "/workspace")
+            )
+            request = json.loads(
+                next((workspace / ".coderfleet-tasks").glob("*.sdk.json")).read_text()
+            )
+            snapshot = json.loads(
+                Path(
+                    next(
+                        src
+                        for src, dst in spec.mounts
+                        if dst == "/platform-data/snapshot.json:ro"
+                    )
+                ).read_text()
+            )
+            events = [
+                {
+                    "type": "result",
+                    "subtype": "error_max_turns",
+                    "is_error": True,
+                    "num_turns": 25,
+                    "terminal_reason": "max_turns",
+                },
+                {
+                    "type": "system",
+                    "subtype": "coderfleet_platform_coverage",
+                    "task_id": request["task_id"],
+                    "snapshot_fingerprint": snapshot["fingerprint"],
+                    "read": 1,
+                    "total": 2,
+                    "manifest_read": True,
+                    "source_ids": [snapshot["activities"][0]["id"]],
+                },
+            ]
+            return FakeProcess(
+                returncode=1,
+                stdout_chunks=[
+                    ("\n".join(json.dumps(row) for row in events) + "\n").encode()
+                ],
+            )
+
+    scheduler, harness = configured(tmp_path, monkeypatch, LimitedRuntime(tmp_path))
+
+    async def drive():
+        record = await harness.create(
+            PlatformRequest(request_id="limited", date="2026-11-12")
+        )
+        await asyncio.gather(*list(scheduler._running.values()))
+        result = harness.get(record["id"])
+        assert result["status"] == "error" and result["failure_reason"] == "max_turns"
+        assert (
+            result["coverage"]["read"] == 1
+            and "24" in result["error"]
+            and "1/2" in result["error"]
+        )
+
+    asyncio.run(drive())
+
+
+def test_query_that_stops_reading_for_budget_is_marked_partial(tmp_path, monkeypatch):
+    from coderfleet.server.platform_agent import PlatformRequest
+
+    scheduler, harness = configured(
+        tmp_path, monkeypatch, ResultRuntime(tmp_path, subset=True, read_limited=True)
+    )
+
+    async def drive():
+        record = await harness.create(
+            PlatformRequest(
+                request_id="partial",
+                kind="query",
+                question="今天做了哪些事情",
+                date="2026-11-12",
+            )
+        )
+        await asyncio.gather(*list(scheduler._running.values()))
+        result = harness.get(record["id"])
+        assert result["status"] == "partial" and result["answer_markdown"] == "Report"
+        assert result["coverage"]["read"] == 1 and not result["coverage"]["complete"]
+        assert any("轮次预算" in warning for warning in result["coverage"]["warnings"])
+
+    asyncio.run(drive())

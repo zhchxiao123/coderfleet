@@ -439,9 +439,18 @@ class PlatformHarness:
         response["sdk_version"] = task.sdk_version
         response["cli_version"] = task.cli_version
         if task.status != TaskStatus.done:
+            from coderfleet.server.platform_output import read_progress, failed_output
+
+            fingerprint = record.get("manifest", {}).get("fingerprint", "")
+            response["progress"] = read_progress(directory, task.id, fingerprint)
             if task.status == TaskStatus.failed:
-                response["error"] = (
-                    "平台任务执行失败，请查看任务日志；系统不会自动重放模型调用。"
+                response.update(
+                    failed_output(
+                        self.scheduler.get_log_path(task.id),
+                        task.id,
+                        record["settings"],
+                        fingerprint,
+                    )
                 )
             return response
         result: dict[str, Any] | None = None
@@ -498,10 +507,20 @@ class PlatformHarness:
             manifest_read = coverage.get("manifest_read") is True
             if not manifest_read:
                 warnings.append("未取得完整活动清单的读取回执")
+            read_limited = (
+                coverage.get("read_limit_reached") is True and covered < total
+            )
+            if read_limited:
+                warnings.append(
+                    "读取达到轮次预算边界，已预留轮次生成部分回答；仍有资料未覆盖"
+                )
             answer = {
                 "status": "partial"
-                if record["request"]["kind"] == "daily"
-                and (covered < total or warnings)
+                if read_limited
+                or (
+                    record["request"]["kind"] == "daily"
+                    and (covered < total or warnings)
+                )
                 else "ready",
                 "answer_markdown": result["answer_markdown"],
                 "sdk_version": task.sdk_version,

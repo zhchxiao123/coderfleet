@@ -34,6 +34,7 @@ def test_read_tools_page_the_whole_snapshot_and_only_count_returned_sources():
         "total": 25,
         "complete": True,
         "manifest_read": True,
+        "read_limit_reached": False,
     }
     with pytest.raises(PermissionError):
         reader.call("read_activities", {"project": "other"})
@@ -99,3 +100,72 @@ def test_manifest_is_a_bounded_summary_not_an_unbounded_task_inventory():
     assert manifest["resources"]["tokens_input"] == 5000
     assert len(json.dumps(manifest).encode()) < 16000
     assert reader.coverage()["manifest_read"] and reader.coverage()["complete"]
+
+
+def test_large_snapshot_has_a_parallel_read_plan_and_still_returns_every_text():
+    import math
+    from coderfleet.data.scripts.coderfleet_platform_tools import ActivityReader
+
+    activities = [
+        {
+            "id": f"source-{i}",
+            "text": "public conclusion " * 65,
+            "project_name": "project",
+            "kind": "reply",
+            "task_status": "done",
+            "source": {"private_host_metadata": "x" * 300},
+        }
+        for i in range(538)
+    ]
+    reader = ActivityReader(
+        {
+            "fingerprint": "large",
+            "activities": activities,
+            "tasks": [],
+            "projects": ["project"],
+            "coverage": {},
+        }
+    )
+    manifest = reader.call("manifest", {})
+    plan = manifest["reading_plan"]
+    assert len(plan["pages"]) > 20 and plan["parallel_pages"] == 4
+    assert math.ceil(len(plan["pages"]) / plan["parallel_pages"]) + 3 < 24
+    seen = []
+    for page in plan["pages"]:
+        result = reader.call("read_activities", page)
+        seen.extend(result["activities"])
+    assert {row["id"] for row in seen} == {row["id"] for row in activities}
+    assert all(
+        row["text"] == activities[int(row["id"].split("-")[1])]["text"] for row in seen
+    )
+    assert all("source" not in row for row in seen)
+
+
+def test_reader_reserves_answer_turns_and_reports_progress():
+    from coderfleet.data.scripts.coderfleet_platform_tools import ActivityReader
+
+    reader = ActivityReader(
+        {
+            "fingerprint": "bounded",
+            "activities": [{"id": "one", "text": "evidence", "project_name": "p"}],
+            "projects": ["p"],
+        },
+        max_turns=6,
+    )
+    progress = []
+    reader.on_progress = progress.append
+    reader.call("manifest", {})
+    for number in range(3):
+        reader.observe({"type": "assistant", "message": {"id": str(number)}})
+        reader.observe({"type": "assistant", "message": {"id": str(number)}})
+        reader.observe(
+            {
+                "type": "assistant",
+                "parent_tool_use_id": "child",
+                "message": {"id": "nested"},
+            }
+        )
+    stopped = reader.call("read_activities", {"limit": 100})
+    assert stopped["finish_now"] and reader.coverage()["read"] == 0
+    assert reader.coverage()["read_limit_reached"]
+    assert progress[-1]["phase"] == "composing" and progress[-1]["turns_used"] == 3

@@ -28,7 +28,7 @@ import secrets
 import signal
 import subprocess
 import sys
-from typing import Any, TextIO
+from typing import Any, TextIO, Callable
 
 SDK_VERSION = "0.2.180"
 CLI_VERSION = "2.1.321"
@@ -232,6 +232,7 @@ class CapturingTransport:
         self.failed = False
         self.cancelled = False
         self.errors = errors
+        self.on_event: Callable[[dict[str, Any]], None] | None = None
 
     def write_state(self, status: str) -> None:
         process = getattr(self.inner, "_process", None)
@@ -256,6 +257,7 @@ class CapturingTransport:
     async def read_messages(self) -> AsyncIterator[dict[str, Any]]:
         async for event in self.inner.read_messages():
             kind = event.get("type", "")
+            if self.on_event: self.on_event(event)
             if (self.spec.sdk_options.get("enable_file_checkpointing") and kind == "user"
                     and isinstance(event.get("uuid"),str) and not event.get("parent_tool_use_id")):
                 content = event.get("message",{}).get("content",[])
@@ -447,6 +449,20 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         """Nominal SDK interface; base wrapper remains importable without SDK."""
 
     transport = SDKTransportAdapter(SubprocessCLITransport(prompt=prompt, options=_configure_can_use_tool(options)), spec, errors)
+    if platform_reader is not None:
+        transport.on_event = platform_reader.observe
+        def platform_progress(value: dict[str, Any]) -> None:
+            event = {'type':'system','subtype':'coderfleet_platform_progress','task_id':spec.task_id,
+                     'updated_at':datetime.now(timezone.utc).isoformat(),**value}
+            if spec.state_path:
+                path=Path(spec.state_path).with_name(spec.task_id+'.platform-progress.json')
+                temporary=path.with_suffix('.tmp')
+                try:
+                    temporary.write_text(json.dumps(event),encoding='utf-8');temporary.replace(path)
+                except OSError:
+                    pass  # Progress persistence must not fail an otherwise valid read.
+            emit(event)
+        platform_reader.on_progress = platform_progress
     client = ClaudeSDKClient(options=options, transport=transport)
     mailbox: Any = None
     if spec.control_directory:
