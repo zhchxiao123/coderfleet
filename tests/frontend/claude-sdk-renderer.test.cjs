@@ -12,7 +12,10 @@ class Element {
     this.listeners = {};
     this.className = '';
     this._html = '';
-    this.classList = { add: (...names) => { this.className += ' ' + names.join(' '); } };
+    this.classList = {
+      add: (...names) => { this.className += ' ' + names.join(' '); },
+      remove: (...names) => { this.className = this.className.split(/\s+/).filter(name=>!names.includes(name)).join(' '); },
+    };
   }
   set innerHTML(value) { this._html = value; this.children = []; }
   get innerHTML() { return this._html + this.children.map(child => child.innerHTML).join(''); }
@@ -33,6 +36,8 @@ class Element {
 
 function renderer(fetch = async () => ({ status: 200 })) {
   const elements = new Map();
+  const frames = new Map();
+  let frameId = 0;
   const getElementById = id => {
     if (!elements.has(id)) elements.set(id, new Element());
     return elements.get(id);
@@ -45,9 +50,12 @@ function renderer(fetch = async () => ({ status: 200 })) {
           .sort((left, right) => left.id.localeCompare(right.id)) : [];
       } }, console,
     window: { fetch }, fetch, API:'', Headers, TextEncoder,
+    requestAnimationFrame:callback=>{frames.set(++frameId,callback);return frameId;},
+    cancelAnimationFrame:id=>frames.delete(id),
     localStorage: { getItem: () => '' },
   });
   const directory = path.resolve(__dirname, '../../coderfleet/server/static/js');
+  vm.runInContext(fs.readFileSync(path.join(directory,'../vendor/marked.min.js'),'utf8'),context);
   for (const name of ['utils.js', 'renderer.js']) {
     vm.runInContext(fs.readFileSync(path.join(directory, name), 'utf8'), context);
   }
@@ -55,7 +63,8 @@ function renderer(fetch = async () => ({ status: 200 })) {
   const container = new Element();
   const result = new Renderer(container, true, false, 'project', 'task-one');
   result.renderExecuting();
-  return { result, container, getElementById };
+  const flushFrames=()=>{const callbacks=[...frames.values()];frames.clear();for(const callback of callbacks)callback();};
+  return { result, container, getElementById, flushFrames, frames, context };
 }
 
 test('SDK turn results do not finish the Task before its durable footer', () => {
@@ -249,7 +258,7 @@ test('Task completion disables all unanswered native question inputs', () => {
 
 
 test('SDK partial text is visible before the final block and settles into one reply', () => {
-  const {result,container}=renderer();
+  const {result,container,flushFrames}=renderer();
   const push=event=>result.push(JSON.stringify(event));
   push({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'});
   push({type:'stream_event',event:{type:'message_start',message:{id:'message-one',model:'fixture'}}});
@@ -257,9 +266,11 @@ test('SDK partial text is visible before the final block and settles into one re
   push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'正在'}}});
   const reply=result.lastBubbleEl;
   assert.ok(reply,'A text delta must be visible before an AssistantMessage is complete');
-  assert.equal(reply.querySelector('.bubble-content').textContent,'正在');
+  flushFrames();
+  assert.match(reply.querySelector('.bubble-content').innerHTML,/正在/);
   push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'回答'}}});
-  assert.equal(reply.querySelector('.bubble-content').textContent,'正在回答');
+  flushFrames();
+  assert.match(reply.querySelector('.bubble-content').innerHTML,/正在回答/);
   push({type:'assistant',message:{id:'message-one',model:'fixture',content:[{type:'text',text:'正在回答'}]}});
   push({type:'result',subtype:'success',result:'正在回答',is_error:false});
   assert.equal(result.lastBubbleEl,reply);
@@ -325,4 +336,129 @@ test('routine hook events stay out of the timeline while hook failures remain vi
   result.push(JSON.stringify({type:'system',subtype:'hook_response',hook_name:'SessionStart:resume',outcome:'error',exit_code:1}));
   assert.equal(container.log.children.length,initial+1);
   assert.match(container.log.children.at(-1).innerHTML,/Hook 执行失败/);
+});
+
+test('background progress updates its owning card without appending timeline messages',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'});
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'agent-one',name:'Agent',input:{description:'Build validation',run_in_background:true}}]}});
+  const count=container.log.children.length;
+  push({type:'system',subtype:'task_started',task_id:'native-background',tool_use_id:'agent-one'});
+  for(let i=0;i<100;i++)push({type:'system',subtype:'task_progress',task_id:'native-background',description:'Working'});
+  assert.equal(container.log.children.length,count,'Heartbeat-like progress must not create new timeline entries');
+  assert.equal(result.toolMap['agent-one'].statusEl.textContent,'⏳');
+  push({type:'system',subtype:'task_notification',task_id:'native-background',status:'completed',summary:'Validated'});
+  assert.equal(result.toolMap['agent-one'].statusEl.textContent,'✓');
+});
+
+test('Markdown is rendered during text and thinking deltas, before an assistant result',()=>{
+  for(const type of ['text','thinking']){
+    const {result,container,flushFrames}=renderer();
+    const push=event=>result.push(JSON.stringify({type:'stream_event',event}));
+    push({type:'message_start',message:{id:'stream-md'}});
+    push({type:'content_block_start',index:0,content_block:{type,[type]:''}});
+    for(const chunk of ['# 标题\n\n**加','粗**\n\n- 第一项\n','- 第二项\n\n```js\nconst x = 1;']){
+      push({type:'content_block_delta',index:0,delta:{type:type+'_delta',[type]:chunk}});
+      flushFrames();
+    }
+    const node=type==='text'?result.lastBubbleEl:container.log.children.find(child=>child.className.includes('thought-reply'));
+    const content=node.querySelector(type==='text'?'.bubble-content':'.think-bubble');
+    assert.match(content.innerHTML,/<h1[^>]*>标题<\/h1>/);
+    assert.match(content.innerHTML,/<strong>加粗<\/strong>/);
+    assert.match(content.innerHTML,/<ul>[\s\S]*<li>第一项<\/li>/);
+    assert.match(content.innerHTML,/<pre><code[^>]*>const x = 1;/,'An unfinished fence remains a code block while streaming');
+    push({type:'content_block_delta',index:0,delta:{type:type+'_delta',[type]:'\n```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |'}});
+    flushFrames();
+    assert.match(content.innerHTML,/<table>/,'Completed table syntax renders before the final message');
+    assert.equal(node.dataset.streaming,'true');
+  }
+});
+
+test('stream rendering batches deltas per frame and a late frame cannot overwrite the final message',()=>{
+  const {result,container,context,flushFrames,frames}=renderer();
+  const markdown=context.renderMd;
+  let renders=0;
+  context.renderMd=text=>{renders++;return markdown(text);};
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'stream_event',event:{type:'message_start',message:{id:'batch-one'}}});
+  push({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
+  for(let i=0;i<1000;i++)push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'word '}}});
+  assert.equal(frames.size,1,'A burst schedules only one render frame');
+  const before=renders;
+  flushFrames();
+  assert.equal(renders-before,1,'Parse Markdown once per frame, not once per token');
+  push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'**provisional'}}});
+  push({type:'assistant',message:{id:'batch-one',content:[{type:'text',text:'**Final**'}]}});
+  flushFrames();
+  assert.match(result.lastBubbleEl.querySelector('.bubble-content').innerHTML,/<strong>Final<\/strong>/);
+  assert.equal(container.log.children.filter(child=>child.className.includes('ai-reply')).length,1);
+  assert.equal(result.lastBubbleEl.dataset.streaming,'false');
+});
+
+test('ending a stream flushes pending Markdown and cancels its scheduled frame',()=>{
+  const {result,frames,flushFrames}=renderer();
+  const push=event=>result.push(JSON.stringify({type:'stream_event',event}));
+  push({type:'message_start',message:{id:'interrupted-md'}});
+  push({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'**中断前内容**'}});
+  assert.equal(frames.size,1);
+  result.deactivatePendingInterventions();
+  assert.equal(frames.size,0);
+  assert.match(result.lastBubbleEl.querySelector('.bubble-content').innerHTML,/<strong>中断前内容<\/strong>/);
+  flushFrames();
+  assert.equal(result.lastBubbleEl.dataset.streaming,'false');
+});
+
+test('background failures stay visible and launcher tool results cannot reset lifecycle state',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'agent-two',name:'Agent',input:{run_in_background:true}}]}});
+  push({type:'system',subtype:'task_started',task_id:'native-two',tool_use_id:'agent-two'});
+  const entry=result.toolMap['agent-two'];
+  const response=()=>push({type:'user',message:{content:[{type:'tool_result',tool_use_id:'agent-two',content:'Agent launched in background.'}]}});
+  response();
+  assert.equal(entry.statusEl.textContent,'⏳','Launching the agent is not completion');
+  push({type:'system',subtype:'task_notification',task_id:'native-two',status:'failed',summary:'Build failed'});
+  response();
+  assert.equal(entry.statusEl.textContent,'✗');
+  assert.match(entry.exitEl.textContent,/Build failed/);
+  assert.equal(entry.wrap.dataset.backgroundTaskId,'native-two','Native IDs remain discoverable in the owning card');
+  push({type:'system',subtype:'task_started',task_id:'native-two',tool_use_id:'agent-two'});
+  assert.equal(entry.statusEl.textContent,'✗','A late start cannot reopen a finished task');
+  const count=container.log.children.length;
+  for(let i=0;i<3;i++)push({type:'system',subtype:'task_notification',task_id:'orphan',status:'failed',summary:'Detached task failed'});
+  assert.equal(container.log.children.length,count+1,'An unowned failure is surfaced once');
+  push({type:'system',subtype:'task_started',task_id:'native-three',tool_use_id:'agent-two'});
+  push({type:'system',subtype:'task_notification',task_id:'native-three',status:'stopped'});
+  assert.equal(entry.statusEl.textContent,'■');
+});
+
+test('full reload, pending startup, and log-header resets cancel paints and discard prior SDK state',()=>{
+  for(const reset of ['reload','pending','header']){
+    const {result,frames,flushFrames}=renderer();
+    result.push(JSON.stringify({type:'stream_event',event:{type:'message_start',message:{id:'old-message'}}}));
+    result.push(JSON.stringify({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'**old**'}}}));
+    result.push(JSON.stringify({type:'system',subtype:'task_started',task_id:'old-native',tool_use_id:'old-tool'}));
+    assert.equal(frames.size,1);
+    if(reset==='reload')result.render('');
+    if(reset==='pending'){result.renderExecuting();result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));}
+    if(reset==='header'){result.inner.querySelector=()=>null;result.push('=== CoderFleet Task Log ===');}
+    assert.equal(frames.size,0,reset);
+    assert.equal(result.streamBlocks.size,0,reset);
+    assert.equal(result.backgroundTasks.size,0,reset);
+    flushFrames();
+  }
+});
+
+test('native task_updated terminal patches finish the card without a notification',()=>{
+  for(const [status,icon] of [['completed','✓'],['failed','✗'],['killed','■']]){
+    const {result}=renderer();
+    const push=event=>result.push(JSON.stringify(event));
+    push({type:'assistant',message:{content:[{type:'tool_use',id:'updated-agent',name:'Agent',input:{run_in_background:true}}]}});
+    push({type:'system',subtype:'task_started',task_id:'updated-native',tool_use_id:'updated-agent'});
+    push({type:'system',subtype:'task_updated',task_id:'updated-native',patch:{status}});
+    assert.equal(result.toolMap['updated-agent'].statusEl.textContent,icon,status);
+    push({type:'system',subtype:'task_updated',task_id:'updated-native',patch:{status:'running'}});
+    assert.equal(result.toolMap['updated-agent'].statusEl.textContent,icon,'Late nonterminal updates do not reopen a finished task');
+  }
 });

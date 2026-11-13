@@ -15,7 +15,6 @@ class ChatLogRenderer {
     this.permissionMap = {};
     this.toolMap = {};          // tool_use_id → { headerEl, badgeEl, outputEl, exitEl, toolName, input, wrap }
     this.subagentRenderers = {}; // Task/Agent 工具的 tool_use_id → { renderer, toggleRowEl, revealed }
-    this.activeMonitorTasks = {}; // Monitor 工具的 task_id → tool_use_id（system task_started/task_notification 用）
     // TaskCreate/TaskUpdate/TaskList（agent 编排用的任务队列，跟上面注释里派生子agent
     // 的 Task/Agent 工具是两码事）的累加快照：CC 分配的数字 id(string) → {subject, status, activeForm}。
     // 单次 TaskCreate/TaskUpdate 调用只改动其中一条，但每次渲染都展示整份看板的当前状态。
@@ -25,7 +24,7 @@ class ChatLogRenderer {
     this._jsonLineBuffer = ''; // 跨行 JSON 事件缓冲
     this._footerRendered = false;
     this.executionBackend = 'cli'; this.interrupted = false;
-    this.streamMessageId = ''; this.streamBlocks = new Map(); this.lastSDKText = null; this.lastSDKMessageId = ''; this.lastSDKTextParts = [];
+    this._resetSDKRendering();
     this._isPending = false;   // renderPending() 后首次 push() 时清除占位 pill
     this.isRunning = isRunning;   // 是否正在运行
     this.foldProcess = foldProcess; // 是否折叠最新步骤
@@ -53,6 +52,14 @@ class ChatLogRenderer {
     this._grokCurrentTextRef = null;  // {value} 引用，供文本气泡的复制按钮闭包使用
     this._grokRafPending     = false; // requestAnimationFrame 节流标志
     this._grokSegCount       = 0;     // 段落序号，保证元素 ID 唯一
+  }
+
+  _resetSDKRendering() {
+    if (this.streamFrame != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.streamFrame);
+    for (const child of Object.values(this.subagentRenderers || {})) child.renderer._resetSDKRendering();
+    this.backgroundTasks = new Map();
+    this.streamMessageId = ''; this.streamBlocks = new Map(); this.streamDirty = new Set(); this.streamFrame = null;
+    this.lastSDKText = null; this.lastSDKMessageId = ''; this.lastSDKTextParts = [];
   }
 
   _ensureProcessWrapper() {
@@ -155,8 +162,8 @@ class ChatLogRenderer {
     this.container.innerHTML = '<div class="chat-log timeline"></div>';
     this.inner = this.container.querySelector('.chat-log');
     this.toolMap = {};
+    this._resetSDKRendering();
     this.subagentRenderers = {};
-    this.activeMonitorTasks = {};
     this.taskBoard = new Map();
     this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
     this._buf = '';
@@ -312,8 +319,8 @@ class ChatLogRenderer {
       this._isPending = false;
       if (this.inner) this.inner.innerHTML = '';
       this.toolMap = {};
+      this._resetSDKRendering();
       this.subagentRenderers = {};
-      this.activeMonitorTasks = {};
       this.taskBoard = new Map();
       this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
       this._jsonLineBuffer = '';
@@ -333,8 +340,8 @@ class ChatLogRenderer {
         this.inner.innerHTML = '';
       }
       this.toolMap = {};
+      this._resetSDKRendering();
       this.subagentRenderers = {};
-      this.activeMonitorTasks = {};
       this.taskBoard = new Map();
       this.taskBoardEl = null; this.taskBoardIconEl = null; this.taskBoardLabelEl = null; this.taskBoardCountEl = null; this.taskBoardListEl = null;
       this._jsonLineBuffer = '';
@@ -492,7 +499,7 @@ class ChatLogRenderer {
       if (d.outcome === 'error' || d.exit_code > 0) this._pill('Hook 执行失败',d.hook_name || '');
       return;
     }
-    if (d.subtype === 'task_progress') { this._pill('后台任务进度',d.task_id || ''); return; }
+    if (d.subtype === 'task_progress') return;
     if (d.subtype === 'coderfleet_permission_pending') return this._permissionPending(d);
     if (d.subtype === 'coderfleet_permission_closed') return this._closePermission(d.tool_call_id,d.status);
     if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || ''); return; }
@@ -515,31 +522,37 @@ class ChatLogRenderer {
       this._pill('Claude 就绪', model + (n ? ` · ${n} 工具` : ''));
       return;
     }
-    // Monitor 工具（CC 2.1+ 后台长驻命令）的生命周期用独立的 system 事件驱动，
-    // 不经过普通的 tool_result：task_started 登记 task_id→tool_use_id，
-    // task_notification 是任务结束的终态信号。这里只做"翻一下这张卡的状态灯"
-    // 这一件事——CC 真正的做法是把 task 存活期间被后台任务唤醒的后续轮次都
-    // 归并展示到同一个分组里（lobehub 的 activeTasks/pendingExternalSignal 状态机），
-    // 那需要一整套跨轮次归因的状态机，和这里"事件流直接转 DOM"的架构不是一个量级，
-    // 暂不实现；只做最诚实有用的子集：卡片状态灯准确反映"运行中/已结束"。
-    if (d.subtype === 'task_started' && d.task_id && d.tool_use_id) {
-      this._pill('后台任务已启动',d.task_id);
-      this.activeMonitorTasks[d.task_id] = d.tool_use_id;
-      const e = this.toolMap[d.tool_use_id];
-      if (e && e.statusEl) {
-        e.statusEl.textContent = '⏳';
-        e.badgeEl.className = 'tool-badge pending';
-      }
-      return;
+    if (['task_started','task_notification','task_updated'].includes(d.subtype) && d.task_id) this._backgroundTaskEvent(d);
+  }
+
+  _backgroundTaskEvent(event) {
+    const previous = this.backgroundTasks.get(event.task_id) || {};
+    const reported = event.subtype === 'task_updated' ? event.patch?.status || event.status : event.status;
+    const status = event.subtype === 'task_started' ? previous.status || 'running' : reported === 'killed' ? 'stopped' : reported;
+    if (!['running','completed','failed','stopped'].includes(status)) return;
+    if (event.subtype !== 'task_started' && status === 'running') return;
+    const task = {toolUseId:event.tool_use_id || previous.toolUseId,status,summary:event.summary || previous.summary || ''};
+    this.backgroundTasks.set(event.task_id,task);
+    const entry = task.toolUseId && this.toolMap[task.toolUseId];
+    if (entry) this._renderBackgroundTask(entry,event.task_id,task);
+    else if (status === 'failed' && previous.status !== 'failed') this._pill('后台任务失败',String(task.summary || event.task_id).slice(0,500));
+  }
+
+  _renderBackgroundTask(entry, taskId, task) {
+    entry.backgroundTask = {id:taskId,...task};
+    const label = {running:'后台运行中',completed:'后台任务已完成',failed:'后台任务失败',stopped:'后台任务已停止'}[task.status];
+    entry.statusEl.textContent = {running:'⏳',completed:'✓',failed:'✗',stopped:'■'}[task.status];
+    entry.statusEl.title = `${label} · ${taskId}`;
+    entry.badgeEl.className = `tool-badge ${task.status === 'running' ? 'pending' : task.status === 'failed' ? 'fail' : 'ok'}`;
+    entry.wrap.dataset.backgroundTaskId = taskId;
+    if (entry.exitEl) {
+      entry.exitEl.style.display = '';
+      entry.exitEl.className = `tool-exit ${task.status === 'failed' ? 'fail-exit' : 'ok-exit'}`;
+      entry.exitEl.textContent = `${label} · ${taskId}${task.summary ? '\n'+String(task.summary).slice(0,500) : ''}`;
     }
-    if (d.subtype === 'task_notification' && d.task_id) {
-      const toolUseId = this.activeMonitorTasks[d.task_id];
-      delete this.activeMonitorTasks[d.task_id];
-      const e = toolUseId && this.toolMap[toolUseId];
-      if (e && e.statusEl) {
-        e.statusEl.textContent = '✓';
-        e.badgeEl.className = 'tool-badge ok';
-      }
+    if (task.status === 'failed' && entry.bodyEl) {
+      entry.bodyEl.classList.remove('collapsed');
+      if (entry.btnEl) entry.btnEl.textContent = '收起';
     }
   }
 
@@ -555,6 +568,7 @@ class ChatLogRenderer {
 
   _claudeStream(event) {
     if (!event) return;
+    if (event.type === 'message_stop') { this._flushStreamMarkdown(); return; }
     if (event.type === 'message_start') {
       this.streamMessageId = event.message?.id || `stream-${this.streamBlocks.size}`;
       this.streamModel = event.message?.model;
@@ -583,7 +597,23 @@ class ChatLogRenderer {
     if (!block.node) return;
     block.node.dataset.streaming = 'true';
     if (block.type === 'text') block.node._bubbleText = block.text;
-    block.node.querySelector(block.type === 'text' ? '.bubble-content' : '.think-bubble').textContent = block.text;
+    this.streamDirty.add(block);
+    if (this.streamFrame !== null) return;
+    if (typeof requestAnimationFrame !== 'function') { this._flushStreamMarkdown(); return; }
+    this.streamFrame = requestAnimationFrame(()=>{
+      this.streamFrame = null;
+      this._flushStreamMarkdown();
+    });
+  }
+
+  _renderStreamMarkdown(block) {
+    block.node.querySelector(block.type === 'text' ? '.bubble-content' : '.think-bubble').innerHTML =
+      renderMd(block.type === 'text' ? this._injectDownloadCards(block.text) : block.text);
+  }
+
+  _flushStreamMarkdown() {
+    for (const block of this.streamDirty) if (block.node && !block.settled) this._renderStreamMarkdown(block);
+    this.streamDirty.clear();
   }
 
   _settleStream(message, block) {
@@ -596,8 +626,8 @@ class ChatLogRenderer {
     entry.text = block.text || block.thinking || '';
     entry.node.dataset.streaming = 'false';
     if (block.type === 'text') entry.node._bubbleText = entry.text;
-    entry.node.querySelector(block.type === 'text' ? '.bubble-content' : '.think-bubble').innerHTML =
-      renderMd(block.type === 'text' ? this._injectDownloadCards(entry.text) : entry.text);
+    this.streamDirty.delete(entry);
+    this._renderStreamMarkdown(entry);
     return true;
   }
 
@@ -1693,9 +1723,12 @@ class ChatLogRenderer {
   // 任务日志流结束（[DONE]）时调用：还留着未作答实时表单的卡片，禁用输入并提示任务已
   // 结束——不能让它们继续看着像"还能点"，其实这个任务已经没有 CLI 进程在等这个答案了。
   deactivatePendingInterventions() {
+    if (this.streamFrame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.streamFrame);
+    this.streamFrame = null;
     for (const entry of this.streamBlocks.values()) if (entry.node && !entry.settled) {
       this._settleStream({id:entry.messageId},{type:entry.type,text:entry.text,thinking:entry.text});
     }
+    this.streamDirty.clear();
     for (const [id,entry] of Object.entries(this.permissionMap)) if (entry.isLive) this._closePermission(id,'cancelled');
     for (const child of Object.values(this.subagentRenderers)) child.renderer.deactivatePendingInterventions();
     for (const [id, e] of Object.entries(this.toolMap)) {
@@ -2115,6 +2148,7 @@ class ChatLogRenderer {
         e.wrap.after(fc);
       }
     }
+    if (e.backgroundTask) this._renderBackgroundTask(e,e.backgroundTask.id,e.backgroundTask);
   }
 
   // ── Footer ────────────────────────────────────────────────
