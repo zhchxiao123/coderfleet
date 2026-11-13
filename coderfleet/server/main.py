@@ -287,6 +287,9 @@ app.add_middleware(
 _api_key = load_api_key(WORKSPACE_DIR)
 app.add_middleware(AuthMiddleware, api_key=_api_key)
 
+from coderfleet.server.platform_routes import build_platform_router
+app.include_router(build_platform_router(lambda: scheduler))
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # ── Intervention MCP bridge（issue #69 Slice 2）──────────────────────────────
@@ -2155,8 +2158,10 @@ async def list_tasks(
     # 同上：list_tasks() 会扫描 tasks/ 目录下的全部任务文件，丢进线程池执行。
     tasks = await run_in_threadpool(scheduler.list_tasks)
 
+    tasks = [t for t in tasks if not t.platform_run_id]
+
     if not include_archived:
-        tasks = [t for t in tasks if not getattr(t, "archived", False)]
+        tasks = [t for t in tasks if not t.platform_run_id and not getattr(t, "archived", False)]
 
     if status:
         try:
@@ -2178,7 +2183,7 @@ async def list_tasks(
 async def tasks_heartbeat():
     """给前端高频轮询用的瘦身端点：只探测状态变化，避免每 5 秒都拉全量任务详情。"""
     tasks = await run_in_threadpool(scheduler.list_tasks)
-    return [TaskHeartbeat.from_task(t) for t in tasks if not getattr(t, "archived", False)]
+    return [TaskHeartbeat.from_task(t) for t in tasks if not t.platform_run_id and not getattr(t, "archived", False)]
 
 
 # ── 任务详情 ──────────────────────────────────────────────
@@ -3124,38 +3129,15 @@ async def get_digest(date: str):
 
 @app.post("/api/digest/{date}/generate")
 async def trigger_digest_generation(date: str):
-    if not _DATE_RE.match(date):
-        raise HTTPException(status_code=400, detail="日期格式必须为 YYYY-MM-DD")
-
-    if not _truthy(_load_config(WORKSPACE_DIR).get("DIGEST_ENABLED", "off")):
-        raise HTTPException(
-            status_code=403,
-            detail="AI 日报摘要功能已关闭：生成会向某个活跃项目提交真实任务并可能改动其代码，"
-                   "请先在「设置 → 日报」中开启后再试",
-        )
-
-    stats = compute_daily_stats(date, scheduler.tasks_dir)
-    if stats.total_done + stats.total_failed + stats.total_killed == 0:
-        raise HTTPException(status_code=404, detail="该日期没有已完成的任务记录")
-
-    projects = [p for p in scheduler.list_projects() if p.active]
-    if not projects:
-        raise HTTPException(status_code=503, detail="没有活跃项目，无法提交摘要任务")
-
-    prompt = build_generate_prompt(stats)
-    task = await scheduler.submit(
-        prompt=prompt,
-        project_name=projects[0].name,
-        auto=True,
-    )
-
-    record = load_digest(date, DIGEST_DIR) or DailyDigest(date=date)
-    record.ai_task_id = task.id
-    record.status     = DigestStatus.generating
-    record.updated    = now_iso()
-    record.save(DIGEST_DIR)
-
-    return {"task_id": task.id, "status": "generating"}
+    """Compatibility entry: reports never execute against a business project."""
+    import uuid
+    from coderfleet.server.platform_agent import PlatformHarness, PlatformRequest
+    try:
+        run = await PlatformHarness(scheduler).create(PlatformRequest(request_id=str(uuid.uuid4()),date=date))
+    except ValueError as error:
+        raise HTTPException(status_code=422,detail=str(error)) from error
+    return {"task_id":run['task_id'],"run_id":run['id'],"status":run['status'],
+            "message":"请在平台助手或 coderfleet platform get 中查看报告"}
 
 
 # ── 启动入口 ──────────────────────────────────────────────

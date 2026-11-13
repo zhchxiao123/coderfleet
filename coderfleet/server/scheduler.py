@@ -160,6 +160,10 @@ class Scheduler:
 
     async def _notify(self, task: Task) -> None:
         """任务到达终态时向所有已注册渠道扇出；单渠道失败不影响其余渠道。"""
+        if task.platform_run_id:
+            from coderfleet.server.platform_agent import PlatformHarness
+            await asyncio.to_thread(PlatformHarness(self).get, task.platform_run_id)
+            return
         if task.status not in TASK_STATUS_LABELS:
             return
         if task.execution_backend == "sdk":
@@ -907,6 +911,8 @@ class Scheduler:
 
     async def clone_task_for_retry(self, original: Task, *, automatic: bool = False) -> Task:
         """Clone a terminal task through the normal submission path."""
+        if original.platform_run_id:
+            raise ValueError('请在平台助手中用新请求重试，平台任务不能作为普通项目任务重放')
         if original.sdk_action:
             raise ValueError('文件恢复操作不能自动重放，请检查结果后使用新的恢复请求')
         new_task = await self.submit(
@@ -1916,53 +1922,9 @@ class Scheduler:
             await asyncio.sleep(1.0)
 
     async def _check_auto_digest(self) -> None:
-        """Auto-generate the previous day's digest at 23:30 each night, gated by DIGEST_ENABLED."""
-        from coderfleet.config import load_config, truthy
-        if not truthy(load_config(self.workspace_dir).get("DIGEST_ENABLED", "off")):
-            return
-
-        now = datetime.now()
-        if now.hour != 23 or now.minute != 30:
-            return
-
-        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-        if self._last_auto_digest_date == yesterday:
-            return
-        self._last_auto_digest_date = yesterday
-
-        digest_path = self.digests_dir / f"{yesterday}.json"
-        if digest_path.exists():
-            try:
-                import json as _json
-                data = _json.loads(digest_path.read_text(encoding="utf-8"))
-                if data.get("ai_summary") or data.get("status") in ("generating", "ready"):
-                    return
-            except Exception:
-                pass
-
-        projects = [p for p in self.get_projects() if p.active]
-        if not projects:
-            return
-
-        try:
-            from coderfleet.server.digest import (
-                build_generate_prompt,
-                compute_daily_stats,
-            )
-            from coderfleet.server.models import DailyDigest, DigestStatus
-
-            stats = compute_daily_stats(yesterday, self.tasks_dir)
-            if stats.total_done + stats.total_failed + stats.total_killed == 0:
-                return
-            prompt = build_generate_prompt(stats)
-            task = await self.submit(prompt=prompt, project_name=projects[0].name, auto=True)
-            record = DailyDigest(date=yesterday, ai_task_id=task.id, status=DigestStatus.generating)
-            record.save(self.digests_dir)
-            print(f"[digest] Auto-generating digest for {yesterday} via task {task.id}")
-        except Exception as e:
-            import traceback
-            print(f"[digest] Auto-generation failed for {yesterday}: {e}")
-            traceback.print_exc()
+        """Optional timezone-aware reports use the same isolated platform harness."""
+        from coderfleet.server.platform_agent import PlatformHarness
+        await PlatformHarness(self).tick()
 
     async def schedule_next_tasks(self) -> None:
         now = datetime.now()
@@ -2162,6 +2124,7 @@ class Scheduler:
         continuation_id: str                  = "",
         sdk_options: Optional[dict]           = None,
         sdk_action: Optional[dict]            = None,
+        platform_run_id: str                 = "",
     ) -> Task:
         """
         提交任务，异步在后台执行，立即返回 Task 对象。
@@ -2169,6 +2132,10 @@ class Scheduler:
         """
         from coderfleet.data.scripts.coderfleet_sdk_features import validate_options
         options = validate_options(sdk_options or {})
+        if platform_run_id:
+            if not re.fullmatch(r'[a-f0-9]{32}',platform_run_id) or conversation_id or project_name or prefer_project:
+                raise ValueError('无效的平台执行请求')
+            ephemeral = True; execution_mode = 'ephemeral'; auto = False
         scheduled_execute_at = self._validate_future_execute_at(execute_at)
         selected_model = model.strip()
         is_pending = False
@@ -2254,6 +2221,8 @@ class Scheduler:
 
         if options and (acc.type.value != 'claude' or acc.claude_backend != 'sdk'):
             raise ValueError('sdk_options requires a Claude SDK account')
+        if platform_run_id and (acc.type != AccountType.claude or acc.claude_backend != 'sdk' or acc.runtime != AccountRuntime.container):
+            raise ValueError('平台助手需要容器模式的Claude SDK账号')
         if options.get('permission_mode') in {'auto','bypassPermissions'}:
             gate = self.check_local_sandbox_gate(acc, True) or self.check_local_root_gate(acc, True)
             if gate: raise ValueError(gate)
@@ -2369,6 +2338,9 @@ class Scheduler:
                 session_dir = self._sdk_control_directory(origin).parent.parent
                 if not session_dir.is_dir(): raise ValueError('来源工作区已释放，无法恢复文件')
 
+            if platform_run_id:
+                session_dir = self.workspace_dir / 'platform' / 'runs' / platform_run_id / 'workspace'
+                session_dir.mkdir(parents=True,exist_ok=True)
             task_project = str(session_dir) if session_dir else "ephemeral"
             proj_name    = (selected_project.name if selected_project else
                             (conversation.project_name if conversation else ""))
@@ -2392,6 +2364,7 @@ class Scheduler:
                 execution_backend = acc.claude_backend,
                 sdk_options = options,
                 sdk_action = dict(sdk_action or {}),
+                platform_run_id = platform_run_id,
                 execution_runtime = acc.runtime.value,
                 prompt       = prompt,
                 project      = task_project,
@@ -3272,7 +3245,7 @@ class Scheduler:
 
             # docker socket 转发是「容器里跑的任务想反过来操作宿主机 docker」的机制 ——
             # local 账号本来就直接跑在宿主机上，不存在这层间接，跳过整段。
-            if not is_local:
+            if not is_local and not task.platform_run_id:
                 project_socket_record = {}
                 if project and getattr(project, "docker_socket", ""):
                     project_socket_record["DOCKER_SOCKET"] = project.docker_socket
@@ -3289,6 +3262,12 @@ class Scheduler:
             # LocalRuntime 是死字段），不再兼职当"要不要设代理"的判断依据。
             network = None if is_local else self._get_ephemeral_network(acc)
             self._apply_runtime_proxy(acc,env,network)
+            if task.platform_run_id:
+                snapshot = self.workspace_dir / 'platform' / 'runs' / task.platform_run_id / 'snapshot.json'
+                if not snapshot.is_file(): raise ValueError('平台活动快照缺失')
+                mounts.append((str(snapshot),'/platform-data/snapshot.json:ro'))
+                from coderfleet.server.platform_agent import PlatformHarness
+                image = PlatformHarness(self).launch_config(task.platform_run_id)['image']
 
             # Standard env vars (matching compose.py baseline — always set for all types)
             if is_local:
@@ -3323,6 +3302,9 @@ class Scheduler:
 
             # Task-level secrets (highest priority, override everything)
             env.update(task_secrets or {})
+            if task.platform_run_id:
+                for key in ('DOCKER_HOST','CODERFLEET_DOCKER_SOCKET','CODERFLEET_HOST_WORKSPACE'):
+                    env.pop(key,None)
 
             if task.execution_backend == "sdk":
                 root = host_workspace if is_local else "/workspace"
@@ -3729,6 +3711,14 @@ class Scheduler:
             "sdk_action": task.sdk_action,
             "question_timeout_seconds": DEFAULT_INTERVENTION_TIMEOUT_SECONDS,
         }
+        if task.platform_run_id:
+            from importlib import resources
+            source = resources.files('coderfleet.data').joinpath('scripts/coderfleet_platform_tools.py').read_bytes()
+            name = 'platform-tools-' + hashlib.sha256(source).hexdigest()[:16] + '.py'
+            self._write_sdk_artifact(artifact_dir / name,source)
+            request.update(platform_snapshot='/platform-data/snapshot.json',platform_tools_module=str(runtime_dir / name),
+                           control_directory='',control_token='',session_id='',append_system_prompt='',
+                           mcp_options={'mcp_servers':{},'allowed_tools':[],'disallowed_tools':[]})
         self._write_sdk_artifact(
             artifact_dir / f"{task.id}.sdk.json",
             json.dumps(request, ensure_ascii=False).encode("utf-8"),

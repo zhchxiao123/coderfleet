@@ -25,6 +25,7 @@ def main(ctx: click.Context) -> None:
 from coderfleet.task_cmds import task_group
 from coderfleet.continuation_cmds import continuation_group
 from coderfleet.schedule_cmds import schedule_group, cmd_digest
+from coderfleet.platform_cmds import platform_group
 from coderfleet.board_cmds import board_group, card_group
 from coderfleet.workflow_cmds import workflow_group
 from coderfleet.config_cmds import account_group, config_group, project_group
@@ -39,6 +40,7 @@ main.add_command(task_group)
 main.add_command(continuation_group)
 main.add_command(schedule_group)
 main.add_command(cmd_digest)
+main.add_command(platform_group)
 main.add_command(board_group)
 main.add_command(card_group)
 main.add_command(workflow_group)

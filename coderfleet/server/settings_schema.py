@@ -97,13 +97,12 @@ SETTINGS_GROUPS: tuple[SettingGroup, ...] = (
         ),
     ),
     SettingGroup(
-        "digest", "日报",
-        help="AI 日报摘要通过向某个活跃项目提交一个真实任务来生成，"
-             "会在该项目的容器/工作目录中运行，可能产生文件改动。"
-             "默认关闭；开启后才会在设置页与「生成日报摘要」按钮响应生成请求，"
-             "以及每晚 23:30 自动生成前一天的日报。改动即时生效。",
+        "digest", "自动日报",
+        help="在平台助手设置的时区与时间，通过独立 SDK 容器只读分析平台记录。"
+             "默认关闭；此开关只控制自动执行，手动生成不受影响。"
+             "启用前请先在平台助手中选择账号、模型与费用上限。改动即时生效。",
         fields=(
-            SettingField("DIGEST_ENABLED", "AI 摘要生成", options=("off", "on")),
+            SettingField("DIGEST_ENABLED", "自动生成日报", options=("off", "on")),
         ),
     ),
     SettingGroup(

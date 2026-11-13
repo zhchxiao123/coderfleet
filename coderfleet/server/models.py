@@ -524,6 +524,7 @@ class Task(BaseModel):
     sdk_options: dict = Field(default_factory=dict)
     sdk_checkpoints: list[str] = Field(default_factory=list)
     sdk_action: dict = Field(default_factory=dict)
+    platform_run_id: str = ""
     interrupted: bool = False
     terminal_notified: bool = False
     # 容器内 container_workdir 在任务开始执行时的 git 快照，仅当该目录是 git 仓库时非空。

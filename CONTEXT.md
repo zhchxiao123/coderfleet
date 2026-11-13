@@ -22,7 +22,7 @@ Account ──┐
                                      自身不执行、不持有任务
         镜头：同一批 Task 的不同看法
         ├─ Tasks     原始列表 / 日志 / kill
-        ├─ Digest    按天汇总 + AI 摘要
+        ├─ Digest    按天汇总 + AI 摘要（平台助手：受限 SDK Task 派生报告）
         └─ Schedules 定时触发器（触发一个 Task 或一个 Workflow）
 ```
 
@@ -38,7 +38,7 @@ Account ──┐
 | **Board** | **纯覆盖层**：卡片指向一条 Conversation 或一个 Workflow 运行，用于人工进度跟踪 | 不执行、不直接持有 Task 列表 |
 | **Schedule** | 定时**触发器**，到点触发一个 Task 或一个 Workflow | 自身不执行，代理给 Task/Workflow |
 | **Continuation** | Conversation 的一次性后续触发记录；timer / webhook 中第一个信号追加一个 Task | 自身不执行，也不是长期重复计划 |
-| **Digest** | 按天对 Task 历史做统计 + AI 摘要 | 只读镜头，不参与执行 |
+| **Digest** | 按天对 Task 历史做统计 + AI 摘要；平台助手以受限 SDK Task 生成带来源报告 | 不是新的执行原子；只读活动范围与项目 Agent 隔离 |
 
 ## 「该用哪个」决策指引
 

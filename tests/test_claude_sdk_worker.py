@@ -303,3 +303,25 @@ def test_native_permission_fallback_denies_without_changing_preapproved_mcp_rule
     assert ("mcp__coderfleet__ask_user_question" in allowed) is not auto
     expected_mode = "bypassPermissions" if auto else "acceptEdits"
     assert capture["options"]["permission_mode"] == expected_mode
+
+
+def test_platform_profile_exposes_only_scoped_read_tools_and_disables_project_settings(tmp_path: Path, sdk_python: str, fake_cli: Path) -> None:
+    from coderfleet.server.platform_activity import build_snapshot
+    snapshot=tmp_path/'snapshot.json'
+    snapshot.write_text(json.dumps(build_snapshot(tmp_path,'2026-11-12','UTC')))
+    tools=WORKER.with_name('coderfleet_platform_tools.py')
+    probe=tmp_path/'decisions.json'
+    result, events, capture=run_sdk_task(tmp_path,sdk_python,fake_cli,spec_changes={
+        'platform_snapshot':str(snapshot),'platform_tools_module':str(tools),
+        'sdk_options':{'max_turns':8,'max_budget_usd':0.5}},FAKE_CLAUDE_PERMISSION_PROBE=probe)
+    assert result.returncode==0, result.stderr
+    assert capture['options']['setting_sources']==''
+    assert capture['options']['permission_mode']=='dontAsk'
+    assert capture['options']['allowedTools']=='mcp__platform__manifest,mcp__platform__read_activities,mcp__platform__get_activity'
+    argv=capture['argv']
+    assert argv[argv.index('--tools')+1]=='' and '--strict-mcp-config' in argv
+    assert 'coderfleet' not in json.loads(capture['options']['mcp_config'])['mcpServers']
+    assert json.loads(probe.read_text())['UnapprovedTool']['behavior']=='deny'
+    receipt=next(event for event in events if event.get('subtype')=='coderfleet_platform_coverage')
+    assert not receipt['complete'] and not receipt['manifest_read'] and receipt['source_ids']==[]
+    assert any(event.get('subtype')=='coderfleet_event_clock' for event in events)

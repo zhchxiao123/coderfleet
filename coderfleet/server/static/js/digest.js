@@ -293,20 +293,10 @@ function renderDigestBody(digest) {
 // ── 生成摘要 ──────────────────────────────────────────────
 
 async function submitDigestGenerate(date) {
-  const btn = document.getElementById('digest-gen-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
-  try {
-    const resp = await fetch(`${API}/api/digest/${date}/generate`, {
-      method: 'POST',
-    }).then(r => {
-      if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.statusText)));
-      return r.json();
-    });
-    if (resp.task_id) await loadDigestDetail(date);
-  } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = '生成日报摘要'; }
-    alert('提交失败：' + (e.message || '未知错误'));
-  }
+  document.getElementById('platform-date').value = date;
+  document.getElementById('platform-question').value = '';
+  document.getElementById('platform-agent').scrollIntoView({behavior:'smooth'});
+  document.getElementById('platform-message').textContent = '请在平台助手中预览范围，然后生成日报。';
 }
 
 // ── 自动刷新（等待生成完成） ──────────────────────────────

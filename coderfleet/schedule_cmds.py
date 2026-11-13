@@ -13,6 +13,7 @@ import click
 import httpx
 
 from coderfleet.task_cmds import _api_base, _require_server
+from coderfleet.api_client import api_headers
 
 
 # ── 展示辅助 ──────────────────────────────────────────────
@@ -119,19 +120,12 @@ def cmd_digest(date: str, generate: bool) -> None:
     api = _require_server()
 
     if generate:
-        try:
-            gr = httpx.post(f"{api}/api/digest/{date}/generate", timeout=15)
-        except httpx.RequestError as e:
-            raise click.ClickException(f"请求失败：{e}")
-        if gr.status_code == 400:
-            raise click.ClickException("日期格式必须为 YYYY-MM-DD")
-        if gr.status_code >= 400:
-            detail = gr.json().get("detail", gr.text) if gr.headers.get("content-type", "").startswith("application/json") else gr.text
-            raise click.ClickException(f"生成失败（HTTP {gr.status_code}）：{detail}")
-        click.secho("✓ 已提交 AI 摘要生成任务，稍后重新运行本命令查看结果。", fg="green")
+        from coderfleet.platform_cmds import run
+        click.get_current_context().invoke(run,date=date,timezone=None,projects=(),question='',request_id=None)
+        return
 
     try:
-        r = httpx.get(f"{api}/api/digest/{date}", timeout=10)
+        r = httpx.get(f"{api}/api/digest/{date}", timeout=10, headers=api_headers(api))
     except httpx.RequestError as e:
         raise click.ClickException(f"请求失败：{e}")
     if r.status_code == 400:

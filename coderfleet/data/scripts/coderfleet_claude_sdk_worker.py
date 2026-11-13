@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import importlib
 import importlib.metadata
+import hashlib
 import importlib.util
 import json
 import math
@@ -58,6 +59,8 @@ class TaskSpec:
     sdk_options: dict[str, Any] = field(default_factory=dict)
     sdk_action: dict[str, Any] = field(default_factory=dict)
     mcp_options: dict[str, Any] = field(default_factory=dict)
+    platform_snapshot: str = ""
+    platform_tools_module: str = ""
 
     @classmethod
     def read(cls, path: Path) -> TaskSpec:
@@ -143,7 +146,16 @@ async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str
 
 
 def emit(event: dict[str, Any]) -> None:
-    print(json.dumps(event, ensure_ascii=False), flush=True)
+    line = json.dumps(event, ensure_ascii=False)
+    print(line, flush=True)
+    if (not event.get('coderfleet_synthetic') and not event.get('parent_tool_use_id') and
+            (event.get('type') in {'assistant','user','result'} or event.get('subtype') in {
+                'coderfleet_message_accepted','coderfleet_question_pending','coderfleet_human_answer','coderfleet_human_decision'})):
+        # Keep the native event untouched; a separate clock lets historical
+        # activity retain its true day after a worker/server restart.
+        print(json.dumps({'type':'system','subtype':'coderfleet_event_clock',
+                          'event_hash':hashlib.sha256(line.encode()).hexdigest(),
+                          'at':datetime.now(timezone.utc).isoformat()}),flush=True)
 
 
 @dataclass
@@ -349,7 +361,12 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                 response = await asyncio.wait_for(future, timeout=spec.question_timeout_seconds)
                 if is_question:
                     status = 'answered'
+                    emit({'type':'system','subtype':'coderfleet_human_answer','task_id':spec.task_id,
+                          'tool_call_id':identifier,'answers':response})
                     return PermissionResultAllow(updated_input={**tool_input, 'answers':response})
+                emit({'type':'system','subtype':'coderfleet_human_decision','task_id':spec.task_id,
+                      'tool_call_id':identifier,'tool_name':tool,'decision':response['decision'],
+                      'message':response.get('message','')})
                 if response['decision'] == 'deny':
                     status = 'denied'
                     return PermissionResultDeny(message=response.get('message') or 'Operator denied this tool')
@@ -384,7 +401,20 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         max_buffer_size=16 * 1024 * 1024, include_partial_messages=True, stderr=stderr,
         can_use_tool=handle_tool_permission,
     )
-    if spec.sdk_options:
+    platform_reader: Any = None
+    if spec.platform_snapshot:
+        if spec.control_directory or spec.session_id or spec.sdk_action or spec.auto:
+            raise ValueError('Platform task requires a fresh read-only execution profile')
+        module_spec = importlib.util.spec_from_file_location('_coderfleet_platform_tools',spec.platform_tools_module)
+        if module_spec is None or module_spec.loader is None: raise ValueError('Platform tool module unavailable')
+        module = importlib.util.module_from_spec(module_spec); module_spec.loader.exec_module(module)
+        profile, platform_reader = module.options_for_snapshot(spec.platform_snapshot,spec.sdk_options)
+        option_values.update(profile)
+        async def platform_permission(tool: str, tool_input: dict[str,Any], context: Any) -> Any:
+            if tool in module.ALLOWED_TOOLS: return PermissionResultAllow(updated_input=tool_input)
+            return PermissionResultDeny(message='Tool is outside the platform read-only scope')
+        option_values['can_use_tool'] = platform_permission
+    elif spec.sdk_options:
         path = Path(spec.features_module) if spec.features_module else Path(__file__).with_name('coderfleet_sdk_features.py')
         feature_spec = importlib.util.spec_from_file_location('_coderfleet_sdk_features',path)
         if feature_spec is None or feature_spec.loader is None: raise ValueError('SDK feature module unavailable')
@@ -639,6 +669,9 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                     await consumer
             await asyncio.wait_for(transport.close(), timeout=25 if spec.sdk_action else 3)
         finally:
+            if platform_reader is not None:
+                emit({'type':'system','subtype':'coderfleet_platform_coverage','task_id':spec.task_id,
+                      **platform_reader.coverage(),'source_ids':sorted(platform_reader.read_ids)})
             if received_signal:
                 signal_processes(known_children | owned_processes(), signal.SIGKILL)
             else:

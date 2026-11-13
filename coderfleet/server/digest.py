@@ -59,7 +59,7 @@ def compute_daily_stats(date: str, tasks_dir: Path) -> DailyDigest:
     line so that build_generate_prompt() can produce a richer narrative without
     any interface changes.
     """
-    tasks = Task.load_all(tasks_dir)
+    tasks = [task for task in Task.load_all(tasks_dir) if not task.platform_run_id]
     terminal = {TaskStatus.done, TaskStatus.failed, TaskStatus.killed}
 
     day_tasks = [
@@ -117,6 +117,8 @@ def list_active_dates(tasks_dir: Path) -> list[str]:
     """Return dates (YYYY-MM-DD) that have any task activity, newest first."""
     dates: set[str] = set()
     for t in Task.load_all(tasks_dir):
+        if t.platform_run_id:
+            continue
         d = _date_of(t.finished or t.created)
         if d:
             dates.add(d)
