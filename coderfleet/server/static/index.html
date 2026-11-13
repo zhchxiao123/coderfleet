@@ -591,30 +591,28 @@
         <!-- 任务日报页 -->
         <div class="page" id="page-digest">
           <div id="platform-agent" class="platform-agent">
-            <header><h2>平台助手</h2><p>汇总各项目的问答与工作进展；在独立容器中只读分析平台记录。</p></header>
-            <form id="platform-form">
-              <div class="platform-fields">
-                <label>日期<input id="platform-date" type="date" required></label>
-                <label>时区<input id="platform-timezone" required placeholder="America/Los_Angeles"></label>
-                <label>项目范围<select id="platform-projects" multiple aria-describedby="platform-scope-help"></select></label>
-              </div>
-              <p id="platform-scope-help" class="platform-muted">不选择项目即包含所有项目；仅分析平台内记录，不包含未被平台记录的终端操作。</p>
-              <label>当天有什么需要了解的？<textarea id="platform-question" rows="2" maxlength="8000" placeholder="留空生成工作日报，或输入问题，例如：今天哪些项目还有未解决的问题？"></textarea></label>
-              <div class="platform-actions"><button class="btn" id="platform-preview" type="button">预览范围</button><button class="btn primary" id="platform-submit" type="submit">生成日报</button></div>
-            </form>
-            <p id="platform-message" role="status" aria-live="polite"></p>
-            <details class="platform-settings"><summary>助手设置</summary>
-              <form id="platform-settings-form"><div class="platform-fields">
-                <label>Claude SDK 账号<select id="platform-account" required></select></label>
-                <label>模型<input id="platform-model" required></label>
-                <label>容器镜像<input id="platform-image" placeholder="默认使用平台镜像"></label>
-                <label>最多轮数<input id="platform-turns" type="number" min="2" max="100" required></label>
-                <label>费用上限（美元）<input id="platform-budget" type="number" min="0.01" max="20" step="0.01" required></label>
-                <label>自动日报时间<input id="platform-auto-time" type="time" required></label>
-              </div><p id="platform-auto-state" class="platform-muted"></p><button class="btn" type="submit">保存设置</button></form>
-            </details>
-            <div class="platform-results"><aside><h3>历史报告与查询</h3><div id="platform-runs"></div></aside><section id="platform-result" aria-live="polite"><p class="platform-muted">选择历史报告，或生成所选日期的日报。</p></section></div>
-          </div>
+            <aside class="platform-history" id="platform-history-panel" aria-label="平台会话历史">
+              <div class="platform-history-heading"><span>平台会话</span><button class="platform-icon-btn" id="platform-new" type="button" title="新建对话" aria-label="新建对话">＋</button></div>
+              <nav id="platform-runs" aria-label="历史会话"></nav>
+              <p class="platform-history-note">问答与日报保存在这里</p>
+            </aside>
+            <section class="platform-chat">
+              <header class="platform-chat-header">
+                <div><h2>平台助手</h2><p>跨项目工作回顾与问答</p></div>
+                <div class="platform-header-actions"><button class="platform-icon-btn" id="platform-history-toggle" type="button" aria-controls="platform-history-panel" aria-expanded="false" aria-label="历史会话" title="历史会话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button><button class="platform-icon-btn platform-mobile-new" id="platform-new-mobile" type="button" aria-label="新建对话" title="新建对话">＋</button></div>
+              </header>
+              <div id="platform-scroll" class="platform-chat-scroll"><div id="platform-result" class="platform-messages" role="log" aria-label="平台助手对话"></div></div>
+              <div class="platform-compose-wrap">
+                <p id="platform-message" class="platform-feedback" role="status" aria-live="polite"></p>
+                <div class="platform-composer">
+                  <form id="platform-form"><label for="platform-question" class="platform-sr-only">发送消息给平台助手</label><textarea id="platform-question" rows="2" maxlength="8000" placeholder="问问各个项目的进展… Enter 发送，Shift+Enter 换行"></textarea>
+                    <div class="platform-composer-bar"><div class="platform-composer-actions"><button type="button" id="platform-daily" class="platform-text-btn" title="生成所选日期的工作日报">生成日报</button><span id="platform-scope-label" class="platform-scope-label"></span></div><button class="platform-send" id="platform-submit" type="submit" title="发送" aria-label="发送"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div>
+                  </form>
+                  <details id="platform-more" class="platform-more"><summary class="platform-icon-btn" aria-label="更多" title="更多设置"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></summary>
+                    <div class="platform-options"><h3>资料范围</h3><p class="platform-muted" id="platform-scope-help">新对话可调整日期和项目。追问沿用本对话的资料快照。</p>
+                      <div class="platform-fields"><label>日期<input id="platform-date" type="date" required></label><label>时区<input id="platform-timezone" required></label><label class="platform-project-field">项目<select id="platform-projects" multiple aria-describedby="platform-scope-help"></select><small>不选择即全部项目</small></label></div>
+                      <button class="btn" id="platform-preview" type="button">预览范围</button>
+                      <details class="platform-settings"><summary>助手设置</summary><form id="platform-settings-form"><div class="platform-fields"><label>执行账号<select id="platform-account" required></select></label><label>模型<input id="platform-model" required></label><label>最多轮数<input id="platform-turns" type="number" min="2" max="100" required></label><label>费用上限（美元）<input id="platform-budget" type="number" min="0.01" max="20" step="0.01" required></label><label>容器镜像<input id="platform-image" placeholder="使用平台默认镜像"></label><label>自动日报时间<input id="platform-auto-time" type="time" required></label></div><p id="platform-auto-state" class="platform-muted"></p><button class="btn" type="submit">保存设置</button></form></details>
           <details class="platform-legacy" ontoggle="if(this.open) initDigestPage()"><summary>旧版日报与任务统计</summary>
           <div class="digest-layout">
             <!-- 左侧：日历选择器 -->
@@ -642,6 +640,14 @@
             </div>
           </div>
           </details>
+
+                    </div>
+                  </details>
+                </div>
+                <p id="platform-context-note" class="platform-compose-note">只读分析平台记录，每条结论都可查看来源</p>
+              </div>
+            </section>
+          </div>
         </div>
 
         <!-- 定时计划页 -->

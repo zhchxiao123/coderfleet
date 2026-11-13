@@ -58,8 +58,8 @@ def build_platform_router(get_scheduler: Callable[[], Scheduler]) -> APIRouter:
             raise failure(error) from error
 
     @router.get("/runs")
-    async def runs(date: str = "") -> list[dict[str, Any]]:
-        return await run_in_threadpool(harness().list, date)
+    async def runs(date: str = "", summary: bool = False) -> list[dict[str, Any]]:
+        return await run_in_threadpool(harness().list, date, summary)
 
     @router.get("/requests")
     async def lookup(
@@ -78,6 +78,13 @@ def build_platform_router(get_scheduler: Callable[[], Scheduler]) -> APIRouter:
     async def get(identifier: str) -> dict[str, Any]:
         try:
             return await run_in_threadpool(harness().get, identifier)
+        except (ValueError, KeyError) as error:
+            raise failure(error) from error
+
+    @router.get("/runs/{identifier}/thread")
+    async def thread(identifier: str) -> list[dict[str, Any]]:
+        try:
+            return await run_in_threadpool(harness().thread, identifier)
         except (ValueError, KeyError) as error:
             raise failure(error) from error
 

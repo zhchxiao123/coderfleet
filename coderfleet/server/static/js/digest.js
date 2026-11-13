@@ -293,7 +293,8 @@ function renderDigestBody(digest) {
 // ── 生成摘要 ──────────────────────────────────────────────
 
 async function submitDigestGenerate(date) {
-  document.getElementById('platform-date').value = date;
+  if (!PlatformAgent.startNew(date)) return;
+  document.getElementById('platform-more').open = false;
   document.getElementById('platform-question').value = '';
   document.getElementById('platform-agent').scrollIntoView({behavior:'smooth'});
   document.getElementById('platform-message').textContent = '请在平台助手中预览范围，然后生成日报。';

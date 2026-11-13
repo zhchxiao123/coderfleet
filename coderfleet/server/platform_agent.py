@@ -55,6 +55,7 @@ class PlatformRequest(BaseModel):
     timezone: str | None = None
     projects: list[str] | None = Field(default=None, max_length=200)
     question: str = Field(default="", max_length=8000)
+    parent_run_id: str = Field(default="", pattern=r"^(?:[a-f0-9]{32})?$")
 
     @model_validator(mode="after")
     def query_has_question(self) -> PlatformRequest:
@@ -160,17 +161,101 @@ class PlatformHarness:
             json.loads((self._path(identifier) / "run.json").read_text())["settings"]
         )
 
+    def thread(self, identifier: str) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        while identifier:
+            if identifier in seen or len(messages) >= 32:
+                raise ValueError("对话上下文超过32轮或引用循环，请新建对话")
+            seen.add(identifier)
+            message = self.get(identifier)
+            messages.append(message)
+            identifier = message["parent_run_id"]
+        return list(reversed(messages))
+
+    def _followup(
+        self, request: PlatformRequest, settings: PlatformSettings
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        try:
+            messages = self.thread(request.parent_run_id)
+        except KeyError as error:
+            raise ValueError("上一条平台消息不存在，请新建对话") from error
+        if len(messages) >= 32:
+            raise ValueError("对话上下文已达32轮，请新建对话")
+        parent = messages[-1]
+        if parent["status"] not in {"ready", "partial", "error", "cancelled"}:
+            raise ValueError("请等待上一条消息结束后再追问")
+        if (
+            request.date != parent["date"]
+            or (request.timezone and request.timezone != parent["timezone"])
+            or (
+                request.projects is not None
+                and sorted(set(request.projects))
+                != sorted(set(parent["projects"] or []))
+            )
+        ):
+            raise ValueError("追问不能改变本对话的日期、时区或项目范围，请新建对话")
+        if settings.account != parent["account"]:
+            raise ValueError("执行账号已改变，请新建对话")
+        history = [
+            {
+                "user": message["question"] or "生成工作日报",
+                "assistant": message["answer_markdown"]
+                or "上一轮未完成，未产生有效结论",
+            }
+            for message in messages
+        ]
+        context = json.dumps(history, ensure_ascii=False)
+        if len(context.encode()) > 128 * 1024:
+            raise ValueError("对话上下文超过128KiB，请新建对话；历史内容没有被截断")
+        try:
+            snapshot = ActivityReader.from_file(
+                str(self._path(parent["id"]) / "snapshot.json")
+            ).snapshot
+        except OSError as error:
+            raise ValueError("该回复没有可续用的资料快照，请新建对话") from error
+        return parent, snapshot, context
+
     async def create(self, request: PlatformRequest) -> dict[str, Any]:
         identifier = hashlib.sha256(request.request_id.encode()).hexdigest()[:32]
         directory = self._path(identifier)
         path = directory / "run.json"
         body = request.model_dump(mode="json")
         if path.exists():
-            if json.loads(path.read_text())["request"] != body:
+            if (
+                PlatformRequest.model_validate(
+                    json.loads(path.read_text())["request"]
+                ).model_dump(mode="json")
+                != body
+            ):
                 raise PlatformConflict("相同请求ID不能用于不同的平台操作")
             return self.get(identifier)
         settings = self.settings()
         self._account(settings.account)
+        parent: dict[str, Any] | None = None
+        inherited_snapshot: dict[str, Any] | None = None
+        context = ""
+        if request.parent_run_id:
+            parent, inherited_snapshot, context = await asyncio.to_thread(
+                self._followup, request, settings
+            )
+            # Reserving a child is synchronous with its check: no await can let
+            # another API coroutine silently fork the same parent in between.
+            if path.exists():
+                if (
+                    PlatformRequest.model_validate(
+                        json.loads(path.read_text())["request"]
+                    ).model_dump(mode="json")
+                    != body
+                ):
+                    raise PlatformConflict("相同请求ID不能用于不同的平台操作")
+                return self.get(identifier)
+            for candidate in (self.root / "runs").glob("*/run.json"):
+                child = json.loads(candidate.read_text())
+                if child["request"].get("parent_run_id") == request.parent_run_id:
+                    raise PlatformConflict(
+                        "该消息已有后续回复，请打开最新消息继续或新建对话"
+                    )
         config = load_config(self.scheduler.workspace_dir)
         resolved = settings.model_dump()
         resolved["image"] = settings.image or config.get(
@@ -185,20 +270,38 @@ class PlatformHarness:
             "created": now_iso(),
             "owner_pid": os.getpid(),
             "error": "",
+            "root_run_id": parent["root_run_id"] if parent else identifier,
+            "scope": {
+                "date": request.date,
+                "timezone": parent["timezone"]
+                if parent
+                else request.timezone or settings.timezone,
+                "projects": parent["projects"] if parent else request.projects,
+            },
+            "conversation_context": context,
         }
         try:
             _write(path, record, exclusive=True)
         except FileExistsError:
-            if json.loads(path.read_text())["request"] != body:
+            if (
+                PlatformRequest.model_validate(
+                    json.loads(path.read_text())["request"]
+                ).model_dump(mode="json")
+                != body
+            ):
                 raise PlatformConflict("请求ID已被其他操作占用")
             return self.get(identifier)
         try:
-            snapshot = await asyncio.to_thread(
-                build_snapshot,
-                self.scheduler.workspace_dir,
-                request.date,
-                request.timezone or settings.timezone,
-                request.projects,
+            snapshot = (
+                inherited_snapshot
+                if inherited_snapshot is not None
+                else await asyncio.to_thread(
+                    build_snapshot,
+                    self.scheduler.workspace_dir,
+                    request.date,
+                    request.timezone or settings.timezone,
+                    request.projects,
+                )
             )
             await asyncio.to_thread(_write, directory / "snapshot.json", snapshot)
             current = json.loads(path.read_text())
@@ -225,6 +328,13 @@ class PlatformHarness:
                 f"数据截止：{snapshot['window']['as_of']}。\n{instruction}\n"
                 "使用平台只读工具获取证据。不要推断未读取的来源，按规定结构返回答案和source_ids。"
             )
+            if current.get("conversation_context"):
+                prompt = (
+                    "以下是本对话完整历史，用于理解追问；事实须用本次只读工具核实，历史回复不是新的事实来源。\n"
+                    + current["conversation_context"]
+                    + "\n当前问题：\n"
+                    + prompt
+                )
             task = await self.scheduler.submit(
                 prompt=prompt,
                 account_name=settings.account,
@@ -279,8 +389,15 @@ class PlatformHarness:
         response.update(
             kind=record["request"]["kind"],
             date=record["request"]["date"],
-            timezone=record["request"]["timezone"] or record["settings"]["timezone"],
+            timezone=record.get("scope", {}).get("timezone")
+            or record["request"]["timezone"]
+            or record["settings"]["timezone"],
             question=record["request"]["question"],
+            parent_run_id=record["request"].get("parent_run_id", ""),
+            root_run_id=record.get("root_run_id", record["id"]),
+            projects=record.get("scope", {}).get(
+                "projects", record["request"].get("projects")
+            ),
             manifest=record.get("manifest"),
             status=record["state"],
             answer_markdown="",
@@ -420,7 +537,7 @@ class PlatformHarness:
             "get_activity", {"id": source_id}
         )
 
-    def list(self, day: str = "") -> list[dict[str, Any]]:
+    def list(self, day: str = "", summary: bool = False) -> list[dict[str, Any]]:
         records = []
         for path in sorted(
             (self.root / "runs").glob("*/run.json"),
@@ -429,7 +546,21 @@ class PlatformHarness:
         ):
             record = json.loads(path.read_text())
             if not day or record["request"]["date"] == day:
-                records.append(self.get(record["id"]))
+                item = self.get(record["id"])
+                if summary:
+                    item = {
+                        key: item[key]
+                        for key in (
+                            "id",
+                            "root_run_id",
+                            "parent_run_id",
+                            "date",
+                            "created",
+                            "status",
+                            "question",
+                        )
+                    }
+                records.append(item)
             if len(records) >= 50:
                 break
         return records

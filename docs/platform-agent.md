@@ -4,7 +4,11 @@
 
 ## 使用
 
-在「助手设置」中选择容器模式的 Claude SDK 账号、模型、费用上限和 SDK 已安装的镜像；日期旁可以输入 IANA 时区。先点击「预览范围」，不选择项目表示所有项目。问题留空时生成日报，填写问题则查询所选日期的记录。历史报告保留在下方，支持来源查看、执行日志和取消生成。旧版日报与统计保留在折叠区域。
+平台助手采用聊天页面：左侧保存会话，中间显示问答，底部输入消息。Enter 发送、Shift+Enter 换行，中文输入法确认不会误发。回复期间发送按钮变成停止按钮；输入区保留草稿。可以点击「生成日报」，也可以直接问项目进展、待办或需要人工确认的问题。每条回复的来源和覆盖情况默认折叠。
+
+输入区左侧「更多」里可以选择日期、IANA 时区、项目范围，预览数据或调整助手设置；不选择项目表示全部项目。历史日报可作为一次对话继续追问。旧版日报与统计也保留在「更多」中。
+
+追问会携带本对话的完整公开问答，沿用第一条消息冻结的资料和截止时间；不是彼此独立的搜索。追问不能扩大日期、项目或执行账号范围，获取新记录时请新建对话。每次人工发送仍生成一个普通只读 SDK Task，未新增另一套执行引擎，也不声称复用了 SDK 原生会话。最多32轮或128KiB历史上下文，超过边界会明确提示新建对话，完整历史不会被静默截断。
 
 ```bash
 coderfleet platform configure --account YOUR_ACCOUNT --timezone America/Los_Angeles --model sonnet
@@ -12,6 +16,8 @@ coderfleet platform status
 coderfleet platform preview 2026-11-12
 coderfleet platform run 2026-11-12 --request-id daily-20261112-v1
 coderfleet platform run 2026-11-12 --project my-project --question '还有哪些未完成事项？' --request-id query-20261112-v1
+coderfleet platform run 2026-11-12 --after RUN_ID --question '刚才提到的那个项目，下一步先做什么？' --request-id followup-v1
+coderfleet platform thread RUN_ID
 coderfleet platform list --date 2026-11-12
 coderfleet platform get RUN_ID
 coderfleet platform get daily-20261112-v1 --request-id

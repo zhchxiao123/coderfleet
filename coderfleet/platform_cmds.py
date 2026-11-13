@@ -102,14 +102,22 @@ def preview(date: str, timezone: str | None, projects: tuple[str, ...]) -> None:
     "--request-id",
     help="Reuse this ID and the same payload after an uncertain submission",
 )
+@click.option(
+    "--after",
+    default="",
+    help="Continue after a platform reply; inherit its frozen snapshot",
+)
 def run(
     date: str,
     timezone: str | None,
     projects: tuple[str, ...],
     question: str,
     request_id: str | None,
+    after: str = "",
 ) -> None:
     body = _request(date, timezone, projects, question, request_id)
+    if after:
+        body["parent_run_id"] = after
     click.echo("request-id: " + body["request_id"], err=True)
     _print(_call("POST", "/runs", json=body))
 
@@ -165,3 +173,10 @@ def logs(identifier: str) -> None:
 
     context = click.get_current_context()
     context.invoke(cmd_task_logs, task_id=record["task_id"], follow=False)
+
+
+@platform_group.command("thread")
+@click.argument("identifier")
+def thread(identifier: str) -> None:
+    """Read the full platform conversation leading to this reply."""
+    _print(_call("GET", "/runs/" + quote(identifier, safe="") + "/thread"))
