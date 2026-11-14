@@ -34,6 +34,7 @@ _EXEMPT_PATHS = frozenset({"/", "/m", "/sw.js", "/api/health"})
 _EXEMPT_PREFIXES = (
     "/static/",
     "/mcp/",
+    "/platform-mcp/",  # Separately authenticated, run-scoped read-only service.
     "/api/continuations/hooks/",
     "/api/integrations/github/webhook",
 )

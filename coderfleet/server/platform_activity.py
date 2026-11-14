@@ -48,7 +48,10 @@ def _redact(text: str, secrets: list[str]) -> str:
 
 
 def _public_events(
-    path: Path, warnings: list[str], provider: str = "claude"
+    path: Path,
+    warnings: list[str],
+    provider: str = "claude",
+    max_bytes: int | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     rows: list[dict[str, Any]] = []
     clocks: dict[str, datetime] = {}
@@ -67,6 +70,10 @@ def _public_events(
         )
     with path.open("rb") as stream:
         limit = path.stat().st_size
+        if max_bytes is not None:
+            if limit < max_bytes:
+                warnings.append(f"{path.stem}: 日志在目录建立后被截短，存在资料缺口")
+            limit = min(limit, max_bytes)
         index = 0
         while consumed < limit:
             raw = stream.readline(min(16 * 1024 * 1024 + 1, limit - consumed))
@@ -223,6 +230,9 @@ def build_snapshot(
     projects: list[str] | None = None,
     *,
     as_of: str | None = None,
+    task_ids: list[str] | None = None,
+    task_records: list[Task] | None = None,
+    log_limits: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     try:
         zone = ZoneInfo(timezone_name)
@@ -253,7 +263,11 @@ def build_snapshot(
     from coderfleet.config import parse_conf
 
     tasks = [
-        task for task in Task.load_all(workspace / "tasks") if not task.platform_run_id
+        task
+        for task in (
+            Task.load_all(workspace / "tasks") if task_records is None else task_records
+        )
+        if not task.platform_run_id
     ]
     known_projects = {
         task.project_name or Path(task.project).name or "unassigned" for task in tasks
@@ -269,6 +283,8 @@ def build_snapshot(
         )
     source_bytes = 0
     for task in sorted(tasks, key=lambda item: item.id):
+        if task_ids is not None and task.id not in task_ids:
+            continue
         if getattr(task, "platform_run_id", ""):
             continue
         project = task.project_name or Path(task.project).name or "unassigned"
@@ -340,7 +356,9 @@ def build_snapshot(
         if not log.exists():
             warnings.append(f"{task.id}: 缺少日志")
             continue
-        rows, size = _public_events(log, warnings, task.type.value)
+        rows, size = _public_events(
+            log, warnings, task.type.value, (log_limits or {}).get(task.id)
+        )
         source_bytes += size
         if created < start and any(row["at"] is None for row in rows):
             warnings.append(

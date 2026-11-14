@@ -404,16 +404,19 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         can_use_tool=handle_tool_permission,
     )
     platform_reader: Any = None
-    if spec.platform_snapshot:
+    if spec.platform_tools_module:
         if spec.control_directory or spec.session_id or spec.sdk_action or spec.auto:
             raise ValueError('Platform task requires a fresh read-only execution profile')
         module_spec = importlib.util.spec_from_file_location('_coderfleet_platform_tools',spec.platform_tools_module)
         if module_spec is None or module_spec.loader is None: raise ValueError('Platform tool module unavailable')
         module = importlib.util.module_from_spec(module_spec); module_spec.loader.exec_module(module)
-        profile, platform_reader = module.options_for_snapshot(spec.platform_snapshot,spec.sdk_options)
+        if spec.platform_snapshot:
+            profile, platform_reader = module.options_for_snapshot(spec.platform_snapshot,spec.sdk_options)
+        else:
+            profile = module.options_for_retrieval(spec.sdk_options,spec.mcp_options["mcp_servers"])
         option_values.update(profile)
         async def platform_permission(tool: str, tool_input: dict[str,Any], context: Any) -> Any:
-            if tool in module.ALLOWED_TOOLS: return PermissionResultAllow(updated_input=tool_input)
+            if tool in module.ALLOWED_TOOLS or any(tool.startswith('mcp__'+name+'__') for name in spec.mcp_options['mcp_servers']): return PermissionResultAllow(updated_input=tool_input)
             return PermissionResultDeny(message='Tool is outside the platform read-only scope')
         option_values['can_use_tool'] = platform_permission
     elif spec.sdk_options:
@@ -463,6 +466,8 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                     pass  # Progress persistence must not fail an otherwise valid read.
             emit(event)
         platform_reader.on_progress = platform_progress
+    elif spec.platform_tools_module:
+        transport.on_event = module.RetrievalObserver(spec.state_path,spec.task_id).observe
     client = ClaudeSDKClient(options=options, transport=transport)
     mailbox: Any = None
     if spec.control_directory:

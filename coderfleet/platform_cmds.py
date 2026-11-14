@@ -40,7 +40,7 @@ def _print(value: Any) -> None:
 
 @click.group("platform")
 def platform_group() -> None:
-    """Read-only cross-project reports and questions (isolated SDK container)."""
+    """Platform conversations, work reports and explicit MCP operations."""
 
 
 @platform_group.command("status")
@@ -53,12 +53,24 @@ def status() -> None:
 @click.option("--timezone")
 @click.option("--model")
 @click.option("--image", help="SDK-ready Docker image")
+@click.option(
+    "--mcp-server",
+    multiple=True,
+    help="Enable a named account HTTP/SSE MCP; repeat for multiple servers",
+)
+@click.option("--clear-mcp", is_flag=True, help="Disconnect all platform MCP servers")
 @click.option("--max-turns", type=click.IntRange(2, 100))
 @click.option("--max-budget-usd", type=click.FloatRange(0, 20, min_open=True))
 @click.option(
     "--auto-time", help="HH:MM in selected timezone; does not enable scheduling"
 )
 def configure(**changes: Any) -> None:
+    names = changes.pop("mcp_server", ())
+    clear = changes.pop("clear_mcp", False)
+    if names and clear:
+        raise click.ClickException("--mcp-server 与 --clear-mcp 不能同时使用")
+    if names or clear:
+        changes["mcp_servers"] = list(names)
     settings = _call("GET")["settings"]
     settings.update({key: value for key, value in changes.items() if value is not None})
     _print(_call("PUT", "/settings", json=settings))

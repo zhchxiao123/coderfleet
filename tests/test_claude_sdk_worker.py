@@ -325,3 +325,15 @@ def test_platform_profile_exposes_only_scoped_read_tools_and_disables_project_se
     receipt=next(event for event in events if event.get('subtype')=='coderfleet_platform_coverage')
     assert not receipt['complete'] and not receipt['manifest_read'] and receipt['source_ids']==[]
     assert any(event.get('subtype')=='coderfleet_event_clock' for event in events)
+
+
+def test_retrieval_profile_only_exposes_selected_remote_mcp(tmp_path,sdk_python,fake_cli):
+    result,events,capture=run_sdk_task(tmp_path,sdk_python,fake_cli,spec_changes={
+        'platform_tools_module':str(WORKER.with_name('coderfleet_platform_tools.py')),
+        'sdk_options':{'max_turns':8,'max_budget_usd':0.5},
+        'mcp_options':{'mcp_servers':{'fleet':{'type':'http','url':'http://127.0.0.1:9/platform-mcp/'}},'allowed_tools':[],'disallowed_tools':[]}})
+    assert result.returncode==0,result.stderr
+    assert capture['options']['allowedTools']=='mcp__fleet__*'
+    assert capture['options']['setting_sources']==''
+    assert capture['argv'][capture['argv'].index('--tools')+1]==''
+    assert (tmp_path/'worker-fixture.platform-turns.json').is_file()

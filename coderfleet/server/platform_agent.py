@@ -13,7 +13,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coderfleet.config import load_config, truthy, parse_conf
-from coderfleet.data.scripts.coderfleet_platform_tools import ActivityReader
+from coderfleet.data.scripts.coderfleet_platform_tools import (
+    ActivityReader,
+    MAX_MCP_CONNECTIONS,
+)
 from coderfleet.server.models import (
     Account,
     AccountRuntime,
@@ -35,6 +38,9 @@ class PlatformSettings(BaseModel):
     image: str = Field(default="", max_length=256, pattern=r"^[A-Za-z0-9_./:@-]*$")
     max_turns: int = Field(default=24, ge=2, le=100)
     max_budget_usd: float = Field(default=2.0, gt=0, le=20)
+    mcp_servers: list[str] = Field(
+        default_factory=list, max_length=MAX_MCP_CONNECTIONS - 1
+    )
     auto_time: str = Field(default="23:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
     @field_validator("timezone")
@@ -98,6 +104,13 @@ class PlatformHarness:
     def configure(self, settings: PlatformSettings) -> dict[str, Any]:
         if settings.account:
             self._account(settings.account)
+            from coderfleet.server.platform_connections import resolve_connections
+
+            resolve_connections(
+                self.scheduler.workspace_dir, settings.account, settings.mcp_servers
+            )
+        elif settings.mcp_servers:
+            raise ValueError("请先选择 MCP 所属执行账号")
         _write(self.root / "settings.json", settings.model_dump())
         return settings.model_dump()
 
@@ -125,7 +138,16 @@ class PlatformHarness:
             for record in parse_conf(self.scheduler.workspace_dir / "projects.conf")
             if record.get("NAME")
         )
+        from coderfleet.server.platform_connections import available_connections
+
         return {
+            "connections": {
+                a.name: available_connections(self.scheduler.workspace_dir, a.name)
+                for a in self.scheduler.get_accounts()
+                if a.type.value == "claude"
+                and a.claude_backend == "sdk"
+                and a.runtime == AccountRuntime.container
+            },
             "settings": self.settings().model_dump(),
             "automatic_enabled": truthy(
                 load_config(self.scheduler.workspace_dir).get("DIGEST_ENABLED", "off")
@@ -157,9 +179,33 @@ class PlatformHarness:
         return self.root / "runs" / identifier
 
     def launch_config(self, identifier: str) -> dict[str, Any]:
-        return dict(
-            json.loads((self._path(identifier) / "run.json").read_text())["settings"]
+        record = json.loads((self._path(identifier) / "run.json").read_text())
+        return {**record["settings"], "retrieval": record.get("mode") == "retrieval"}
+
+    def connections(self, identifier: str) -> dict[str, Any]:
+        path = self._path(identifier) / "mcp.json"
+        if not path.exists():
+            return {}
+        from coderfleet.data.scripts.coderfleet_platform_tools import (
+            validate_connections,
         )
+
+        servers = validate_connections(json.loads(path.read_text(encoding="utf-8")))
+        record = json.loads((path.parent / "run.json").read_text())
+        if record.get("mode") == "retrieval":
+            token = json.loads((path.parent / "access.json").read_text())["token"]
+            servers = {
+                "fleet": {
+                    "type": "http",
+                    "url": "http://${CODERFLEET_RELAY_IP:-127.0.0.1}:${CODERFLEET_MCP_BRIDGE_PORT:-0}/platform-mcp/",
+                    "headers": {
+                        "Authorization": "Bearer " + token,
+                        "X-CoderFleet-Run-Id": identifier,
+                    },
+                },
+                **servers,
+            }
+        return servers
 
     def thread(self, identifier: str) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -175,7 +221,7 @@ class PlatformHarness:
 
     def _followup(
         self, request: PlatformRequest, settings: PlatformSettings
-    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
         try:
             messages = self.thread(request.parent_run_id)
         except KeyError as error:
@@ -197,8 +243,11 @@ class PlatformHarness:
             raise ValueError("追问不能改变本对话的日期、时区或项目范围，请新建对话")
         if settings.account != parent["account"]:
             raise ValueError("执行账号已改变，请新建对话")
+        if request.kind == "query":
+            return parent, None, ""
         history = [
             {
+                "source_ids": [source["id"] for source in message["sources"]],
                 "user": message["question"] or "生成工作日报",
                 "assistant": message["answer_markdown"]
                 or "上一轮未完成，未产生有效结论",
@@ -256,6 +305,22 @@ class PlatformHarness:
                     raise PlatformConflict(
                         "该消息已有后续回复，请打开最新消息继续或新建对话"
                     )
+        from coderfleet.server.platform_connections import resolve_connections
+
+        connections = (
+            resolve_connections(
+                self.scheduler.workspace_dir, settings.account, settings.mcp_servers
+            )
+            if request.kind == "query"
+            else {}
+        )
+        inherited_ids = sorted(
+            {
+                source
+                for message in json.loads(context or "[]")
+                for source in message["source_ids"]
+            }
+        )
         config = load_config(self.scheduler.workspace_dir)
         resolved = settings.model_dump()
         resolved["image"] = settings.image or config.get(
@@ -279,6 +344,8 @@ class PlatformHarness:
                 "projects": parent["projects"] if parent else request.projects,
             },
             "conversation_context": context,
+            "inherited_source_ids": inherited_ids,
+            "mcp_servers": list(connections),
         }
         try:
             _write(path, record, exclusive=True)
@@ -292,6 +359,13 @@ class PlatformHarness:
                 raise PlatformConflict("请求ID已被其他操作占用")
             return self.get(identifier)
         try:
+            # Container SDK specs must be readable inside their bind mount;
+            # keep the enclosing host run private, including connection headers.
+            directory.chmod(0o700)
+            _write(directory / "mcp.json", connections)
+            if request.kind == "query":
+                await self._start_retrieval(request, identifier, parent, settings)
+                return self.get(identifier)
             snapshot = (
                 inherited_snapshot
                 if inherited_snapshot is not None
@@ -312,7 +386,7 @@ class PlatformHarness:
                     key: value for key, value in snapshot.items() if key != "activities"
                 }
             )
-            if not snapshot["activities"]:
+            if not snapshot["activities"] and request.kind == "daily":
                 current.update(state="empty")
                 _write(path, current)
                 return self.get(identifier)
@@ -328,9 +402,16 @@ class PlatformHarness:
                 f"数据截止：{snapshot['window']['as_of']}。\n{instruction}\n"
                 "使用平台只读工具获取证据。不要推断未读取的来源，按规定结构返回答案和source_ids。"
             )
+            prompt += (
+                "\n本轮已接入 MCP："
+                + (", ".join(connections) or "无")
+                + "。写入工具若支持幂等标识，使用 cf-platform-"
+                + identifier
+                + "；不得在结果不确定时自动重试。"
+            )
             if current.get("conversation_context"):
                 prompt = (
-                    "以下是本对话完整历史，用于理解追问；事实须用本次只读工具核实，历史回复不是新的事实来源。\n"
+                    "以下是本对话完整历史，可整理或保存先前回答；source_ids为已验证引用可沿用，新增平台事实须用只读工具核实。\n"
                     + current["conversation_context"]
                     + "\n当前问题：\n"
                     + prompt
@@ -348,15 +429,209 @@ class PlatformHarness:
                     "effort": "medium",
                 },
             )
-            current = json.loads(path.read_text())
-            current.update(task_id=task.id, state="submitted")
-            _write(path, current)
+            await self._bind_task(identifier, task)
         except Exception as error:
             current = json.loads(path.read_text())
             if current["state"] != "cancelled":
                 current.update(state="error", error=str(error))
                 _write(path, current)
         return self.get(identifier)
+
+    async def _start_retrieval(
+        self,
+        request: PlatformRequest,
+        identifier: str,
+        parent: dict[str, Any] | None,
+        settings: PlatformSettings,
+    ) -> None:
+        import secrets
+        from coderfleet.server.platform_retrieval import make_catalog
+
+        directory = self._path(identifier)
+        previous = self._path(parent["id"]) / "catalog.json" if parent else None
+        if previous and previous.exists():
+            catalog = json.loads(previous.read_text())
+            cached = previous.parent / "retrieval"
+            if cached.exists():
+                import shutil
+
+                await asyncio.to_thread(
+                    shutil.copytree, cached, directory / "retrieval", dirs_exist_ok=True
+                )
+        else:
+            catalog = await asyncio.to_thread(
+                make_catalog,
+                self.scheduler,
+                request.date,
+                request.timezone or settings.timezone,
+                request.projects,
+                parent["manifest"]["window"]["as_of"]
+                if parent and parent.get("manifest")
+                else None,
+            )
+        legacy = self._path(parent["id"]) / "snapshot.json" if parent else None
+        if legacy and legacy.exists():
+            old = ActivityReader.from_file(str(legacy)).snapshot
+            catalog["tasks"] = []
+            catalog["projects"] = list(old["projects"])
+            catalog["coverage"]["tasks"] = len(old["tasks"])
+            catalog["coverage"]["warnings"] = list(old["coverage"]["warnings"])
+            catalog["fingerprint"] = old["fingerprint"]
+            for task in old["tasks"]:
+                rows = [
+                    row
+                    for row in old["activities"]
+                    if row["task_id"] == task["task_id"]
+                ]
+                questions = "".join(
+                    row["text"] for row in rows if row["kind"] == "question"
+                )
+                catalog["tasks"].append(
+                    {
+                        "id": task["task_id"],
+                        "conversation_id": task["conversation_id"],
+                        "project_name": task["project_name"],
+                        "status": task["status"],
+                        "prompt": questions[:200],
+                    }
+                )
+                _write(
+                    directory / "retrieval" / f"{task['task_id']}.json",
+                    {
+                        "activities": rows,
+                        "coverage": {"warnings": old["coverage"]["warnings"]},
+                    },
+                )
+        _write(directory / "catalog.json", catalog)
+        _write(directory / "access.json", {"token": secrets.token_urlsafe(32)})
+        current = json.loads((directory / "run.json").read_text())
+        if current["state"] == "cancelled":
+            return
+        current.update(
+            mode="retrieval",
+            manifest={
+                k: v
+                for k, v in catalog.items()
+                if k not in {"tasks", "activities", "task_records"}
+            },
+        )
+        _write(directory / "run.json", current)
+        prompt = (
+            f"当前用户要求：{request.question}\n范围：{request.date}，{catalog['timezone']}；截止 {catalog['window']['as_of']}。"
+            f"\n本轮 CoderFleet 运行 ID：{identifier}；上一条回复 ID：{request.parent_run_id or '无'}。"
+            "\n通过 fleet MCP 按需搜索聊天和读取 Task；需要先前回答时调用 read_reply，不要重新扫全库。"
+            f"\n本轮外部 MCP：{', '.join(current['mcp_servers']) or '无'}。写入幂等标识 cf-platform-{identifier}，结果不确定不得自动重试。"
+        )
+        task = await self.scheduler.submit(
+            prompt=prompt,
+            account_name=settings.account,
+            ephemeral=True,
+            model=settings.model,
+            auto=False,
+            platform_run_id=identifier,
+            sdk_options={
+                "max_turns": settings.max_turns,
+                "max_budget_usd": settings.max_budget_usd,
+                "effort": "medium",
+            },
+        )
+        await self._bind_task(identifier, task)
+
+    async def _bind_task(self, identifier: str, task: Task) -> None:
+        path = self._path(identifier) / "run.json"
+        current = json.loads(path.read_text())
+        cancelled = current["state"] == "cancelled"
+        current.update(task_id=task.id, state="cancelled" if cancelled else "submitted")
+        _write(path, current)
+        if cancelled:
+            await self.scheduler.kill_task(task.id)
+
+    def _retrieval_result(
+        self, record: dict[str, Any], response: dict[str, Any], task: Task
+    ) -> dict[str, Any]:
+        from coderfleet.server.platform_retrieval import PlatformReader
+
+        reader = PlatformReader(self.scheduler, record["id"])
+        sources = reader.sources()
+        result = None
+        calls: dict[str, dict[str, str]] = {}
+        with self.scheduler.get_log_path(task.id).open(
+            encoding="utf-8", errors="replace"
+        ) as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict) or event.get("parent_tool_use_id"):
+                    continue
+                if (
+                    event.get("type") == "result"
+                    and not event.get("is_error")
+                    and isinstance(event.get("structured_output"), dict)
+                ):
+                    result = event["structured_output"]
+                content = (event.get("message") or {}).get("content", [])
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    name = block.get("name", "")
+                    if (
+                        event.get("type") == "assistant"
+                        and block.get("type") == "tool_use"
+                        and isinstance(name, str)
+                        and isinstance(block.get("id"), str)
+                        and name.startswith("mcp__")
+                    ):
+                        calls[block["id"]] = {"name": name, "status": "pending"}
+                    if (
+                        event.get("type") == "user"
+                        and block.get("type") == "tool_result"
+                        and isinstance(block.get("tool_use_id"), str)
+                        and block["tool_use_id"] in calls
+                    ):
+                        calls[block["tool_use_id"]]["status"] = (
+                            "failed" if block.get("is_error") else "completed"
+                        )
+        if (
+            not result
+            or not isinstance(result.get("answer_markdown"), str)
+            or not result["answer_markdown"].strip()
+            or len(result["answer_markdown"]) > 100000
+        ):
+            return {**response, "status": "error", "error": "缺少有效的结构化回答"}
+        ids = result.get("source_ids")
+        if not isinstance(ids, list) or not all(
+            isinstance(i, str) and i in sources for i in ids
+        ):
+            return {
+                **response,
+                "status": "error",
+                "error": "回答引用了本轮未检索的来源",
+            }
+        status = reader.status()
+        warnings = list(status["warnings"])
+        if status.get("read_limit_reached"):
+            warnings.append("检索达到轮次预算，已用现有资料作部分回答")
+        answer = {
+            "status": "partial" if warnings else "ready",
+            "answer_markdown": result["answer_markdown"],
+            "tool_calls": list(calls.values()),
+            "coverage": {
+                "read": len(sources),
+                "retrieval": True,
+                "complete": False,
+                "warnings": warnings,
+            },
+            "sources": [
+                {k: v for k, v in sources[i].items() if k not in {"text", "source"}}
+                for i in dict.fromkeys(ids)
+            ],
+        }
+        _write(self._path(record["id"]) / "result.json", answer)
+        return {**response, **answer}
 
     def get(self, identifier: str) -> dict[str, Any]:
         directory = self._path(identifier)
@@ -395,6 +670,7 @@ class PlatformHarness:
             question=record["request"]["question"],
             parent_run_id=record["request"].get("parent_run_id", ""),
             root_run_id=record.get("root_run_id", record["id"]),
+            mcp_servers=record.get("mcp_servers", []),
             projects=record.get("scope", {}).get(
                 "projects", record["request"].get("projects")
             ),
@@ -453,8 +729,14 @@ class PlatformHarness:
                     )
                 )
             return response
+        if record.get("mode") == "retrieval":
+            try:
+                return self._retrieval_result(record, response, task)
+            except (OSError, ValueError, KeyError) as error:
+                return {**response, "status": "error", "error": str(error)}
         result: dict[str, Any] | None = None
         coverage: dict[str, Any] | None = None
+        tool_calls: dict[str, dict[str, str]] = {}
         try:
             with self.scheduler.get_log_path(task.id).open(
                 encoding="utf-8", errors="replace"
@@ -466,6 +748,34 @@ class PlatformHarness:
                         continue
                     if not isinstance(event, dict) or event.get("parent_tool_use_id"):
                         continue
+                    content = (event.get("message") or {}).get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict):
+                                continue
+                            name = block.get("name", "")
+                            if (
+                                event.get("type") == "assistant"
+                                and block.get("type") == "tool_use"
+                                and isinstance(name, str)
+                                and isinstance(block.get("id"), str)
+                                and any(
+                                    name.startswith("mcp__" + server + "__")
+                                    for server in record.get("mcp_servers", [])
+                                )
+                            ):
+                                tool_calls[block["id"]] = {
+                                    "name": name,
+                                    "status": "pending",
+                                }
+                            if (
+                                event.get("type") == "user"
+                                and block.get("type") == "tool_result"
+                                and block.get("tool_use_id") in tool_calls
+                            ):
+                                tool_calls[block["tool_use_id"]]["status"] = (
+                                    "failed" if block.get("is_error") else "completed"
+                                )
                     if (
                         event.get("subtype") == "coderfleet_platform_coverage"
                         and event.get("task_id") == task.id
@@ -495,17 +805,27 @@ class PlatformHarness:
                 isinstance(item, str) and item in reader.by_id for item in read_ids
             ):
                 raise ValueError("读取来源无效")
+            inherited_ids = {
+                item
+                for item in record.get("inherited_source_ids", [])
+                if isinstance(item, str) and item in reader.by_id
+            }
             if (
                 not isinstance(ids, list)
-                or not ids
-                or not all(isinstance(item, str) and item in read_ids for item in ids)
+                or (record["request"]["kind"] == "daily" and not ids)
+                or not all(
+                    isinstance(item, str) and item in set(read_ids) | inherited_ids
+                    for item in ids
+                )
             ):
                 raise ValueError("报告引用了未读取的来源")
             covered = len(set(read_ids))
             total = len(reader.by_id)
             warnings = list(reader.snapshot["coverage"]["warnings"])
             manifest_read = coverage.get("manifest_read") is True
-            if not manifest_read:
+            if not manifest_read and (
+                read_ids or ids or record["request"]["kind"] == "daily"
+            ):
                 warnings.append("未取得完整活动清单的读取回执")
             read_limited = (
                 coverage.get("read_limit_reached") is True and covered < total
@@ -522,10 +842,12 @@ class PlatformHarness:
                     and (covered < total or warnings)
                 )
                 else "ready",
+                "tool_calls": list(tool_calls.values()),
                 "answer_markdown": result["answer_markdown"],
                 "sdk_version": task.sdk_version,
                 "cli_version": task.cli_version,
                 "coverage": {
+                    "inherited_citations": len(set(ids) & inherited_ids),
                     "read": covered,
                     "total": total,
                     "complete": covered == total and manifest_read,
@@ -550,6 +872,13 @@ class PlatformHarness:
 
     def source(self, identifier: str, source_id: str) -> dict[str, Any]:
         directory = self._path(identifier)
+        if (directory / "catalog.json").exists():
+            from coderfleet.server.platform_retrieval import PlatformReader
+
+            sources = PlatformReader(self.scheduler, identifier).sources()
+            if source_id not in sources:
+                raise KeyError("本轮没有检索过该来源")
+            return dict(sources[source_id])
         if not (directory / "snapshot.json").exists():
             raise KeyError("活动快照不存在")
         return ActivityReader.from_file(str(directory / "snapshot.json")).call(

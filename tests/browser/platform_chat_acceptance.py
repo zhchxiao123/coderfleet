@@ -45,16 +45,14 @@ class Runtime(FakeRuntime):
         request = json.loads(
             next((workspace / ".coderfleet-tasks").glob("*.sdk.json")).read_text()
         )
-        snapshot = json.loads(
-            Path(
-                next(
-                    src
-                    for src, dst in spec.mounts
-                    if dst == "/platform-data/snapshot.json:ro"
-                )
-            ).read_text()
-        )
-        ids = [row["id"] for row in snapshot["activities"]]
+        if request.get('platform_snapshot'):
+            snapshot=json.loads(Path(next(src for src,dst in spec.mounts if dst=='/platform-data/snapshot.json:ro')).read_text())
+            ids=[row['id']for row in snapshot['activities']]
+        else:
+            from coderfleet.server.platform_retrieval import PlatformReader
+            reader=PlatformReader(scheduler,workspace.parent.name)
+            for task in reader.call('list_tasks',{})['tasks']:reader.call('read_task',{'task_id':task['id']})
+            snapshot=reader.catalog;ids=list(reader.sources())
         if self.fail_next:
             self.fail_next = False
             (
@@ -300,7 +298,7 @@ async def main():
                 sum(bool(row["request"].get("parent_run_id")) for row in requests) == 1
             )
             assert any(
-                "那应该先处理哪个" in task.prompt and "今日进展" in task.prompt
+                "那应该先处理哪个" in task.prompt and "read_reply" in task.prompt
                 for task in scheduler.list_tasks()
             )
             await cdp.evaluate(

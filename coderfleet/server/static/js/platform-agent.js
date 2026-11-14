@@ -1,12 +1,12 @@
-// Platform conversations are a read-only lens over analysis Tasks and their frozen evidence.
+// Platform conversations combine frozen read-only evidence with explicit MCP connections.
 const PlatformAgent = (() => {
   const pendingKey='cf-platform-pending-v1', draftKey='cf-platform-drafts-v2', selectedKey='cf-platform-selected-v2';
   const states={preparing:'正在准备资料…',submitted:'正在准备资料…',pending:'正在排队…',running:'正在整理资料…',ready:'已完成',partial:'部分覆盖',error:'生成失败',cancelled:'已停止'};
-  const kinds={question:'用户要求',reply:'模型回复',supplement:'插话',context:'跨日背景',agent_question:'模型提问',human_answer:'人工作答',approval:'权限决定'};
+  const kinds={platform_reply:'平台回复',question:'用户要求',reply:'模型回复',supplement:'插话',context:'跨日背景',agent_question:'模型提问',human_answer:'人工作答',approval:'权限决定'};
   const el=id=>document.getElementById('platform-'+id);
   const active=value=>['preparing','submitted','pending','running'].includes(value);
   const dateTime=(value,zone)=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,dateStyle:'short',timeStyle:'medium'}).format(new Date(value));
-  let initialized=false, settings={}, selected='', messages=[], generation=0, listGeneration=0, timer=null, posting=false, opening=false;
+  let initialized=false, connections={}, settings={}, selected='', messages=[], generation=0, listGeneration=0, timer=null, posting=false, opening=false;
   function stored(key,fallback){try{return JSON.parse(localStorage.getItem(key))||fallback;}catch{return fallback;}}
   function pending(){return stored(pendingKey,null);}
   function tell(text){el('message').textContent=text;}
@@ -50,14 +50,14 @@ const PlatformAgent = (() => {
     button.innerHTML=running?'<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>':'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 7-7 7 7M12 5v14"/></svg>';
     el('daily').disabled=posting||waiting||opening;
     const value=scope();el('scope-label').textContent=value.date+' · '+(value.projects?.length?value.projects.length+' 个项目':'全部项目');
-    el('context-note').textContent=waiting?'提交状态尚未确认，原消息已保留；确认后可继续输入':last?.manifest?'资料截止 '+dateTime(last.manifest.window.as_of,last.timezone)+' · 追问沿用本对话资料，新对话可获取最新记录':'只读分析平台记录，每条结论都可查看来源';
+    el('context-note').textContent=waiting?'提交状态尚未确认，原消息已保留；确认后可继续输入':last?.manifest?'资料截止 '+dateTime(last.manifest.window.as_of,last.timezone)+' · 追问沿用本对话资料，新对话可获取最新记录':'回顾平台记录，或通过已接入的 MCP 查询和保存内容';
   }
   function scrollBottom(){el('scroll').scrollTop=el('scroll').scrollHeight;}
   function welcome(){
     const root=el('result');root.replaceChildren();const wrap=document.createElement('div');wrap.className='platform-welcome';
     const mark=document.createElement('div');mark.className='platform-welcome-mark';mark.textContent='CF';
     const title=document.createElement('h3');title.textContent='今天，想了解些什么？';
-    const note=document.createElement('p');note.textContent='各个项目的进展、待办和关键决策，都可以在这里聊。';
+    const note=document.createElement('p');note.textContent='项目进展、待办和关键决策，都可以在这里聊；也可通过已接入的 MCP 查询资料、保存整理结果。';
     const suggestions=document.createElement('div');suggestions.className='platform-suggestions';
     for(const [label,question] of [['生成工作日报',''],['看看未完成事项','有哪些未完成的事项？'],['需要我确认什么','有哪些问题还需要我确认？']]){
       const button=document.createElement('button');button.type='button';button.textContent=label;
@@ -67,8 +67,8 @@ const PlatformAgent = (() => {
   }
   function detailsFor(record){
     const details=document.createElement('details'),summary=document.createElement('summary'),coverage=record.coverage||{},manifest=record.manifest;
-    summary.textContent='来源 '+record.sources.length+(coverage.total!==undefined?' · 已读取 '+coverage.read+'/'+coverage.total:'')+(record.status==='partial'?' · 部分覆盖':'');details.append(summary);
-    const metadata=document.createElement('p');metadata.textContent=record.date+' · '+record.timezone+(manifest?' · 截止 '+dateTime(manifest.window.as_of,record.timezone):'');details.append(metadata);
+    summary.textContent=(record.sources.length||coverage.read?'来源 '+record.sources.length:'执行详情')+(coverage.retrieval?' · 按需读取 '+coverage.read+' 条':coverage.total!==undefined?' · 已读取 '+coverage.read+'/'+coverage.total:'')+(record.status==='partial'?' · 部分覆盖':'')+(coverage.inherited_citations?' · 沿用 '+coverage.inherited_citations+' 条历史引用':'');details.append(summary);
+    const metadata=document.createElement('p');metadata.textContent=record.date+' · '+record.timezone+(record.mcp_servers?.length?' · MCP：'+record.mcp_servers.join('、'):'')+(manifest?' · 截止 '+dateTime(manifest.window.as_of,record.timezone):'');details.append(metadata);
     const warnings=coverage.warnings||manifest?.coverage.warnings||[];
     if(warnings.length||coverage.estimated_timestamps){const note=document.createElement('p');note.textContent=[...warnings,coverage.estimated_timestamps?coverage.estimated_timestamps+' 条旧记录的时间为估计值':''].filter(Boolean).join('；');details.append(note);}
     const list=document.createElement('ol');list.className='platform-sources';
@@ -79,6 +79,7 @@ const PlatformAgent = (() => {
       item.append(button,text);list.append(item);
     }
     details.append(list);
+    for(const call of record.tool_calls||[]){const note=document.createElement('p');note.textContent=call.name+' · '+({completed:'已执行',failed:'失败',pending:'缺少完成回执'}[call.status]||call.status);details.append(note);}
     if(record.task_id){
       const logs=document.createElement('details'),label=document.createElement('summary'),text=document.createElement('pre');label.textContent='执行日志';
       logs.ontoggle=async()=>{if(logs.open)try{const response=await fetch(API+'/api/tasks/'+encodeURIComponent(record.task_id)+'/logs?light=1');if(!response.ok)throw new Error('日志加载失败');text.textContent=await response.text();}catch(error){text.textContent=error.message;}};
@@ -92,7 +93,7 @@ const PlatformAgent = (() => {
     const assistant=document.createElement('div'),avatar=document.createElement('div'),answer=document.createElement('div');assistant.className='platform-assistant';avatar.className='platform-avatar';avatar.textContent='CF';avatar.setAttribute('aria-label','平台助手');answer.className='platform-answer';
     if(record.answer_markdown){const content=document.createElement('div');content.className='markdown-body';content.innerHTML=markdown(record.answer_markdown);answer.append(content);}
     else {const status=document.createElement('p');status.className='platform-turn-status';status.setAttribute('role','status');if(active(record.status)){const dot=document.createElement('span');dot.className='platform-activity-dot';dot.setAttribute('aria-hidden','true');status.append(dot);}const progress=record.progress;
-      const label=active(record.status)&&Number.isInteger(progress?.read)&&Number.isInteger(progress?.total)?('已读取 '+progress.read+'/'+progress.total+' 条活动 · '+(progress.phase==='composing'?'正在整理回答…':'继续读取中…')):(states[record.status]||record.status);
+      const label=active(record.status)&&Number.isInteger(progress?.read)&&Number.isInteger(progress?.total)?(progress.mode==='retrieval'?'已检索 '+progress.read+' 条资料 · 正在处理…':'已读取 '+progress.read+'/'+progress.total+' 条活动 · '+(progress.phase==='composing'?'正在整理回答…':'继续读取中…')):(states[record.status]||record.status);
       status.append(document.createTextNode(label));answer.append(status);}
     if(record.error){const error=document.createElement('p');error.textContent=record.error;answer.append(error);}
     if(!active(record.status))answer.append(detailsFor(record));
@@ -171,13 +172,18 @@ const PlatformAgent = (() => {
     for(const value of new Set([...values,...chosen])){const option=new Option(value+(values.includes(value)?'':'（已不在当前列表）'),value);option.selected=chosen.has(value);node.append(option);}
     if(!node.multiple&&!chosen.size)node.value='';
   }
+  function syncConnections(){
+    const node=el('mcp');node.replaceChildren();
+    for(const item of connections[el('account').value]||[]){const option=new Option(item.name+(item.supported?'':'（暂不支持该连接方式）'),item.name);option.disabled=!item.supported;option.selected=settings.account===el('account').value&&(settings.mcp_servers||[]).includes(item.name);node.append(option);}
+  }
   async function init(){
     try{
-      const info=await api();settings=info.settings;
+      const info=await api();settings=info.settings;connections=info.connections||{};
       if(!initialized){
         el('timezone').value=settings.timezone;el('date').value=new Intl.DateTimeFormat('en-CA',{timeZone:settings.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
         for(const project of info.projects)el('projects').append(new Option(project,project));for(const account of info.accounts)el('account').append(new Option(account,account));
         for(const [field,key] of [['account','account'],['model','model'],['image','image'],['turns','max_turns'],['budget','max_budget_usd'],['auto-time','auto_time']])el(field).value=settings[key];
+        syncConnections();el('account').onchange=syncConnections;
         initialized=true;restoreDraft();welcome();
         el('form').onsubmit=event=>{event.preventDefault();submit();};el('daily').onclick=daily;
         el('question').oninput=()=>{saveDraft();updateComposer();};el('question').onkeydown=event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229){event.preventDefault();el('form').requestSubmit();}};
@@ -185,7 +191,7 @@ const PlatformAgent = (() => {
         el('new').onclick=()=>startNew();el('new-mobile').onclick=()=>startNew();
         el('history-toggle').onclick=()=>{const shown=el('agent').classList.toggle('show-history');el('history-toggle').setAttribute('aria-expanded',String(shown));};
         el('preview').onclick=async()=>{try{const value=scope(),preview=messages.at(-1)?.manifest||await api('/preview',{method:'POST',body:JSON.stringify({...value,projects:value.projects.length?value.projects:null,request_id:'preview'})});tell(preview.coverage.tasks+' 个任务 · '+preview.coverage.activities+' 条活动 · 截止 '+dateTime(preview.window.as_of,preview.timezone)+(preview.coverage.warnings.length?' · '+preview.coverage.warnings.length+' 条覆盖提醒':''));}catch(error){tell(error.message);}};
-        el('settings-form').onsubmit=async event=>{event.preventDefault();try{settings=await api('/settings',{method:'PUT',body:JSON.stringify({account:el('account').value,timezone:el('timezone').value.trim(),model:el('model').value.trim(),image:el('image').value.trim(),max_turns:Number(el('turns').value),max_budget_usd:Number(el('budget').value),auto_time:el('auto-time').value})});tell('助手设置已保存。');}catch(error){tell(error.message);}};
+        el('settings-form').onsubmit=async event=>{event.preventDefault();try{settings=await api('/settings',{method:'PUT',body:JSON.stringify({account:el('account').value,mcp_servers:[...el('mcp').selectedOptions].map(option=>option.value),timezone:el('timezone').value.trim(),model:el('model').value.trim(),image:el('image').value.trim(),max_turns:Number(el('turns').value),max_budget_usd:Number(el('budget').value),auto_time:el('auto-time').value})});tell('助手设置已保存。');}catch(error){tell(error.message);}};
         const unfinished=pending();if(unfinished){restoreScope(unfinished);el('question').value=unfinished.question;try{const record=await api('/requests?request_id='+encodeURIComponent(unfinished.request_id));acknowledge(record);localStorage.removeItem(pendingKey);clearSubmittedDraft(unfinished.parent_run_id||'',unfinished.kind);await openThread(record.id,{submitted:true});}catch(error){tell(error.status===404?'上次消息提交尚未确认，可沿用原请求重试。':error.message);}}
         else{const previous=localStorage.getItem(selectedKey);if(previous)await openThread(previous);}
       }

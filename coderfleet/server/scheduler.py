@@ -2388,6 +2388,10 @@ class Scheduler:
                 task_secrets   = dict(secrets),
                 continuation_id = continuation_id,
             )
+            if platform_run_id:
+                platform_record = self.workspace_dir / 'platform' / 'runs' / platform_run_id / 'run.json'
+                if platform_record.exists() and json.loads(platform_record.read_text()).get('state') == 'cancelled':
+                    raise ValueError('平台请求已取消，未启动 Task')
             self._assert_sdk_workspace_available(task)
             task.save(self.tasks_dir)
             if conversation:
@@ -3264,8 +3268,9 @@ class Scheduler:
             self._apply_runtime_proxy(acc,env,network)
             if task.platform_run_id:
                 snapshot = self.workspace_dir / 'platform' / 'runs' / task.platform_run_id / 'snapshot.json'
-                if not snapshot.is_file(): raise ValueError('平台活动快照缺失')
-                mounts.append((str(snapshot),'/platform-data/snapshot.json:ro'))
+                from coderfleet.server.platform_agent import PlatformHarness
+                if not snapshot.is_file() and not PlatformHarness(self).launch_config(task.platform_run_id).get('retrieval'): raise ValueError('平台活动快照缺失')
+                if snapshot.is_file():mounts.append((str(snapshot),'/platform-data/snapshot.json:ro'))
                 from coderfleet.server.platform_agent import PlatformHarness
                 image = PlatformHarness(self).launch_config(task.platform_run_id)['image']
 
@@ -3303,6 +3308,12 @@ class Scheduler:
             # Task-level secrets (highest priority, override everything)
             env.update(task_secrets or {})
             if task.platform_run_id:
+                env['CODERFLEET_MCP_BRIDGE_PORT']=(cfg.get('MCP_BRIDGE_RELAY_PORT','8766') if network else os.environ.get('CODERFLEET_PORT',cfg.get('CODERFLEET_PORT','8765')))
+                relay_host=env.get('CODERFLEET_RELAY_IP',cfg.get('RELAY_IP','172.21.0.2')) if network else 'host.docker.internal'
+                env['CODERFLEET_RELAY_IP']=relay_host
+                bypass=env.get('NO_PROXY','localhost,127.0.0.1')
+                env['NO_PROXY']=bypass+','+relay_host
+                env['no_proxy']=env['NO_PROXY']
                 for key in ('DOCKER_HOST','CODERFLEET_DOCKER_SOCKET','CODERFLEET_HOST_WORKSPACE'):
                     env.pop(key,None)
 
@@ -3713,12 +3724,14 @@ class Scheduler:
         }
         if task.platform_run_id:
             from importlib import resources
+            from coderfleet.server.platform_agent import PlatformHarness
             source = resources.files('coderfleet.data').joinpath('scripts/coderfleet_platform_tools.py').read_bytes()
             name = 'platform-tools-' + hashlib.sha256(source).hexdigest()[:16] + '.py'
             self._write_sdk_artifact(artifact_dir / name,source)
-            request.update(platform_snapshot='/platform-data/snapshot.json',platform_tools_module=str(runtime_dir / name),
+            retrieval=PlatformHarness(self).launch_config(task.platform_run_id).get('retrieval',False)
+            request.update(platform_snapshot='' if retrieval else '/platform-data/snapshot.json',platform_tools_module=str(runtime_dir / name),
                            control_directory='',control_token='',session_id='',append_system_prompt='',
-                           mcp_options={'mcp_servers':{},'allowed_tools':[],'disallowed_tools':[]})
+                           mcp_options={'mcp_servers':PlatformHarness(self).connections(task.platform_run_id),'allowed_tools':[],'disallowed_tools':[]})
         self._write_sdk_artifact(
             artifact_dir / f"{task.id}.sdk.json",
             json.dumps(request, ensure_ascii=False).encode("utf-8"),

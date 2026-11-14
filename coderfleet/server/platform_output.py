@@ -28,7 +28,15 @@ def read_progress(directory: Path, task_id: str, fingerprint: str) -> dict[str, 
         return {}
     return {
         key: value[key]
-        for key in ("read", "total", "phase", "turns_used", "max_turns", "updated_at")
+        for key in (
+            "read",
+            "total",
+            "phase",
+            "mode",
+            "turns_used",
+            "max_turns",
+            "updated_at",
+        )
         if key in value
     }
 

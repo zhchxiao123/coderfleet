@@ -300,6 +300,10 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # renderer.js（Slice 3）已经在认这个具体的字符串，改这里的 server/tool 名字
 # 必须同步改那边。工具本体注册在 mcp_bridge.py（不带这个文件顶部的
 # `from __future__ import annotations`，见那边模块 docstring 的原因）。
+from coderfleet.server.platform_mcp import build_platform_mcp, PlatformMCPAuth
+platform_mcp = build_platform_mcp(scheduler)
+app.mount("/platform-mcp", PlatformMCPAuth(platform_mcp.streamable_http_app(),scheduler))
+
 intervention_mcp = build_intervention_mcp(scheduler)
 app.mount("/mcp", intervention_mcp.streamable_http_app())
 
@@ -322,10 +326,15 @@ async def reconcile_tasks_on_startup():
     # exit it in the matching shutdown handler below.
     app.state.intervention_mcp_session_ctx = intervention_mcp.session_manager.run()
     await app.state.intervention_mcp_session_ctx.__aenter__()
+    app.state.platform_mcp_session_ctx = platform_mcp.session_manager.run()
+    await app.state.platform_mcp_session_ctx.__aenter__()
 
 
 @app.on_event("shutdown")
 async def _stop_intervention_mcp_session():
+    platform_ctx = getattr(app.state, "platform_mcp_session_ctx", None)
+    if platform_ctx is not None:
+        await platform_ctx.__aexit__(None,None,None)
     ctx = getattr(app.state, "intervention_mcp_session_ctx", None)
     if ctx is not None:
         await ctx.__aexit__(None, None, None)

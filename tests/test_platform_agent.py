@@ -155,16 +155,34 @@ class ResultRuntime(FakeRuntime):
         request = json.loads(
             next((workspace / ".coderfleet-tasks").glob("*.sdk.json")).read_text()
         )
-        snapshot = json.loads(
-            Path(
-                next(
-                    source
-                    for source, target in spec.mounts
-                    if target == "/platform-data/snapshot.json:ro"
+        if request.get("platform_snapshot"):
+            snapshot = json.loads(
+                Path(
+                    next(
+                        source
+                        for source, target in spec.mounts
+                        if target == "/platform-data/snapshot.json:ro"
+                    )
+                ).read_text()
+            )
+            ids = [item["id"] for item in snapshot["activities"]]
+        else:
+            from coderfleet.server.platform_retrieval import PlatformReader
+
+            reader = PlatformReader(
+                Scheduler(self.root, runtime=FakeRuntime()), workspace.parent.name
+            )
+            for task in reader.call("list_tasks", {})["tasks"]:
+                reader.call(
+                    "read_task",
+                    {"task_id": task["id"], "limit": 1 if self.subset else 20},
                 )
-            ).read_text()
-        )
-        ids = [item["id"] for item in snapshot["activities"]]
+            ids = list(reader.sources())
+            snapshot = reader.catalog
+            if self.read_limited:
+                (workspace.parent / "retrieval-status.json").write_text(
+                    json.dumps({"read_limit_reached": True, "warnings": []})
+                )
         read = ids[:1] if self.subset or self.unread_citation else ids
         events = [
             {
