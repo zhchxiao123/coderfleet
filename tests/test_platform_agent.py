@@ -540,3 +540,57 @@ def test_query_that_stops_reading_for_budget_is_marked_partial(tmp_path, monkeyp
         assert any("轮次预算" in warning for warning in result["coverage"]["warnings"])
 
     asyncio.run(drive())
+
+
+def test_task_id_citations_resolve_only_to_retrieved_chunks_and_keep_the_answer(
+    tmp_path, monkeypatch
+):
+    from coderfleet.server.platform_output import resolve_citations
+
+    rows = {
+        "chunk-a": {"task_id": "task-a", "conversation_id": "chat-a"},
+        "chunk-b": {"task_id": "task-a", "conversation_id": "chat-a"},
+    }
+    ids, unresolved = resolve_citations(["task-a", "unread-task", "chunk-a"], rows)
+    assert ids == ["chunk-a", "chunk-b"] and unresolved == 1
+
+
+def test_query_with_task_alias_and_one_bad_citation_keeps_answer_and_verified_links(
+    tmp_path, monkeypatch
+):
+    from coderfleet.server.platform_agent import PlatformRequest
+
+    class AliasRuntime(ResultRuntime):
+        async def run(self, spec):
+            process = await super().run(spec)
+            events = [
+                json.loads(line)
+                for line in (await process.stdout.read()).decode().splitlines()
+            ]
+            events[-1]["structured_output"]["source_ids"] = ["fixture", "unread-task"]
+            return FakeProcess(
+                stdout_chunks=[
+                    ("\n".join(json.dumps(e) for e in events) + "\n").encode()
+                ]
+            )
+
+    scheduler, harness = configured(tmp_path, monkeypatch, AliasRuntime(tmp_path))
+
+    async def drive():
+        record = await harness.create(
+            PlatformRequest(
+                request_id="alias-query",
+                kind="query",
+                question="汇总工作",
+                date="2026-11-12",
+            )
+        )
+        await asyncio.gather(*list(scheduler._running.values()))
+        record = harness.get(record["id"])
+        assert record["status"] == "partial" and record["answer_markdown"] == "Report"
+        assert len(record["sources"]) == 2 and all(
+            s["task_id"] == "fixture" for s in record["sources"]
+        )
+        assert any("1 条引用" in w for w in record["coverage"]["warnings"])
+
+    asyncio.run(drive())

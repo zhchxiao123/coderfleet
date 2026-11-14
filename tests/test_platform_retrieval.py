@@ -159,3 +159,34 @@ def test_legacy_daily_frozen_content_survives_two_query_followups(
             assert rows[0]["text"] == "Original question"
 
     asyncio.run(drive())
+
+
+def test_agent_can_select_a_week_without_loading_logs_or_widening_project_scope(
+    tmp_path, monkeypatch
+):
+    from coderfleet.server.platform_retrieval import PlatformReader
+
+    scheduler, harness = configured(tmp_path, monkeypatch, ResultRuntime(tmp_path))
+
+    async def drive():
+        record = await harness.create(
+            PlatformRequest(
+                request_id="weekly",
+                kind="query",
+                question="分析这周工作",
+                date="2026-11-12",
+                projects=["business"],
+            )
+        )
+        reader = PlatformReader(scheduler, record["id"])
+        value = reader.call(
+            "select_period", {"start_date": "2026-11-10", "end_date": "2026-11-16"}
+        )
+        assert value["start_date"] == "2026-11-10" and value["end_date"] == "2026-11-16"
+        assert reader.call("list_tasks", {})["tasks"][0]["project_name"] == "business"
+        assert not (reader.directory / "retrieval").exists()
+        reader.call("read_task", {"task_id": "fixture"})
+        assert harness.get(record["id"])["progress"]["read"] > 0
+        await asyncio.gather(*list(scheduler._running.values()))
+
+    asyncio.run(drive())

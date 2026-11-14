@@ -233,14 +233,18 @@ def build_snapshot(
     task_ids: list[str] | None = None,
     task_records: list[Task] | None = None,
     log_limits: dict[str, int] | None = None,
+    end_day: str | None = None,
 ) -> dict[str, Any]:
     try:
         zone = ZoneInfo(timezone_name)
         selected = date.fromisoformat(day)
+        last = date.fromisoformat(end_day) if end_day else selected
+        if last < selected:
+            raise ValueError("结束日期早于开始日期")
     except (ValueError, ZoneInfoNotFoundError) as error:
         raise ValueError("日期或时区无效") from error
     start = datetime.combine(selected, time.min, zone).astimezone(timezone.utc)
-    end = datetime.combine(selected + timedelta(days=1), time.min, zone).astimezone(
+    end = datetime.combine(last + timedelta(days=1), time.min, zone).astimezone(
         timezone.utc
     )
     observed_now = datetime.now(timezone.utc)

@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 from typing import Any, TYPE_CHECKING
 
-from coderfleet.server.models import Task
+from coderfleet.server.models import Task, now_iso
 from coderfleet.server.platform_activity import build_snapshot, _instant, _redact
 from coderfleet.config import load_config
 
@@ -36,10 +36,17 @@ def make_catalog(
     zone: str,
     projects: list[str] | None,
     as_of: str | None = None,
+    end_day: str | None = None,
 ) -> dict[str, Any]:
     # task_ids=[] validates scope/time and reads zero execution logs.
     base = build_snapshot(
-        scheduler.workspace_dir, day, zone, projects, as_of=as_of, task_ids=[]
+        scheduler.workspace_dir,
+        day,
+        zone,
+        projects,
+        as_of=as_of,
+        task_ids=[],
+        end_day=end_day,
     )
     start, cutoff = (_instant(base["window"][key]) for key in ("start", "as_of"))
     secrets = _secrets(scheduler.workspace_dir)
@@ -102,6 +109,8 @@ def make_catalog(
         projects=sorted({t["project_name"] for t in tasks}),
         mode="retrieval",
         task_records=records,
+        start_date=day,
+        end_date=end_day or day,
     )
     base["coverage"]["tasks"] = len(tasks)
     base.pop("fingerprint", None)
@@ -205,7 +214,12 @@ class PlatformReader:
 
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier):
             raise ValueError("无效 Task 标识")
-        path = self.directory / "retrieval" / f"{identifier}.json"
+        path = (
+            self.directory
+            / "retrieval"
+            / self.catalog.get("cache_namespace", "")
+            / f"{identifier}.json"
+        )
         if not path.exists():
             snap = build_snapshot(
                 self.scheduler.workspace_dir,
@@ -213,6 +227,7 @@ class PlatformReader:
                 self.catalog["timezone"],
                 None,
                 as_of=self.catalog["window"]["as_of"],
+                end_day=self.catalog.get("end_date"),
                 task_ids=[identifier],
                 task_records=[
                     Task.model_validate(
@@ -224,6 +239,10 @@ class PlatformReader:
                 },
             )
             for row in snap["activities"]:
+                if self.catalog.get("cache_namespace"):
+                    row["id"] = (
+                        "period:" + self.catalog["cache_namespace"] + ":" + row["id"]
+                    )
                 row["needs_answer"] = self.catalog["task_records"][identifier][
                     "needs_answer"
                 ]
@@ -309,8 +328,33 @@ class PlatformReader:
             "source_ids": [row["id"]],
         }
 
+    def _select_period(self, start_date: str, end_date: str) -> dict[str, Any]:
+        from coderfleet.server.platform_agent import _write
+
+        catalog = make_catalog(
+            self.scheduler,
+            start_date,
+            self.catalog["timezone"],
+            self.record["scope"]["projects"],
+            as_of=now_iso(),
+            end_day=end_date,
+        )
+        catalog["cache_namespace"] = catalog["fingerprint"][:16]
+        _write(self.directory / "catalog.json", catalog)
+        self.catalog = catalog
+        self.tasks = {t["id"]: t for t in catalog["tasks"]}
+        return {
+            k: v
+            for k, v in catalog.items()
+            if k not in {"tasks", "activities", "task_records"}
+        }
+
     def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
+            if name == "select_period":
+                return self._select_period(
+                    args.get("start_date", ""), args.get("end_date", "")
+                )
             if (
                 name not in {"catalog", "list_tasks", "get_task"}
                 and self._stop_for_budget()
@@ -335,10 +379,35 @@ class PlatformReader:
                 if not project or t["project_name"] == project
             ]
             if name == "catalog":
+                from datetime import datetime, timedelta
+                from zoneinfo import ZoneInfo
+
+                current = datetime.fromisoformat(
+                    self.record.get("created", self.catalog["window"]["as_of"])
+                ).astimezone(ZoneInfo(self.catalog["timezone"]))
+                monday = current.date() - timedelta(days=current.weekday())
+                suggestions = {
+                    "this_week": {
+                        "start_date": monday.isoformat(),
+                        "end_date": (monday + timedelta(days=6)).isoformat(),
+                    },
+                    "last_week": {
+                        "start_date": (monday - timedelta(days=7)).isoformat(),
+                        "end_date": (monday - timedelta(days=1)).isoformat(),
+                    },
+                    "this_month": {
+                        "start_date": current.date().replace(day=1).isoformat(),
+                        "end_date": current.date().isoformat(),
+                    },
+                }
                 return {
-                    k: v
-                    for k, v in self.catalog.items()
-                    if k not in {"tasks", "activities", "task_records"}
+                    "current_time": current.isoformat(),
+                    "suggested_periods": suggestions,
+                    **{
+                        k: v
+                        for k, v in self.catalog.items()
+                        if k not in {"tasks", "activities", "task_records"}
+                    },
                 }
             if name == "read_reply":
                 return self._reply(args.get("run_id", ""), offset)

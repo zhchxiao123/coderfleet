@@ -1,5 +1,6 @@
 // ── 页面切换 ──────────────────────────────────────────────
 function showPage(name) {
+  if(name!=='digest'&&typeof PlatformAgent!=='undefined')PlatformAgent.deactivate();
   currentPage = name;
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));

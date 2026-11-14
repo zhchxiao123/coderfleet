@@ -95,3 +95,28 @@ def failed_output(
         message += f"（已读取 {coverage['read']}/{coverage['total']} 条活动）"
     message += "。可新建对话缩小项目范围；系统不会自动重放模型调用。"
     return {"failure_reason": reason, "error": message, "coverage": coverage}
+
+
+def resolve_citations(ids: Any, sources: dict[str, Any]) -> tuple[list[str], int]:
+    """Accept chunk IDs or aliases that expand only into delivered evidence."""
+    if not isinstance(ids, list):
+        return [], 1
+    accepted: list[str] = []
+    unresolved = 0
+    for item in ids:
+        if not isinstance(item, str) or not item:
+            unresolved += 1
+            continue
+        matches = (
+            [item]
+            if item in sources
+            else [
+                key
+                for key, row in sources.items()
+                if item in {row.get("task_id"), row.get("conversation_id")}
+            ]
+        )
+        if not matches:
+            unresolved += 1
+        accepted.extend(matches)
+    return list(dict.fromkeys(accepted)), unresolved

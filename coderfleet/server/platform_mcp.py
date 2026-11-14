@@ -89,6 +89,13 @@ def build_platform_mcp(scheduler: Scheduler) -> FastMCP:
         return await call("catalog", {})
 
     @server.tool()
+    async def select_period(start_date: str, end_date: str) -> dict[str, Any]:
+        """Select/refresh inclusive ISO dates for this question (week/month/custom range). Keeps authorized projects unchanged; freezes a fresh view at selection time, never loads chat logs. Call before weekly or monthly retrieval."""
+        return await call(
+            "select_period", {"start_date": start_date, "end_date": end_date}
+        )
+
+    @server.tool()
     async def list_tasks(
         query: str = "", project: str = "", offset: int = 0, limit: int = 20
     ) -> dict[str, Any]:

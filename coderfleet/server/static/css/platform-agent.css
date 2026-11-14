@@ -89,3 +89,9 @@
  .layout:has(#page-digest.active) .sidebar .brand-text span,.layout:has(#page-digest.active) .sidebar .sidebar-footer{display:none}
  .layout:has(#page-digest.active) .sidebar .logo{margin:0 0 6px;padding:0}
 }
+
+.platform-process { margin: 0 0 1rem; min-width: 0; }
+.platform-process > summary { color: var(--text-muted); cursor: pointer; padding: .5rem 0; }
+.platform-process-body { min-width: 0; overflow-wrap: anywhere; }
+.platform-process-body .chat-log { max-width: none; padding: 0; }
+.platform-process-body .timeline-node { max-width: 100%; }

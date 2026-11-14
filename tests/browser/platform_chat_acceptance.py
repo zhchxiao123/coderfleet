@@ -13,7 +13,7 @@ import socket
 
 import websockets
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -45,14 +45,25 @@ class Runtime(FakeRuntime):
         request = json.loads(
             next((workspace / ".coderfleet-tasks").glob("*.sdk.json")).read_text()
         )
-        if request.get('platform_snapshot'):
-            snapshot=json.loads(Path(next(src for src,dst in spec.mounts if dst=='/platform-data/snapshot.json:ro')).read_text())
-            ids=[row['id']for row in snapshot['activities']]
+        if request.get("platform_snapshot"):
+            snapshot = json.loads(
+                Path(
+                    next(
+                        src
+                        for src, dst in spec.mounts
+                        if dst == "/platform-data/snapshot.json:ro"
+                    )
+                ).read_text()
+            )
+            ids = [row["id"] for row in snapshot["activities"]]
         else:
             from coderfleet.server.platform_retrieval import PlatformReader
-            reader=PlatformReader(scheduler,workspace.parent.name)
-            for task in reader.call('list_tasks',{})['tasks']:reader.call('read_task',{'task_id':task['id']})
-            snapshot=reader.catalog;ids=list(reader.sources())
+
+            reader = PlatformReader(scheduler, workspace.parent.name)
+            for task in reader.call("list_tasks", {})["tasks"]:
+                reader.call("read_task", {"task_id": task["id"]})
+            snapshot = reader.catalog
+            ids = list(reader.sources())
         if self.fail_next:
             self.fail_next = False
             (
@@ -160,6 +171,63 @@ async def index():
 @app.get("/api/tasks/{identifier}/logs")
 async def logs(identifier: str):
     return PlainTextResponse(scheduler.get_log_path(identifier).read_text())
+
+
+@app.get("/api/tasks/{identifier}/logs/stream")
+async def stream_logs(identifier: str):
+    async def events():
+        # Real renderer events, over actual EventSource, before final answer.
+        values = [
+            {
+                "type": "system",
+                "subtype": "coderfleet_backend",
+                "execution_backend": "sdk",
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "process-thinking",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "正在检查本周资料的范围与来源。",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "process-tool",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "process-read",
+                            "name": "mcp__fleet__read_task",
+                            "input": {"task_id": "fixture-source"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "process-read",
+                            "content": "已读取公开问答",
+                        }
+                    ]
+                },
+            },
+        ]
+        for value in values:
+            yield "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
+            await asyncio.sleep(0.05)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 class CDP:
@@ -276,6 +344,11 @@ async def main():
             assert await cdp.evaluate(
                 "document.querySelectorAll('.platform-user').length===1 && !document.querySelector('#platform-question').value"
             )
+            await cdp.evaluate("document.querySelector('.platform-process').open=true")
+            await cdp.until(
+                "document.querySelector('.platform-process').textContent.includes('正在检查本周资料') && document.querySelector('.platform-process').textContent.includes('read_task')"
+            )
+
             assert not await cdp.evaluate("!!window.XSS")
             assert not await cdp.evaluate(
                 "!!document.querySelector('#platform-result script,#platform-result img')"
@@ -284,7 +357,7 @@ async def main():
                 "document.querySelector('#platform-question').value='那应该先处理哪个？';document.querySelector('#platform-question').dispatchEvent(new Event('input'));document.querySelector('#platform-question').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))"
             )
             await cdp.until(
-                "document.querySelectorAll('.platform-turn .markdown-body').length===2"
+                "document.querySelectorAll('.platform-turn .platform-answer > .markdown-body').length===2"
             )
             assert await cdp.evaluate(
                 "document.querySelectorAll('.platform-user').length===2 && document.querySelector('#platform-date').disabled"
@@ -332,7 +405,7 @@ async def main():
             ), "uncertain request must protect the original draft"
             await cdp.call("Page.reload")
             await cdp.until(
-                "document.querySelectorAll('.platform-turn .markdown-body').length===3"
+                "document.querySelectorAll('.platform-turn .platform-answer > .markdown-body').length===3"
             )
             assert not await cdp.evaluate(
                 "!!localStorage.getItem('cf-platform-pending-v1')"
@@ -352,7 +425,7 @@ async def main():
                 "document.querySelector('#platform-form').requestSubmit()"
             )
             await cdp.until(
-                "document.querySelector('.platform-turn .markdown-body') && !localStorage.getItem('cf-platform-pending-v1')"
+                "document.querySelector('.platform-turn .platform-answer > .markdown-body') && !localStorage.getItem('cf-platform-pending-v1')"
             )
             assert len(list((ROOT / "platform/runs").glob("*/run.json"))) == 4
             # An acknowledged POST is recoverable even if transcript loading fails.
@@ -369,7 +442,9 @@ async def main():
             await cdp.until(
                 "document.querySelector('.platform-user p')?.textContent==='accepted then transcript load fails'"
             )
-            await cdp.until("!!document.querySelector('.platform-turn .markdown-body')")
+            await cdp.until(
+                "!!document.querySelector('.platform-turn .platform-answer > .markdown-body')"
+            )
             assert len(list((ROOT / "platform/runs").glob("*/run.json"))) == 5
             # A hidden new-chat draft cannot override the current conversation's daily scope.
             await cdp.evaluate(
@@ -386,7 +461,7 @@ async def main():
                 "daily shortcut silently switched to a hidden draft scope"
             )
             await cdp.until(
-                "document.querySelector('.platform-turn .markdown-body h2')?.textContent==='今日进展'"
+                "document.querySelector('.platform-turn .platform-answer > .markdown-body h2')?.textContent==='今日进展'"
             )
             assert await cdp.evaluate(
                 "JSON.parse(localStorage.getItem('cf-platform-drafts-v2')).new.question==='keep this new-chat draft'"
@@ -481,6 +556,22 @@ async def main():
                 "document.querySelector('#platform-result')?.textContent.includes('24 轮')"
             )
             assert len(list((ROOT / "platform/runs").glob("*/run.json"))) == 7
+            # Completed history must reconnect without Task polling; leaving the page revokes it.
+            await cdp.evaluate(
+                "window.savedEventSource=window.EventSource;window.fixtureStreams=[];window.EventSource=class {constructor(url){this.url=url;window.fixtureStreams.push(this);}close(){this.closed=true;}};PlatformProcess.release();window.processFixture=PlatformProcess.view({id:'retry-fixture',task_id:'fixture-process',answer_markdown:''},false);document.body.append(window.processFixture);window.processFixture.open=true;"
+            )
+            await cdp.until("window.fixtureStreams.length===1")
+            await cdp.evaluate("window.fixtureStreams[0].onerror()")
+            await cdp.until("window.fixtureStreams.length===2")
+            await cdp.evaluate(
+                "PlatformAgent.deactivate();currentPage='tasks';window.offPageView=PlatformProcess.view({id:'late-fixture',task_id:'late-process'},true)"
+            )
+            assert await cdp.evaluate(
+                "window.fixtureStreams[1].closed && window.offPageView===null && window.fixtureStreams.length===2"
+            )
+            await cdp.evaluate(
+                "window.EventSource=window.savedEventSource;window.processFixture.remove();currentPage='digest'"
+            )
             failures = [
                 event
                 for event in cdp.events
@@ -491,6 +582,8 @@ async def main():
                 json.dumps(
                     {
                         "chat_layout": True,
+                        "shared_chat_renderer_thinking_and_tools": True,
+                        "history_sse_reconnect_and_navigation_cleanup": True,
                         "live_progress_and_limit_error_no_replay": True,
                         "real_followup_context": True,
                         "sources": True,

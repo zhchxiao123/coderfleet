@@ -602,17 +602,15 @@ class PlatformHarness:
             or len(result["answer_markdown"]) > 100000
         ):
             return {**response, "status": "error", "error": "缺少有效的结构化回答"}
-        ids = result.get("source_ids")
-        if not isinstance(ids, list) or not all(
-            isinstance(i, str) and i in sources for i in ids
-        ):
-            return {
-                **response,
-                "status": "error",
-                "error": "回答引用了本轮未检索的来源",
-            }
+        from coderfleet.server.platform_output import resolve_citations
+
+        ids, unresolved = resolve_citations(result.get("source_ids"), sources)
         status = reader.status()
         warnings = list(status["warnings"])
+        if unresolved:
+            warnings.append(
+                f"{unresolved} 条引用未匹配已读资料；回答已保留，仅展示核实过的来源"
+            )
         if status.get("read_limit_reached"):
             warnings.append("检索达到轮次预算，已用现有资料作部分回答")
         answer = {
@@ -691,6 +689,13 @@ class PlatformHarness:
                 coverage={"read": 0, "total": 0, "complete": True},
             )
             return response
+        if record.get("mode") == "retrieval" and (directory / "catalog.json").exists():
+            catalog = json.loads((directory / "catalog.json").read_text())
+            response["manifest"] = {
+                k: v
+                for k, v in catalog.items()
+                if k not in {"tasks", "activities", "task_records"}
+            }
         cache = directory / "result.json"
         if cache.exists():
             return {**response, **json.loads(cache.read_text())}
@@ -717,7 +722,7 @@ class PlatformHarness:
         if task.status != TaskStatus.done:
             from coderfleet.server.platform_output import read_progress, failed_output
 
-            fingerprint = record.get("manifest", {}).get("fingerprint", "")
+            fingerprint = (response.get("manifest") or {}).get("fingerprint", "")
             response["progress"] = read_progress(directory, task.id, fingerprint)
             if task.status == TaskStatus.failed:
                 response.update(
