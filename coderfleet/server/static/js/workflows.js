@@ -105,9 +105,11 @@ function renderPipelineList(pipelines, tasks) {
       pTasks.some(t => t.status === 'failed' || t.status === 'killed') ? 'failed' : 'running'
     );
     const dot = status === 'running'   ? `<span class="status-dot running" style="font-size:10px">运行中</span>`
+              : status === 'waiting_approval' ? `<span style="color:var(--amber);font-size:10px">待审批</span>`
               : status === 'succeeded' ? `<span class="status-dot done"    style="font-size:10px">完成</span>`
               : status === 'failed'    ? `<span class="status-dot failed"  style="font-size:10px">失败</span>`
               : status === 'partial'   ? `<span class="status-dot failed"  style="font-size:10px">部分完成</span>`
+              : status === 'cancelled' ? `<span style="color:var(--text-3);font-size:10px">已取消</span>`
               : `<span style="color:var(--text-3);font-size:10px">待执行</span>`;
 
     const isActive = activePipelineId === p.id;
@@ -827,8 +829,8 @@ function switchWfTab(tab) {
   document.getElementById('wf-tab-templates').classList.toggle('active', tab === 'templates');
   document.getElementById('wf-panel-runs').style.display = tab === 'runs' ? '' : 'none';
   document.getElementById('wf-panel-templates').style.display = tab === 'templates' ? '' : 'none';
-  if (tab === 'templates') loadTemplates();
-  else loadWorkflows();
+  if (tab === 'templates') return loadTemplates();
+  else return loadWorkflows();
 }
 
 // ══════════════════════════════════════════════════════════════

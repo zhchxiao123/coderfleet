@@ -213,7 +213,7 @@ function renderBoardCard(card, taskMap) {
   const project = card.project_name ? `<span class="board-chip">${esc(card.project_name)}</span>` : '';
   const taskState = latest ? `<span class="status-dot ${latest.status}">${statusLabel(latest.status)}</span>` : '<span class="text-muted text-sm">未提交任务</span>';
   return `
-    <article class="kanban-card">
+    <article class="kanban-card" data-board-card="${esc(card.id)}" tabindex="-1">
       <div class="kanban-card-top">
         <div class="kanban-card-title">${esc(card.title)}</div>
         <div class="kanban-card-menu">

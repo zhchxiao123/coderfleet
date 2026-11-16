@@ -62,6 +62,7 @@ Containers join an `internal: true` Docker network; they cannot reach the public
 
 ### Frontend conventions
 
+- Project Q&A is the default entry point. A user can ask, follow up, or develop in a project without a BoardCard, Workflow, or acceptance form. Workbench and platform-assistant views enhance this path; they must not replace it or change the owning Conversation/session.
 - Global mutable state lives in `state.js` (e.g. `activeConversationId`, `chatNewSessionProject`, `projectsCache`).
 - `conversationBelongsToProject` and `taskBelongsToProject` (in `projects.js`) are used everywhere for sidebar grouping — if `project_name` is present, it takes precedence over path matching.
 - SSE (`EventSource`) is used for real-time log streaming; WebSocket for the terminal.

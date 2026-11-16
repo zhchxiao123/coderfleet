@@ -1,13 +1,18 @@
 // ── 页面切换 ──────────────────────────────────────────────
 function showPage(name) {
+  const previousPage = currentPage;
+  if (typeof Workbench !== 'undefined' && name !== 'work' && name !== 'inbox') Workbench.deactivate();
+  if (previousPage === 'chat' && name !== 'chat') stopChatFollow();
   if(name!=='digest'&&typeof PlatformAgent!=='undefined')PlatformAgent.deactivate();
   currentPage = name;
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelector(`[data-page="${name}"]`).classList.add('active');
+  const tools = document.querySelector(`[data-page="${name}"]`).closest?.('details');
+  if (tools) tools.open = true;
 
-  const titles = { chat: '任务开发', tasks: '任务监控', boards: '开发看板', workflows: '工作流', projects: '项目管理', accounts: '账号状态', schedules: '定时计划', digest: '平台助手', settings: '系统设置' };
+  const titles = { chat: 'AI 对话', inbox: '今日 / 待处理', work: '工作', tasks: '任务监控', boards: '开发看板', workflows: '自动化', projects: '项目管理', accounts: '账号资源', schedules: '定时计划', digest: '平台助手', settings: '系统设置' };
   document.getElementById('page-title').textContent = titles[name] || name;
 
   // 顶部 Tab 只在任务开发页展示，用于多任务链切换。
@@ -20,23 +25,24 @@ function showPage(name) {
   if (name !== 'chat') closeBottomTerminal(false);
 
   if (name === 'chat') {
-    stopChatFollow();
-    activeTabId = 'chat';
-    activeConversationId = null;
-    currentChatTaskId = null;
     renderTopbarTabs();
+    // Returning from a work view keeps the same conversation and visible draft.
+    // A new project chat remains an explicit per-project '+' action.
+    if (!activeConversationId && document.getElementById('chat-input')) return loadConversations(false);
   }
 
-  if (name === 'workflows') loadWorkflows();
-  else if (name === 'boards') loadBoards();
-  else if (name === 'schedules') initSchedulesPage();
-  else if (name === 'digest') initPlatformAgent();
-  else if (name === 'settings') loadSettings();
-  else refreshCurrent();
+  if (name === 'work' || name === 'inbox') return Workbench.load(name);
+  if (name === 'workflows') return switchWfTab(wfActiveTab);
+  else if (name === 'boards') return loadBoards();
+  else if (name === 'schedules') return initSchedulesPage();
+  else if (name === 'digest') return initPlatformAgent();
+  else if (name === 'settings') return loadSettings();
+  else return refreshCurrent();
 }
 
 function refreshCurrent() {
-  if (currentPage === 'chat') loadConversations();
+  if (currentPage === 'chat') return loadConversations();
+  else if (currentPage === 'work' || currentPage === 'inbox') return Workbench.load(currentPage);
   else if (currentPage === 'tasks') loadTasks();
   else if (currentPage === 'boards') loadBoards();
   else if (currentPage === 'workflows') loadWorkflows();

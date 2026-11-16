@@ -21,6 +21,7 @@ let chatFollowMode = false;
 let currentChatTaskId = null;
 let chatRenderer = null;
 let chatNewSessionProject = '';
+const chatDrafts = new Map(); // Unsent text belongs to a conversation or a project's new-chat composer.
 let currentChatProjectName = '';
 let pendingImages = [];
 let chatUploadingImages = 0;

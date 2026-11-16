@@ -27,6 +27,7 @@ from coderfleet.continuation_cmds import continuation_group
 from coderfleet.schedule_cmds import schedule_group, cmd_digest
 from coderfleet.platform_cmds import platform_group
 from coderfleet.board_cmds import board_group, card_group
+from coderfleet.work_cmds import work_group
 from coderfleet.workflow_cmds import workflow_group
 from coderfleet.config_cmds import account_group, config_group, project_group
 from coderfleet.telegram_cmds import telegram_group
@@ -43,6 +44,7 @@ main.add_command(cmd_digest)
 main.add_command(platform_group)
 main.add_command(board_group)
 main.add_command(card_group)
+main.add_command(work_group)
 main.add_command(workflow_group)
 main.add_command(account_group)
 main.add_command(project_group)

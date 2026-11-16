@@ -74,16 +74,7 @@ async function loadConversations(renderWorkspace = true, refreshConversationId =
         const taskId = activeConversationId.replace('task-', '');
         const task = tasks.find(t => t.id === taskId);
         if (task) {
-          const virtualConv = {
-            id: `task-${task.id}`,
-            name: task.prompt,
-            project: task.project,
-            project_name: projects.find(p => taskBelongsToProject(task, p))?.name || '未配置项目',
-            account: task.account,
-            updated: task.created,
-            isOneOff: true
-          };
-          renderChatWorkspace(virtualConv);
+          renderChatWorkspace(virtualChatForTask(task));
           syncBottomTerminalProjectFromContext();
         } else {
           startNewChat();
@@ -821,14 +812,52 @@ function toggleChatProjectItems(encodedProjectName) {
 }
 
 // 选择会话
+function prepareChatDraftSwitch(conversationId, projectName = '') {
+  const from = activeConversationId || `new:${chatNewSessionProject}`;
+  const to = conversationId || `new:${projectName}`;
+  const input = document.getElementById('chat-input');
+  if (from === to || !input) return;
+  chatDrafts.set(from, input.value);
+  input.value = chatDrafts.get(to) || '';
+}
+
+function virtualChatForTask(task) {
+  return {
+    id: `task-${task.id}`, name: task.prompt, project: task.project,
+    project_name: task.project_name || projectsCache.find(project => taskBelongsToProject(task, project))?.name || '未配置项目',
+    account: task.account, updated: task.finished || task.created, isOneOff: true,
+  };
+}
+
 async function selectConversation(convId) {
   stopChatFollow();
+  prepareChatDraftSwitch(convId);
   if (activeConversationId !== convId) pendingImages = [];
   activeConversationId = convId;
   try { sessionStorage.setItem('coderfleet.activeConvId', convId || ''); } catch (_) {}
   activeTabId = upsertConversationTab(convId);
   renderTopbarTabs();
   rerenderChatProjectList();
+
+  if (convId.startsWith('task-')) {
+    const taskId = convId.slice(5);
+    try {
+      const response = await fetch(`${API}/api/tasks/${encodeURIComponent(taskId)}`);
+      const task = await response.json();
+      if (!response.ok) throw new Error(task.detail || '原任务不可用');
+      if (activeConversationId !== convId) return;
+      tasksCache = [...tasksCache.filter(item => item.id !== task.id), task];
+      updateTaskExecutionMetadata([task]);
+      await renderChatWorkspace(virtualChatForTask(task));
+      syncBottomTerminalProjectFromContext();
+    } catch (error) {
+      if (activeConversationId === convId) {
+        const workspace = document.getElementById('chat-workspace');
+        if (workspace) workspace.innerHTML = `<div class="empty">无法打开原任务：${esc(error.message)}</div>`;
+      }
+    }
+    return;
+  }
 
   // 一次性任务 / 缓存里还没有这个会话（比如刚创建）：退回全量刷新一次。
   const conv = !convId.startsWith('task-') && chatConversationsList.find(c => c.id === convId);
@@ -852,6 +881,7 @@ async function selectConversation(convId) {
 // 开启新会话
 function startNewChat(options = {}) {
   stopChatFollow();
+  prepareChatDraftSwitch(null, options.projectName || '');
   activeConversationId = null;
   try { sessionStorage.removeItem('coderfleet.activeConvId'); } catch (_) {}
   currentChatTaskId = null;
@@ -905,7 +935,7 @@ async function renderEmptyChatState() {
     <div class="chat-viewport-wrap">
       <div class="chat-main-viewport" id="chat-viewport">
         <div id="chat-content">
-          <div class="empty" style="margin-top: 60px;">输入第一条指令，开始与 AI 结对开发<br><span style="font-size:12px;color:var(--text-3)">连续对话会以任务链形式共享上下文；需要并行/条件编排请用「工作流」</span></div>
+          <div class="empty" style="margin-top: 60px;">直接提问，或描述你想完成的开发工作<br><span style="font-size:12px;color:var(--text-3)">在当前项目中连续对话，无需先创建工作卡片</span></div>
         </div>
       </div>
       <button id="scroll-to-bottom-btn" class="scroll-to-bottom-btn" onclick="scrollToBottomAndResume()" title="跳到底部，继续跟随输出">

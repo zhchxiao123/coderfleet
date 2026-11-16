@@ -289,6 +289,8 @@ app.add_middleware(AuthMiddleware, api_key=_api_key)
 
 from coderfleet.server.platform_routes import build_platform_router
 app.include_router(build_platform_router(lambda: scheduler))
+from coderfleet.server.workbench_routes import build_workbench_router
+app.include_router(build_workbench_router(lambda: scheduler))
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

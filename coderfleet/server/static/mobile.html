@@ -732,6 +732,13 @@
 </head>
 <body>
 
+<link rel="stylesheet" href="/static/css/workbench.css?v=__BUILD__">
+<dialog class="wb-mobile-dialog" id="mobile-workbench" aria-labelledby="mobile-workbench-title">
+  <header class="wb-page-head"><div><h1 id="mobile-workbench-title">工作与待处理</h1><p>查看进展，回到原对话继续。</p></div>
+    <button type="button" class="wb-button" onclick="document.getElementById('mobile-workbench').close()">返回</button></header>
+  <div id="mobile-workbench-content"></div>
+</dialog>
+
 <!-- ── 会话列表 ──────────────────────────────────────── -->
 <div class="view" id="v-list">
   <div class="hdr">
@@ -739,6 +746,7 @@
       <div class="hdr-title">CoderFleet</div>
       <div class="hdr-sub" id="health-lbl">连接中…</div>
     </div>
+    <button class="mobile-sort-btn" type="button" onclick="openMobileWork()" title="工作与待处理">工作</button>
     <button class="mobile-sort-btn" id="mobile-sort-btn" onclick="cycleMobileSort()" title="切换排序方式">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
         <line x1="21" y1="6" x2="3" y2="6"/>
@@ -910,11 +918,13 @@
 <!-- 依赖脚本必须在主逻辑 script 之前加载（移动端 giant inline script 在此之后），否则 renderPendingPreviews 等共享函数未定义会导致发送/上传时崩溃 -->
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/js/utils.js?v=__BUILD__"></script>
+<script src="/static/js/workbench.js?v=__BUILD__"></script>
+<script src="/static/js/workbench-mobile.js?v=__BUILD__"></script>
 <script src="/static/js/shared/project-utils.js?v=20260527-shared"></script>
 <script src="/static/js/shared/image-upload.js?v=20260528-imagefix"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
-<script src="/static/js/renderer.js?v=__BUILD__-7"></script>
+<script src="/static/js/renderer.js?v=__BUILD__-8"></script>
 <script src="/static/js/sdk-task-controls.js?v=__BUILD__-6"></script>
 
 <script>
@@ -923,6 +933,7 @@ let projects  = [];
 let convs     = [];
 let tasks     = [];
 let activeConv    = null;   // Conversation object (ongoing chat)
+const mobileChatDrafts = new Map();
 let mobileInheritedTasks = [];
 let pendingProj   = null;   // Project selected for new chat (before first send)
 let liveStream    = null;   // Active EventSource
@@ -1056,6 +1067,7 @@ async function refresh() {
 }
 
 async function bgRefresh() {
+  if (typeof mobileWorkView !== 'undefined' && document.getElementById('mobile-workbench')?.open) mobileWorkView?.refresh(true);
   try {
     [convs, tasks] = await Promise.all([
       api('/api/conversations'),
@@ -1380,7 +1392,19 @@ function toggleProjectItems(encodedName) {
 }
 
 // ── Open conversation ─────────────────────────────────────
+function prepareMobileDraftSwitch(conversationId, projectName = '') {
+  const from = activeConv?.id || `new:${pendingProj?.name || ''}`;
+  const to = conversationId || `new:${projectName}`;
+  const input = document.getElementById('ta');
+  if (from === to || !input) return;
+  mobileChatDrafts.set(from, input.value);
+  input.value = mobileChatDrafts.get(to) || '';
+  pendingImages = [];
+  renderImagePreviews();
+}
+
 async function openConv(id) {
+  prepareMobileDraftSwitch(id);
   activeConv  = convs.find(c => c.id === id) || null;
   mobileInheritedTasks = [];
   document.getElementById('mobile-fork-origin')?.remove();
@@ -1418,6 +1442,7 @@ async function openConv(id) {
 }
 
 function openOneOff(id) {
+  prepareMobileDraftSwitch(`task-${id}`);
   mobileInheritedTasks = [];
   document.getElementById('mobile-fork-origin')?.remove();
   const task = tasks.find(t => t.id === id) || null;
@@ -2008,6 +2033,7 @@ function renderProjSheet(query) {
 }
 
 function startNew(proj) {
+  prepareMobileDraftSwitch(null, proj.name);
   mobileInheritedTasks = [];
   document.getElementById('mobile-fork-origin')?.remove();
   closeSheet();

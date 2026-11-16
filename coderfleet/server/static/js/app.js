@@ -13,6 +13,7 @@ checkHealth();
 refreshGlobalCaches();
 loadConversations();
 loadAccountOptions();
+if (typeof Workbench !== 'undefined') Workbench.openFromUrl();
 window.addEventListener('resize', resizeBottomTerminal);
 window.addEventListener('beforeunload', disconnectAllBottomTerminals);
 
@@ -21,6 +22,7 @@ setInterval(() => {
   checkHealth();
   if (currentPage === 'chat') pollChatHeartbeat();
   if (currentPage === 'tasks') loadTasks();
+  if (currentPage === 'work' || currentPage === 'inbox') Workbench.load(currentPage, true);
   if (currentPage === 'accounts') loadAccounts();
   if (currentPage === 'workflows' && wfActiveTab === 'runs') loadWorkflows();
 }, 5000);
