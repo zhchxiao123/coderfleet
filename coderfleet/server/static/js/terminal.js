@@ -477,6 +477,9 @@ function renderTopbarTabs() {
 
 // 切换 Tab
 function switchTab(tabId) {
+  if (tabId === 'chat' || tabId.startsWith('conversation-')) {
+    prepareChatDraftSwitch(tabId === 'chat' ? null : conversationIdFromTabId(tabId), chatNewSessionProject);
+  }
   activeTabId = tabId;
   renderTopbarTabs();
 
@@ -495,7 +498,7 @@ function switchTab(tabId) {
     document.getElementById('page-chat').classList.add('active');
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('[data-page="chat"]').classList.add('active');
-    document.getElementById('page-title').textContent = '任务开发';
+    document.getElementById('page-title').textContent = 'AI 对话';
     loadConversations();
   } else if (tabId.startsWith('conversation-')) {
     stopChatFollow();
@@ -504,7 +507,7 @@ function switchTab(tabId) {
     document.getElementById('page-chat').classList.add('active');
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('[data-page="chat"]').classList.add('active');
-    document.getElementById('page-title').textContent = '任务开发';
+    document.getElementById('page-title').textContent = 'AI 对话';
     loadConversations();
   }
 }

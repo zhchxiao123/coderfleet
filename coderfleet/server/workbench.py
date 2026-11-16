@@ -106,13 +106,13 @@ def _apply_cards(item: WorkItem, cards: list[BoardCard]) -> None:
     item.project_names = sorted(set(item.project_names + [card.project_name for card in cards if card.project_name]))
     if item.status not in ("running", "pending", "scheduled", "waiting_approval"):
         item.status = primary.status.value
-        for card in cards:
-            if card.status.value in ("review", "blocked"):
-                kind: Literal["review", "blocked"] = "review" if card.status.value == "review" else "blocked"
-                item.attention.append(WorkAttention(
-                    kind=kind, label="待验收" if kind == "review" else "工作受阻", detail=card.title,
-                    task_id=item.task_id, card_id=card.id, board_id=card.board_id,
-                ))
+    for card in cards:
+        if card.status.value in ("review", "blocked"):
+            kind: Literal["review", "blocked"] = "review" if card.status.value == "review" else "blocked"
+            item.attention.append(WorkAttention(
+                kind=kind, label="待验收" if kind == "review" else "工作受阻", detail=card.title,
+                task_id=item.task_id, card_id=card.id, board_id=card.board_id,
+            ))
 
 
 def read_workbench(

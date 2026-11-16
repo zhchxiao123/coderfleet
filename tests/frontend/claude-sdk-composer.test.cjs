@@ -35,6 +35,30 @@ function desktop() {
   return {context,nodes,calls,loadConversations,selectConversation};
 }
 
+test('topbar conversation switches isolate drafts and discard attachments from the previous chat', async () => {
+  const {context,nodes,selectConversation} = desktop();
+  context.document.querySelectorAll = () => [];
+  context.document.querySelector = () => new Element();
+  context.window = {addEventListener() {}};
+  for (const id of ['topbar-tabs','page-chat','page-title']) nodes.set(id,new Element());
+  vm.runInContext(fs.readFileSync('coderfleet/server/static/js/terminal.js','utf8'),context);
+  context.renderTopbarTabs = () => {};
+  context.upsertConversationTab = id => 'conversation-'+id;
+  context.rerenderChatProjectList = () => {};
+  context.renderChatWorkspace = async () => {};
+  context.syncBottomTerminalProjectFromContext = () => {};
+  vm.runInContext("chatConversationsList=[{id:'conv-one'},{id:'conv-two'}];pendingImages=[{container_path:'/private/project-one.png'}]",context);
+  nodes.get('chat-input').value='project one draft';
+  context.switchTab('conversation-conv-two');
+  assert.equal(nodes.get('chat-input').value,'');
+  assert.equal(vm.runInContext('pendingImages.length',context),0);
+  nodes.get('chat-input').value='project two draft';
+  await selectConversation('conv-one');
+  assert.equal(nodes.get('chat-input').value,'project one draft');
+  context.switchTab('conversation-conv-two');
+  assert.equal(nodes.get('chat-input').value,'project two draft');
+});
+
 test('desktop supplementary send uses the actual desktop upload state', async () => {
   const {context,nodes,calls} = desktop();
   nodes.get('chat-input').value = '补充要求';
@@ -43,6 +67,26 @@ test('desktop supplementary send uses the actual desktop upload state', async ()
   assert.equal(calls.length,1,nodes.get('sdk-task-controls').children.at(-1).textContent);
   assert.equal(calls[0].url,'/api/tasks/task-one/messages');
   assert.equal(calls[0].body.text,'补充要求');
+  assert.equal(nodes.get('chat-input').value,'');
+});
+
+test('sending a restored project draft consumes it before the project starts another chat', async () => {
+  const {context,nodes,calls} = desktop();
+  Object.assign(context, {
+    showPage() {}, renderEmptyChatState() {}, syncBottomTerminalProjectFromContext() {},
+    upsertConversationTab: id => 'conversation-'+id, renderTopbarTabs() {}, _autoTitleConversation() {},
+    _appendOptimisticUserMessage: () => true,
+    fetch: async (url,options) => {
+      calls.push({url,body:JSON.parse(options.body)});
+      return {ok:true,json:async()=>({id:'first-task',conversation_id:'new-conv',status:'pending'})};
+    },
+  });
+  vm.runInContext("activeConversationId=null;chatNewSessionProject='P';currentChatTaskId=null;tasksCache=[];chatDrafts.set('new:P','restored project draft')",context);
+  nodes.get('chat-input').value='restored project draft';
+  await context.sendChatMessage();
+  assert.equal(calls[0].url,'/api/tasks');
+  assert.equal(nodes.get('chat-input').value,'');
+  context.startNewChat({projectName:'P'});
   assert.equal(nodes.get('chat-input').value,'');
 });
 
@@ -125,6 +169,42 @@ function mobile() {
   vm.runInContext(scripts.find(script=>script.includes('let projects  = []')),context,{filename:'mobile.html'});
   vm.runInContext(`activeConv={id:'conv-one'};tasks=[{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}];`,context);
   return {context,nodes,calls};
+}
+
+for (const surface of ['desktop','mobile']) {
+  test(`${surface} only consumes a cached live-message draft after an accepted receipt, even after switching chat`, async () => {
+    for (const accepted of [false,true]) {
+      const {context,nodes,selectConversation} = surface === 'desktop' ? desktop() : mobile();
+      let receipt;
+      context.fetch = (url,options) => options?.method === 'POST'
+        ? new Promise(resolve => { receipt = () => resolve({ok:accepted,status:503,json:async()=>accepted?{status:'accepted'}:{detail:'unconfirmed'}}); })
+        : Promise.resolve({ok:true,json:async()=>[]});
+      const input = nodes.get(surface === 'desktop' ? 'chat-input' : 'ta');
+      input.value='live draft';
+      context.renderImagePreviews = () => {};
+      let open;
+      if (surface === 'desktop') {
+        Object.assign(context,{upsertConversationTab:id=>id,renderTopbarTabs(){},rerenderChatProjectList(){},renderChatWorkspace:async()=>{},syncBottomTerminalProjectFromContext(){}});
+        vm.runInContext("chatConversationsList=[{id:'conv-one'},{id:'conv-two'}]",context);
+        open = selectConversation;
+      } else {
+        for (const id of ['chat-ttl','chat-sub']) nodes.set(id,new Element());
+        context.showChat = () => {};
+        context.syncMessages = () => {};
+        vm.runInContext("convs=[{id:'conv-one'},{id:'conv-two'}]",context);
+        open = context.openConv;
+      }
+      const send = surface === 'desktop' ? context.sendChatMessage() : context.send();
+      await new Promise(setImmediate);
+      await open('conv-two');
+      input.value='other chat draft';
+      receipt();
+      await send;
+      assert.equal(input.value,'other chat draft');
+      await open('conv-one');
+      assert.equal(input.value,accepted?'':'live draft');
+    }
+  });
 }
 
 test('mobile primary button sends live text, then becomes the native interrupt button', async () => {

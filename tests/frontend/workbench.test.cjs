@@ -52,6 +52,7 @@ test('opening a different project conversation keeps each unsent draft with its 
   const context = vm.createContext(sandbox);
   for (const file of ['state.js', 'chat.js']) vm.runInContext(fs.readFileSync('coderfleet/server/static/js/' + file, 'utf8'), context);
   context.rerenderChatProjectList = () => {};
+  context.renderImagePreviews = () => {};
   context.renderChatWorkspace = async () => {};
   vm.runInContext("activeConversationId='mobile';chatConversationsList=[{id:'mobile'},{id:'server'}];", context);
   await context.selectConversation('server');

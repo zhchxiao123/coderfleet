@@ -146,6 +146,26 @@ def test_workflow_approval_is_one_work_and_keeps_legacy_task_linkage(workspace: 
     assert sum(item["task_count"] for item in request("/api/workbench").json()["items"]) == 1
 
 
+def test_a_future_followup_does_not_hide_an_explicit_review(workspace: Scheduler) -> None:
+    conversation(workspace)
+    task(workspace)
+    Board(id="board-1", name="功能改造").save(workspace.boards_dir)
+    BoardCard(
+        id="card-1", board_id="board-1", title="分享页待验收", project_name="mobile",
+        conversation_id="conv-1", status="review",
+    ).save(workspace.board_cards_dir)
+    task(workspace, "tomorrow", status="scheduled", created="2026-11-15T10:00:00+00:00",
+         execute_at=(utc_now() + timedelta(days=1)).isoformat())
+
+    data = request("/api/workbench?view=review").json()
+
+    assert data["total"] == 1
+    assert data["items"][0]["status"] == "scheduled"
+    assert data["items"][0]["queued_count"] == 1
+    assert data["items"][0]["attention"][0]["card_id"] == "card-1"
+    assert data["items"][0]["attention"][0]["kind"] == "review"
+
+
 def test_resolved_failures_expired_questions_and_archived_records_leave_the_inbox(workspace: Scheduler) -> None:
     conversation(workspace)
     task(workspace, "failed-before", status="failed")

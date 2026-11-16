@@ -1392,8 +1392,16 @@ function toggleProjectItems(encodedName) {
 }
 
 // ── Open conversation ─────────────────────────────────────
+function mobileDraftKey() {
+  return activeConv?.id || `new:${pendingProj?.name || ''}`;
+}
+
+function forgetSentMobileDraft(key, text) {
+  if (mobileChatDrafts.get(key) === text) mobileChatDrafts.delete(key);
+}
+
 function prepareMobileDraftSwitch(conversationId, projectName = '') {
-  const from = activeConv?.id || `new:${pendingProj?.name || ''}`;
+  const from = mobileDraftKey();
   const to = conversationId || `new:${projectName}`;
   const input = document.getElementById('ta');
   if (from === to || !input) return;
@@ -1640,6 +1648,8 @@ async function send() {
   const ta   = document.getElementById('ta');
   const btn = document.getElementById('btn-send');
   if (btn.dataset.busy === '1') return;
+  const draftKey = mobileDraftKey();
+  const draftText = ta.value;
   let prompt = ta.value.trim();
   if (!prompt && pendingImages.length === 0) return;
   if (!prompt && pendingImages.length > 0) prompt = '请查看附件图片。';
@@ -1695,6 +1705,7 @@ async function send() {
 
     body.sdk_options = SDKTaskControls.readOptions();
     const task = await api('/api/tasks', { method:'POST', body });
+    forgetSentMobileDraft(draftKey, draftText);
     tasks.unshift(task);
     pendingImages = [];
     const queue = document.getElementById('mobile-queue-mode');
@@ -1952,9 +1963,11 @@ function _mobileComposerTask() {
 function _mobileSDKEditor() {
   const input = document.getElementById('ta');
   const conversationId = activeConv?.id;
+  const draftKey = mobileDraftKey();
   return {
     read: () => ({ text:input?.value || '', hasAttachments:pendingImages.length > 0, uploading:uploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked }),
     clear: (text,images=[]) => {
+      forgetSentMobileDraft(draftKey, text);
       if (activeConv?.id === conversationId && images.length) { pendingImages=pendingImages.filter(i=>!images.includes(i.container_path)); renderImagePreviews(); }
       if (activeConv?.id === conversationId && input && input.value === text) { input.value = ''; onInput(input); }
     },

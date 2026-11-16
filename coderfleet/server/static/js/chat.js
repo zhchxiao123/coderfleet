@@ -812,13 +812,25 @@ function toggleChatProjectItems(encodedProjectName) {
 }
 
 // 选择会话
+function chatDraftKey() {
+  return activeConversationId || `new:${chatNewSessionProject}`;
+}
+
+function forgetSentChatDraft(key, text) {
+  if (chatDrafts.get(key) === text) chatDrafts.delete(key);
+}
+
 function prepareChatDraftSwitch(conversationId, projectName = '') {
-  const from = activeConversationId || `new:${chatNewSessionProject}`;
+  const from = chatDraftKey();
   const to = conversationId || `new:${projectName}`;
   const input = document.getElementById('chat-input');
-  if (from === to || !input) return;
-  chatDrafts.set(from, input.value);
-  input.value = chatDrafts.get(to) || '';
+  if (from === to) return;
+  if (input) {
+    chatDrafts.set(from, input.value);
+    input.value = chatDrafts.get(to) || '';
+  }
+  pendingImages = [];
+  renderImagePreviews();
 }
 
 function virtualChatForTask(task) {
@@ -832,7 +844,6 @@ function virtualChatForTask(task) {
 async function selectConversation(convId) {
   stopChatFollow();
   prepareChatDraftSwitch(convId);
-  if (activeConversationId !== convId) pendingImages = [];
   activeConversationId = convId;
   try { sessionStorage.setItem('coderfleet.activeConvId', convId || ''); } catch (_) {}
   activeTabId = upsertConversationTab(convId);
@@ -1962,6 +1973,8 @@ async function sendChatMessage() {
   if (document.getElementById('chat-send-btn')?.dataset.busy === '1') return;
   const textarea = document.getElementById('chat-input');
   if (!textarea) return;
+  const draftKey = chatDraftKey();
+  const draftText = textarea.value;
   let promptText = textarea.value.trim();
   if (!_hasChatInputContent()) return;
   if (!promptText && pendingImages.length > 0) {
@@ -2044,6 +2057,7 @@ async function sendChatMessage() {
         throw new Error('后端未返回会话 ID');
       }
 
+      forgetSentChatDraft(draftKey, draftText);
       activeConversationId = taskData.conversation_id;
       activeTabId = upsertConversationTab(activeConversationId);
       renderTopbarTabs();
@@ -2137,6 +2151,7 @@ async function sendChatMessage() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
 
+    forgetSentChatDraft(draftKey, draftText);
     const snapshotPaths = pendingImages.map(i => i.container_path);
     textarea.value = '';
     textarea.style.height = 'auto';
@@ -2287,9 +2302,11 @@ function _chatComposerTask(runningTaskId = currentChatTaskId) {
 function _chatSDKEditor() {
   const input = document.getElementById('chat-input');
   const conversationId = activeConversationId;
+  const draftKey = chatDraftKey();
   return {
     read: () => ({ text: input?.value || '', hasAttachments: pendingImages.length > 0, uploading: chatUploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked }),
     clear: (text,images=[]) => {
+      forgetSentChatDraft(draftKey, text);
       if (activeConversationId === conversationId && images.length) { pendingImages=pendingImages.filter(i=>!images.includes(i.container_path)); renderImagePreviews(); }
       if (activeConversationId === conversationId && input && input.value === text) {
         input.value = ''; input.dispatchEvent(new Event('input'));
