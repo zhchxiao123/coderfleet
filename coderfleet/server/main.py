@@ -2508,12 +2508,11 @@ async def stream_logs(
             # 跟 get_logs()/下面 tail>0 分支同一类问题：这次一次性读到文件末尾，
             # 任务仍在运行时可能撞上"某一行写到一半"，尾部被截断。用
             # split_complete_lines 只把完整行推给前端，截断的尾巴交给 pending，
-            # 由下面的轮询循环接上；last_size 必须算成 start + 已消费的完整
-            # 字节数，不能用 offset 或某次单独 stat() 的文件大小——否则下一轮
-            # 会把这段尾巴当成"还没读过"重复推送，或者反过来把它跳过。
+            # 由下面的轮询循环接上。last_size 是已读取的位置，必须包含已放入
+            # pending 的尾巴；若只计 complete，下一轮会重复读取这段尾巴。
             new_bytes, start = await _read_from(skip_bytes)
             complete, pending = split_complete_lines(new_bytes)
-            last_size = start + len(complete)
+            last_size = start + len(new_bytes)
             if complete:
                 for line in complete.decode("utf-8", errors="replace").splitlines(keepends=True):
                     yield f"data: {line.rstrip()}\n\n"
@@ -2529,14 +2528,13 @@ async def stream_logs(
                 # 尾部可能刚好截在写到一半的一行中间。用 split_complete_lines
                 # 只把完整行纳入这次的"末尾 tail 行"，截断的尾巴留进 pending，
                 # 交给下面的轮询循环在下一次读到新字节时接上——而不是把半行
-                # JSON 当成一整行推给前端。last_size 也必须用这次实际读到的
-                # 完整字节数，不能再单独 stat() 一次——两次调用之间文件可能
-                # 又长了，用 stat() 的话会把这段新字节悄悄跳过。
+                # JSON 当成一整行推给前端。last_size 包含 pending，且只根据
+                # 这次实际读到的字节数推进；不能用另一次 stat() 的文件大小。
                 complete, pending = split_complete_lines(raw)
+                last_size = len(raw)
                 lines = complete.decode("utf-8", errors="replace").splitlines(keepends=True)
                 for line in lines[-tail:]:
                     yield f"data: {line.rstrip()}\n\n"
-                last_size = len(complete)
 
         else:
             # ── tail=0, skip_bytes=0：不推送任何已有内容，直接从文件末尾开始 tail ──
@@ -2570,7 +2568,9 @@ async def stream_logs(
                     async with aiofiles.open(log_path, "rb") as f:
                         await f.seek(last_size)
                         new_bytes = await f.read()
-                    last_size = cur_size
+                    # stat 后文件可能继续增长，read() 会一并读到新追加的部分。
+                    # 按实际读取量推进，避免下一轮重复读取超过旧 cur_size 的内容。
+                    last_size += len(new_bytes)
                     pending += new_bytes
                     complete, pending = split_complete_lines(pending)
                     for line in complete.decode("utf-8", errors="replace").splitlines(keepends=True):

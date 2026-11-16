@@ -2005,6 +2005,7 @@ class ChatLogRenderer {
   // 没人看，却仍然要整体构建成 DOM——手机端一次打开会话要拼好几个这样的任务，主线程明显卡顿。
   // 超限后先截断显示，点「显示完整输出」再补上剩余部分。
   static TOOL_OUTPUT_TRUNCATE_LEN = 8000;
+  static RAW_LINE_PREVIEW_LEN = 2000;
 
   // 这些工具的结果几乎总是"要看的东西"（改了什么/建了什么/计划是什么），
   // 不管长短都直接展开，不再套用行数/字符数的通用启发式。
@@ -2110,6 +2111,11 @@ class ChatLogRenderer {
     e.outputEl.className = `tool-output${ok ? '' : ' is-error'}`;
     if (hasImages) {
       this._setToolOutputImages(e.outputEl, images);
+      if (out) {
+        const textEl = document.createElement('div');
+        e.outputEl.appendChild(textEl);
+        this._setToolOutputText(textEl, out, ok);
+      }
     } else if (e.name === 'Skill' && out) {
       // Skill 工具的产出本来就是给人看的说明文字，通常带 markdown 格式
       // （列表/代码块/加粗），按 markdown 渲染比转义成一大段纯文本可读得多。
@@ -2393,7 +2399,12 @@ class ChatLogRenderer {
     const el = document.createElement('div');
     el.className = 'chat-raw-line';
     el.classList.add('timeline-node', 'is-error');
-    el.textContent = line;
+    // 损坏的图片事件可能只剩 Base64 尾巴；原始日志仍保留在服务端，
+    // 时间线只展示有限预览，避免编码数据撑满页面或拖慢 DOM 渲染。
+    const preview = line.slice(0, ChatLogRenderer.RAW_LINE_PREVIEW_LEN)
+      .replace(/[A-Za-z0-9+/]{256,}={0,2}/g, '[较长的编码数据已省略]');
+    el.textContent = preview + (line.length > ChatLogRenderer.RAW_LINE_PREVIEW_LEN
+      ? '\n… 原始输出过长，已截断' : '');
     this._appendNode(el);
   }
 }

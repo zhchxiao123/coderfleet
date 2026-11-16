@@ -2823,7 +2823,8 @@ class Scheduler:
                         async with aiofiles.open(host_log, mode="rb") as hf:
                             await hf.seek(last_size)
                             new_bytes = await hf.read()
-                        last_size = cur_size
+                        # read() 可能读到 stat 后追加的数据，游标按实际读取量推进。
+                        last_size += len(new_bytes)
                         pending += new_bytes
 
                         # 每 0.3s 轮询一次 host_log 的字节增量，和容器进程实际把一行

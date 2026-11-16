@@ -234,6 +234,57 @@ def test_stream_container_log_does_not_corrupt_utf8_char_split_across_poll_tick(
     assert parsed["message"]["content"][0]["content"] == text_val
 
 
+def test_stream_container_log_does_not_reread_growth_between_stat_and_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aiofiles
+
+    sched = Scheduler(tmp_path, runtime=FakeRuntime())
+    task, acc, log_path = _mk_task_acc(sched)
+    header = log_path.read_bytes()
+    host_log = tmp_path / "host.log"
+    host_exit = tmp_path / "host.exit"
+    line = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "图片分析完成"},
+    ]}}, ensure_ascii=False).encode("utf-8") + b"\n"
+    split_at = 20
+    host_log.write_bytes(line[:split_at])
+    real_open = aiofiles.open
+    grew = False
+
+    def opening(file, mode="r", *args, **kwargs):
+        nonlocal grew
+        if Path(file) == host_log and mode == "rb" and not grew:
+            grew = True
+            with host_log.open("ab") as stream:
+                stream.write(line[split_at:])
+        return real_open(file, mode, *args, **kwargs)
+
+    real_sleep = asyncio.sleep
+    ticks = 0
+
+    async def controlled_sleep(_seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 2:
+            host_exit.write_text("0")
+        await real_sleep(0)
+
+    async def noop_usage(*_args, **_kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(aiofiles, "open", opening)
+    monkeypatch.setattr(asyncio, "sleep", controlled_sleep)
+    monkeypatch.setattr(sched, "_append_usage_status", noop_usage)
+    monkeypatch.setattr(sched, "_append_log_footer", lambda *_args: None)
+    monkeypatch.setattr(sched, "_sync_board_card_for_task", lambda *_args: None)
+
+    asyncio.run(asyncio.wait_for(
+        sched._stream_container_log(task, acc, log_path, host_log, host_exit), timeout=3,
+    ))
+    assert log_path.read_bytes() == header + line
+
+
 def test_run_persistent_nonzero_exit_marks_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

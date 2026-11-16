@@ -1718,7 +1718,8 @@ function _looksLikeCompleteTaskLog(text) {
 // 拉取单条任务日志；done/failed/killed 任务的日志内容不会再变，命中缓存直接复用。
 // 缓存分两层：内存 Map（当前会话页面内最快）+ IndexedDB（跨页面刷新持久化，issue #43）。
 async function _fetchTaskLogCached(task) {
-  if (task.status !== 'running') {
+  const isFinished = task.status !== 'running' && task.status !== 'pending' && task.status !== 'scheduled';
+  if (isFinished) {
     if (_finishedLogCache.has(task.id)) return _finishedLogCache.get(task.id);
     const persisted = await logCacheGet(task.id);
     if (persisted !== null) {
@@ -1726,8 +1727,11 @@ async function _fetchTaskLogCached(task) {
       return persisted;
     }
   }
-  const text = await fetch(`${API}/api/tasks/${task.id}/logs?light=1`).then(r => r.text()).catch(() => '');
-  if (task.status !== 'running' && _looksLikeCompleteTaskLog(text)) {
+  // 活跃任务随后用文本的 UTF-8 字节数续读原始 SSE 日志，必须获取原始文本。
+  // light 会移除 tool_use_result，缩短文本后算出的偏移可能落在图片编码中间。
+  const logSuffix = isFinished ? '?light=1' : '';
+  const text = await fetch(`${API}/api/tasks/${task.id}/logs${logSuffix}`).then(r => r.text()).catch(() => '');
+  if (isFinished && _looksLikeCompleteTaskLog(text)) {
     _finishedLogCache.set(task.id, text);
     logCacheSet(task.id, text);
   }
@@ -2562,7 +2566,8 @@ function buildChatInputHTML(placeholder, hint) {
 
 const CHAT_MODEL_OPTIONS = [
   { value: '',       label: '默认模型',        title: '跟随账号 / CLI 的默认模型设置' },
-  { value: 'opus',   label: 'Opus · 最强推理', title: 'Claude Opus 别名 —— 跟随 CLI 自动指向当前最强的 Opus 版本（现为 Opus 5），推理能力最强，速度较慢，适合复杂任务' },
+  { value: 'opus',   label: 'Opus · 最强推理', title: 'Claude Opus 别名 —— 跟随 CLI 和提供商设置解析 Opus 版本，适合复杂任务；需要固定版本时请选择锁定版本选项' },
+  { value: 'claude-opus-5-5', label: 'Opus 5.5 · 锁定版本', title: 'Claude Opus 5.5 —— 显式锁定 claude-opus-5-5，不随 Opus 别名更新；是否可用取决于账号和提供商支持' },
   { value: 'claude-opus-5', label: 'Opus 5 · 锁定版本', title: 'Claude Opus 5 —— 显式锁定该版本号，不会随 CLI 别名指向未来更新的 Opus 而变化' },
   { value: 'sonnet', label: 'Sonnet 5 · 均衡推荐', title: 'Claude Sonnet 5 —— 速度与能力均衡，日常任务首选' },
   { value: 'fable',  label: 'Fable 5 · 快速输出', title: 'Claude Fable 5 —— Opus 级能力、更快输出，Fast 模式使用' },
@@ -2626,7 +2631,7 @@ function buildChatModelPillHtml() {
         <span class="chat-model-pill-label">模型</span>
         <select id="chat-model-select" class="chat-model-select" onchange="onChatModelChange(this.value)">${opts}</select>
         <input type="text" id="chat-model-custom" class="chat-model-custom-input"
-               placeholder="如 claude-opus-5.1" style="display:none"
+               placeholder="如 claude-opus-5-5" style="display:none"
                oninput="onChatModelCustomInput(this.value)">
       </span>`;
 }

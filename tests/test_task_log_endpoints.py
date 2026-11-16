@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 
+import aiofiles
 import pytest
 
 from coderfleet.server import main as server_main
@@ -115,3 +117,88 @@ def test_get_logs_missing_file_raises_404(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(Exception) as exc_info:
         asyncio.run(server_main.get_logs("does-not-exist"))
     assert getattr(exc_info.value, "status_code", None) == 404
+
+
+@pytest.mark.parametrize("mode", ["skip_bytes", "tail"])
+@pytest.mark.parametrize("trailing_newline", [True, False])
+def test_stream_logs_reassembles_initial_partial_image_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, trailing_newline: bool,
+) -> None:
+    _use_scheduler(monkeypatch, tmp_path)
+    log_path = _make_task_with_log(tmp_path, "image-stream")
+    task = server_main.scheduler.get_task("image-stream")
+    assert task is not None
+    task.update_status(TaskStatus.running, server_main.scheduler.tasks_dir)
+    header = b"=== CoderFleet Task Log ===\n"
+    previous = b'{"type":"system","subtype":"init"}\n'
+    event = json.dumps({"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": "image", "content": [
+            {"type": "text", "text": "图片说明"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aZ09+/" * 16000}},
+        ],
+    }]}}, ensure_ascii=False).encode("utf-8")
+    split_at = event.index("图片说明".encode("utf-8")) + 1
+    log_path.write_bytes(header + previous + event[:split_at])
+
+    async def drive() -> list[str]:
+        response = await server_main.stream_logs(
+            task.id, tail=1 if mode == "tail" else 0,
+            skip_bytes=len(header) if mode == "skip_bytes" else 0,
+        )
+        iterator = response.body_iterator
+        try:
+            assert await anext(iterator) == "data: " + previous.decode().rstrip() + "\n\n"
+            with log_path.open("ab") as stream:
+                stream.write(event[split_at:] + (b"\n" if trailing_newline else b""))
+            task.update_status(TaskStatus.done, server_main.scheduler.tasks_dir)
+            return [frame async for frame in iterator]
+        finally:
+            await iterator.aclose()
+
+    frames = asyncio.run(asyncio.wait_for(drive(), timeout=3))
+    assert frames == ["data: " + event.decode("utf-8") + "\n\n", "data: [DONE]\n\n"]
+
+
+def test_stream_logs_does_not_reread_growth_between_stat_and_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_scheduler(monkeypatch, tmp_path)
+    log_path = _make_task_with_log(tmp_path, "growing-stream")
+    task = server_main.scheduler.get_task("growing-stream")
+    assert task is not None
+    task.update_status(TaskStatus.running, server_main.scheduler.tasks_dir)
+    header = b"=== CoderFleet Task Log ===\n"
+    previous = b'{"type":"system","subtype":"init"}\n'
+    event = b'{"type":"user","message":{"content":[]}}\n'
+    split_at = 15
+    log_path.write_bytes(header + previous)
+    real_open = aiofiles.open
+    grow_on_read = False
+
+    def opening(file, mode="r", *args, **kwargs):
+        nonlocal grow_on_read
+        if Path(file) == log_path and mode == "rb" and grow_on_read:
+            grow_on_read = False
+            with log_path.open("ab") as stream:
+                stream.write(event[split_at:])
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(aiofiles, "open", opening)
+
+    async def drive() -> list[str]:
+        nonlocal grow_on_read
+        response = await server_main.stream_logs(task.id, tail=0, skip_bytes=len(header))
+        iterator = response.body_iterator
+        try:
+            await anext(iterator)
+            with log_path.open("ab") as stream:
+                stream.write(event[:split_at])
+            grow_on_read = True
+            first = await anext(iterator)
+            task.update_status(TaskStatus.done, server_main.scheduler.tasks_dir)
+            return [first] + [frame async for frame in iterator]
+        finally:
+            await iterator.aclose()
+
+    frames = asyncio.run(asyncio.wait_for(drive(), timeout=3))
+    assert frames == ["data: " + event.decode().rstrip() + "\n\n", "data: [DONE]\n\n"]
