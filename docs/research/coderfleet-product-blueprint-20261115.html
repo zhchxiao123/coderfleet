@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<!-- Layout reference: Implementation plan, https://thariqs.github.io/html-effectiveness/16-implementation-plan.html
+     Reference copyright 2026 Anthropic PBC; SPDX-License-Identifier: Apache-2.0. Content is a CoderFleet design proposal. -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CoderFleet · 产品改造蓝图</title>
+  <style>
+    :root{--bg:#faf9f5;--text:#141413;--muted:#66675f;--line:#d1cfc5;--soft:#f0eee6;--oat:#e3dacc;--clay:#a5482c;--olive:#53683c;--teal:#16766d;--white:#fff;--sans:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 var(--sans);-webkit-font-smoothing:antialiased}button,a{-webkit-tap-highlight-color:transparent}button{font:inherit;cursor:pointer}button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--teal);outline-offset:4px}a{color:var(--teal);text-underline-offset:4px}.page{max-width:1140px;padding:54px 28px 80px;margin:auto}.eyebrow{font-size:12px;letter-spacing:.1em;color:var(--muted)}h1{font-size:clamp(30px,4vw,48px);font-weight:650;letter-spacing:-.04em;line-height:1.25;margin:16px 0}h1 em{font-style:normal;color:var(--teal)}h2{font-size:26px;line-height:1.4;margin:0}h3{margin:0 0 8px;font-size:18px}p{margin:10px 0}.lead{max-width:850px;font-size:18px;color:#494a43}.notice{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-top:24px;color:var(--muted)}.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:30px 0 58px}.cell{border:1px solid var(--line);background:var(--white);border-radius:12px;padding:18px}.cell small{display:block;color:var(--muted);font-size:12px}.cell strong{display:block;margin-top:6px;font-size:19px;font-weight:600}.section{margin:54px 0}.section-title{display:flex;gap:13px;align-items:baseline}.num{font:12px ui-monospace,monospace;background:var(--oat);padding:3px 9px;border-radius:6px}.intro{color:var(--muted);max-width:860px;margin:9px 0 22px}.journey{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}.step{padding:21px 18px;position:relative}.step+.step{border-left:1px solid var(--line)}.step small{color:var(--muted)}.step strong{display:block;font-size:17px;margin:8px 0}.step p{font-size:13px;color:var(--muted);margin:0}.pill{display:inline-block;border-radius:5px;padding:2px 8px;background:#e8f2ec;color:#285e40;font-size:12px}.preview{border:1px solid var(--line);border-radius:16px;overflow:hidden;display:grid;grid-template-columns:180px 1fr;min-height:455px;background:#fff}.preview aside{background:var(--soft);padding:20px 12px;border-right:1px solid var(--line)}.brand{font-size:18px;font-weight:650;padding:2px 10px 18px}.nav-tab{display:block;background:transparent;border:0;width:100%;text-align:left;padding:11px 13px;border-radius:8px;margin:5px 0;color:#55564f}.nav-tab[aria-selected="true"]{background:#fff;color:var(--teal);font-weight:650;box-shadow:0 1px 5px #1414130b}.preview-main{padding:27px 30px}.preview-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px}.preview-head h3{font-size:23px;margin:0}.demo-tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:2px 9px;white-space:nowrap}.screen[hidden]{display:none}.work-row{padding:16px;border:1px solid var(--line);border-radius:10px;margin:12px 0;display:flex;gap:14px;align-items:flex-start;justify-content:space-between}.work-row strong{display:block;font-size:15px}.work-row p{font-size:13px;color:var(--muted);margin:4px 0 0}.status{font-size:12px;white-space:nowrap;color:var(--olive);background:#edf2e8;border-radius:5px;padding:2px 8px}.status.wait{background:#f6e9df;color:var(--clay)}.compose{padding:15px 17px;border:1px solid #b7d5cc;border-radius:11px;margin-top:20px;color:var(--muted);background:#fbfefd;font-size:14px}.compose small{display:block;font-size:11px;margin-top:9px;color:var(--teal)}.hint{font-size:13px;color:var(--muted)}.two{display:grid;grid-template-columns:1fr 1fr;gap:17px}.panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:22px}.panel h3{color:var(--teal)}.panel ul{padding-left:20px;margin-bottom:0}.flow{display:grid;grid-template-columns:1fr 60px 1fr;gap:16px;align-items:center}.flow .arrow{text-align:center;font-size:26px;color:var(--muted)}.flow .host{background:var(--soft)}.flow strong{display:block;margin-bottom:7px}.flow p{font-size:14px;color:var(--muted)}.full-flow{grid-column:1/-1;text-align:center;border:1px dashed var(--line);border-radius:10px;padding:14px;font-size:14px}.phase-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}.phase-tab{padding:9px 15px;background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px}.phase-tab[aria-selected="true"]{background:var(--text);border-color:var(--text);color:#fff}.phase{border:1px solid var(--line);border-radius:13px;background:#fff;padding:26px}.phase[hidden]{display:none}.phase-label{font-size:12px;color:var(--clay);letter-spacing:.06em}.phase h3{font-size:23px;margin-top:8px}.phase-grid{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin-top:18px}.phase-grid h4{margin:0;color:var(--teal);font-size:14px}.phase-grid p{font-size:14px;color:var(--muted)}table{width:100%;border-collapse:collapse;font-size:14px;text-align:left}td,th{padding:14px 12px;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:600;background:var(--soft)}.table-wrap{overflow-x:auto}details{border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin:12px 0;background:#fff}summary{cursor:pointer;font-weight:600}details p,details ul{color:var(--muted);font-size:14px}.decision{border-left:4px solid var(--teal);padding:2px 0 2px 20px;margin:24px 0}.decision strong{font-size:21px}.footer{border-top:1px solid var(--line);margin-top:55px;padding-top:20px;font-size:12px;color:var(--muted)}.footer a{margin-right:18px}.legend{font-size:12px;color:var(--muted);margin-top:12px}
+    @media(max-width:800px){.summary{grid-template-columns:1fr 1fr}.journey{grid-template-columns:1fr}.step{padding:15px 18px}.step+.step{border-left:0;border-top:1px solid var(--line)}.step strong{margin:3px 0}.two,.phase-grid{grid-template-columns:1fr;gap:15px}.flow{grid-template-columns:1fr}.flow .arrow{transform:rotate(90deg)}.full-flow{grid-column:auto}.preview{grid-template-columns:1fr}.preview aside{border-right:0;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;padding:12px;gap:4px}.brand{width:100%;padding:3px 8px 6px}.nav-tab{width:auto;padding:7px 10px;font-size:13px;margin:0}.preview-main{padding:20px}.page{padding:30px 18px 55px}.section{margin:40px 0}.cell{padding:14px}.cell strong{font-size:17px}.work-row{padding:13px;gap:8px}.work-row strong{font-size:14px}.preview-head{align-items:flex-start}.preview-head h3{font-size:21px}.phase{padding:20px}}
+    @media(prefers-reduced-motion:no-preference){button{transition:background-color .15s,color .15s}}@media print{.page{padding:0}.phase[hidden],.screen[hidden]{display:block!important}.phase-tabs,.preview aside{display:none}.phase{break-inside:avoid;margin:14px 0}.preview{display:block}.section{break-inside:avoid}.summary{margin-bottom:28px}}
+  </style>
+</head>
+<body>
+<main class="page">
+  <header>
+    <div class="eyebrow">CODERFLEET / PRODUCT BLUEPRINT / 2026.11.15</div>
+    <h1>把多个 Agent，<br>组织成<em>可以交付的工作</em>。</h1>
+    <p class="lead">保留项目问答作为默认入口：选项目，直接对话。复杂委托在原有对话上增加目标、待处理事项与交付，底层继续保留账号、容器、代理和现有调度。</p>
+    <div class="decision"><strong>已确认：项目问答是最基础的能力</strong><p>原有问答、连续追问和直接开发继续可用；无需先建工作卡片、规划工作流或填写验收表。</p></div>
+    <div class="notice"><strong>产品建议 · 非已上线界面</strong><br>依据当前仓库与官方资料形成。下面的任务、状态和数量均为交互示意，不是读取的真实用户数据；未改变现有产品与权限。</div>
+  </header>
+  <div class="summary">
+    <div class="cell"><small>用户价值</small><strong>放心委托多件事</strong></div>
+    <div class="cell"><small>默认体验</small><strong>选项目 → 直接对话</strong></div>
+    <div class="cell"><small>执行内核</small><strong>复用现有 Task</strong></div>
+    <div class="cell"><small>第一步</small><strong>单项目交付闭环</strong></div>
+  </div>
+
+  <section class="section">
+    <div class="section-title"><span class="num">01</span><h2>一件工作的完整旅程</h2></div>
+    <p class="intro">用户不需要先理解 SDK 参数和调度对象。简单问答保持轻量，较大的委托关联现有专题卡片。</p>
+    <div class="journey">
+      <div class="step"><small>01 / 提出目标</small><strong>说清要完成什么</strong><p>项目、目标、约束、验收点。</p></div>
+      <div class="step"><small>02 / 开始执行</small><strong>看得见推进</strong><p>实际 Task、当前进度和工作范围。</p></div>
+      <div class="step"><small>03 / 必要介入</small><strong>只处理需要你的事</strong><p>提问、授权、阻塞和方向调整。</p></div>
+      <div class="step"><small>04 / 审查交付</small><strong>检查结果与证据</strong><p>产物、版本、检查与未验证项。</p></div>
+      <div class="step"><small>05 / 接受与继续</small><strong>反馈进入原工作</strong><p>接受、继续修改、保存或自动化。</p></div>
+    </div>
+    <p class="legend">Task 执行结束、交付生成、检查通过、人工接受和发布成功分别记录。</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><span class="num">02</span><h2>围绕工作组织界面</h2></div>
+    <p class="intro">默认保留 AI 对话，选项目后即可问答或开发。工作详情用于复杂委托；平台助手作为可选的全局入口。</p>
+    <div class="preview">
+      <aside>
+        <div class="brand">CoderFleet</div>
+        <div role="tablist" aria-label="产品入口概念" style="display:contents">
+          <button class="nav-tab" id="nav-chat" role="tab" aria-selected="true" aria-controls="screen-chat" data-screen="chat">AI 对话</button>
+          <button class="nav-tab" id="nav-today" role="tab" aria-selected="false" aria-controls="screen-today" data-screen="today" tabindex="-1">今日 / 待处理</button>
+          <button class="nav-tab" id="nav-work" role="tab" aria-selected="false" aria-controls="screen-work" data-screen="work" tabindex="-1">工作</button>
+          <button class="nav-tab" id="nav-projects" role="tab" aria-selected="false" aria-controls="screen-projects" data-screen="projects" tabindex="-1">项目</button>
+          <button class="nav-tab" id="nav-auto" role="tab" aria-selected="false" aria-controls="screen-auto" data-screen="auto" tabindex="-1">自动化</button>
+          <button class="nav-tab" id="nav-resources" role="tab" aria-selected="false" aria-controls="screen-resources" data-screen="resources" tabindex="-1">资源与设置</button>
+        </div>
+      </aside>
+      <div class="preview-main">
+        <div class="screen" id="screen-chat" role="tabpanel" aria-labelledby="nav-chat">
+          <div class="preview-head"><h3>项目问答</h3><span class="demo-tag">默认入口 · 示意数据</span></div>
+          <span class="pill">当前项目：移动客户端</span>
+          <p class="hint">切换项目 · 新建对话 · 继续历史会话</p>
+          <div class="work-row"><div><strong>你：这个项目的分享功能是怎么实现的？</strong><p>直接提问，无需创建卡片或工作流。</p></div></div>
+          <div class="work-row"><div><strong>Agent：我会读取当前项目的实现，说明调用链和平台差异。</strong><p>回复、Markdown 和工具执行过程沿用原有聊天体验，可继续追问或要求修改。</p></div></div>
+          <div class="compose">输入问题，或说说你想做什么…<small>＋ 附件 · 更多 · 发送　｜　按既有支持保留插话、中断、提问和排队</small></div>
+          <p class="hint">需要管理较大的委托时，可从原对话关联工作；历史、项目与上下文归属保持连续。</p>
+        </div>
+        <div class="screen" id="screen-today" role="tabpanel" aria-labelledby="nav-today" hidden>
+          <div class="preview-head"><h3>现在需要你处理</h3><span class="demo-tag">示意数据</span></div>
+          <div class="work-row"><div><strong>分享页修复：等待设备验收</strong><p>代码检查已有回执，iPhone 实机验证尚未执行。查看交付后继续。</p></div><span class="status wait">待验收</span></div>
+          <div class="work-row"><div><strong>协议兼容调查：确认支持范围</strong><p>Agent 提出一个会影响方案的具体问题。回答进入原来的工作。</p></div><span class="status wait">待回答</span></div>
+          <div class="work-row"><div><strong>本周工作总结：可保存到忆屿</strong><p>先查看内容和来源，按明确的保存请求执行并保留真实记录回执。</p></div><span class="status">已产出</span></div>
+          <div class="compose">有什么工作想交给 Agent？<small>全局对话入口 · 范围与授权始终可见 · 高级设置默认收起</small></div>
+        </div>
+        <div class="screen" id="screen-work" role="tabpanel" aria-labelledby="nav-work" hidden>
+          <div class="preview-head"><h3>分享页修复</h3><span class="demo-tag">工作详情示意</span></div>
+          <span class="pill">目标 / 项目 / 验收点</span>
+          <div class="work-row"><div><strong>对话与进度</strong><p>复用现有 Conversation、Task SSE 和 renderer。随时补充要求，必要时停止。</p></div></div>
+          <div class="work-row"><div><strong>交付与检查</strong><p>变更、产物、实际检查回执、未验证项。再次修改后，旧检查不代表新版本通过。</p></div></div>
+          <div class="work-row"><div><strong>历史与详情</strong><p>Task、账号、运行环境、来源和控制记录。保留直达与恢复入口。</p></div></div>
+          <p class="hint">看板已有“待验收”，从这里发展交付闭环；不另造执行状态机。</p>
+        </div>
+        <div class="screen" id="screen-projects" role="tabpanel" aria-labelledby="nav-projects" hidden>
+          <div class="preview-head"><h3>项目工作空间</h3><span class="demo-tag">结构示意</span></div>
+          <div class="work-row"><div><strong>项目问答、工作与交付</strong><p>直接进入项目对话或继续历史会话，也可查看进行中的目标和可审查的结果。</p></div></div>
+          <div class="work-row"><div><strong>规则、决策和可追溯资料</strong><p>区分用户规则、来源事实和模型总结；显示更新时间与适用版本。</p></div></div>
+          <div class="work-row"><div><strong>工作区与运行环境</strong><p>文件、分支、受管 worktree、终端、工具和环境健康。</p></div></div>
+          <p class="hint">全局检索范围不自动转成项目文件访问权限。</p>
+        </div>
+        <div class="screen" id="screen-auto" role="tabpanel" aria-labelledby="nav-auto" hidden>
+          <div class="preview-head"><h3>持续工作的入口</h3><span class="demo-tag">结构示意</span></div>
+          <div class="work-row"><div><strong>长期计划 · Schedule</strong><p>显示来源、下次触发、最近交付、失败和暂停入口。</p></div></div>
+          <div class="work-row"><div><strong>一次性继续 · Continuation</strong><p>定时或外部事件到来后，继续原 Conversation。</p></div></div>
+          <div class="work-row"><div><strong>复杂编排 · Workflow</strong><p>用现有 DAG 表达依赖、条件、审批和重试；简单委托无需先画图。</p></div></div>
+          <p class="hint">沿用现有创建/生效策略。若增加强制限频或确认，需要明确重开既有 ADR。</p>
+        </div>
+        <div class="screen" id="screen-resources" role="tabpanel" aria-labelledby="nav-resources" hidden>
+          <div class="preview-head"><h3>让环境问题可处理</h3><span class="demo-tag">结构示意</span></div>
+          <div class="work-row"><div><strong>Agent 与账号</strong><p>认证、代理、镜像、模型、费用与可用能力分别诊断。</p></div></div>
+          <div class="work-row"><div><strong>MCP 与扩展</strong><p>区分已配置、已连接、已授权、工具可用和实际操作成功。</p></div></div>
+          <div class="work-row"><div><strong>运行设置</strong><p>保留版本化的供应商能力，不要求所有后端提供相同原生控制。</p></div></div>
+          <p class="hint">界面简化后，高级功能仍然可达；底层账号、凭据与代理隔离继续保留。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><span class="num">03</span><h2>Harness 的边界</h2></div>
+    <p class="intro">模型负责调查、规划与整理。宿主服务保存确定性的规则和事实；项目代码在指定执行环境内操作。</p>
+    <div class="flow">
+      <div class="panel"><strong>隔离的协调 Agent</strong><p>SDK 工具循环，按需检索 CoderFleet 聊天/Task，调用已授权的外部 MCP。</p><span class="pill">规划与工具选择</span></div>
+      <div class="arrow" aria-hidden="true">↔</div>
+      <div class="panel host"><strong>CoderFleet 宿主服务</strong><p>MCP / API / CLI 共用领域能力：范围校验、调度、状态、幂等、交付和回执。</p><span class="pill">可追溯的产品事实</span></div>
+      <div class="full-flow">经宿主调度 → 项目 Task / Conversation / Workflow → 指定工作区与账号执行 → 交付与证据回流</div>
+    </div>
+    <div class="two" style="margin-top:17px">
+      <div class="panel"><h3>保留已有模型</h3><p>Task 是唯一执行原子；Conversation 串行承接反馈；Workflow 管复杂依赖；BoardCard 管目标和验收。</p></div>
+      <div class="panel"><h3>明确缺口</h3><p>平台 MCP 目前只读。委派要新增范围受限的写能力；并行改同仓库要增加受管工作区，不靠会话分叉冒充文件隔离。</p></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><span class="num">04</span><h2>按可用的完整切片推进</h2></div>
+    <p class="intro">按门槛排序，暂不编造工期。点击阶段查看用户收益、复用范围和验收条件。</p>
+    <div class="phase-tabs" role="tablist" aria-label="实施阶段">
+      <button class="phase-tab" id="tab-a" role="tab" aria-selected="true" aria-controls="phase-a" data-phase="a">A · 统一体验</button>
+      <button class="phase-tab" id="tab-b" role="tab" aria-selected="false" aria-controls="phase-b" data-phase="b" tabindex="-1">B · 交付反馈</button>
+      <button class="phase-tab" id="tab-c" role="tab" aria-selected="false" aria-controls="phase-c" data-phase="c" tabindex="-1">C · 协调委派</button>
+      <button class="phase-tab" id="tab-d" role="tab" aria-selected="false" aria-controls="phase-d" data-phase="d" tabindex="-1">D · 可控并行</button>
+      <button class="phase-tab" id="tab-e" role="tab" aria-selected="false" aria-controls="phase-e" data-phase="e" tabindex="-1">E · 自动化沉淀</button>
+    </div>
+    <div class="phase" id="phase-a" role="tabpanel" aria-labelledby="tab-a"><span class="phase-label">最高优先 · 先保留基础问答</span><h3>直接问答，需要时再关联工作</h3><p>复用项目问答、会话、Task 和 renderer，按需增加卡片、工作详情与待处理入口。</p><div class="phase-grid"><div><h4>用户得到什么</h4><p>选项目即可提问、追问或开发；复杂委托才展开交付和验收；原生交互继续可用。</p></div><div><h4>通过什么才进入下一阶段</h4><p>不建卡片也能完成连续问答；桌面、手机、CLI 项目和会话归属一致；刷新、断线和切换后状态不退化。</p></div></div></div>
+    <div class="phase" id="phase-b" role="tabpanel" aria-labelledby="tab-b" hidden><span class="phase-label">让“完成”可审查</span><h3>结果、验证与反馈成为一等信息</h3><p>新增轻量交付记录，关联实际版本、产物和检查证据；接受和继续修改都回到原工作。</p><div class="phase-grid"><div><h4>用户得到什么</h4><p>直接看改了什么、验证了什么、还有什么没测；不用再从长日志里猜完成度。</p></div><div><h4>验收门槛</h4><p>新改动不复用旧版本的通过状态；普通日志清理后交付仍可用；执行结束不自动视为接受或发布。</p></div></div></div>
+    <div class="phase" id="phase-c" role="tabpanel" aria-labelledby="tab-c" hidden><span class="phase-label">扩展现有按需检索架构</span><h3>全局对话可以把调查继续推进成工作</h3><p>在现有只读 MCP 上增加范围受限的委派与状态查询，保留外部操作记录。</p><div class="phase-grid"><div><h4>用户得到什么</h4><p>检索聊天 → 整理总结 → 保存忆屿；也可将发现的问题委派给授权项目，再汇总交付。</p></div><div><h4>验收门槛</h4><p>目标范围明确；网络丢回执不重复委派或保存；工具缺失、未读完和没有结果分别解释。</p></div></div></div>
+    <div class="phase" id="phase-d" role="tabpanel" aria-labelledby="tab-d" hidden><span class="phase-label">在写入隔离之后扩大并发</span><h3>多个工作并行，各自可审查、可汇合</h3><p>增加受管 worktree/工作目录、基础版本、父子工作关联与合并路径。</p><div class="phase-grid"><div><h4>用户得到什么</h4><p>同一项目的不同目标可以独立推进；看清各自改动、依赖、预算和冲突。</p></div><div><h4>验收门槛</h4><p>并行文件不污染；取消只清理受管资源；冲突可处理；SDK 内部子任务和平台 Task 不混用身份。</p></div></div></div>
+    <div class="phase" id="phase-e" role="tabpanel" aria-labelledby="tab-e" hidden><span class="phase-label">把验证过的流程持续使用</span><h3>自动运行，也有交付与反馈</h3><p>继续使用 Schedule、Continuation、Workflow，从交付生成周报、项目摘要和外部记录。</p><div class="phase-grid"><div><h4>用户得到什么</h4><p>重要变化回来提醒，稳定结果沉淀成带来源、可修订的项目知识；每次运行都可查。</p></div><div><h4>验收门槛</h4><p>触发去重、范围与时区明确，失败和成本可见；不暗改 agent 创建计划直接生效的现有策略。</p></div></div></div>
+    <div class="decision"><strong>首个切片：保留项目问答，再增加交付能力</strong><p>先验证选项目 → 直接问答 → 连续追问 / 开发 → 历史续聊；再沿原对话按需关联工作，增加交付与检查、验收和继续修改。</p></div>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><span class="num">05</span><h2>衡量结果，管理边界</h2></div>
+    <div class="table-wrap"><table><thead><tr><th>重点</th><th>应如何判断</th></tr></thead><tbody>
+      <tr><td>产品效果</td><td>被接受的交付率、每次交付的必要决策和补救操作、到有用结果的时间。先采基线再设数值目标。</td></tr>
+      <tr><td>真实验证</td><td>区分模型自述、原始工具输出、平台受管检查和人工/设备验收；证据对应明确版本和环境。</td></tr>
+      <tr><td>恢复与写入</td><td>会话、文件工作区、进程接管和外部写入分别恢复；结果未知时可查询，不自动重放副作用。</td></tr>
+      <tr><td>迁移</td><td>旧 Task、Conversation、卡片和 session 继续可读可恢复；按完整切片启用，保留回退入口。</td></tr>
+    </tbody></table></div>
+    <details><summary>明确保留的能力与约束</summary><ul><li>项目问答是默认基本入口；直接问答和开发不强制建卡片或验收。</li><li>账号、认证、容器与代理隔离，CLI / Web 能力对等。</li><li>原生插话、中断、提问、历史 Task 控制和高级 SDK 设置。</li><li>SessionStore、hooks、子 Agent 等已有接入；不把它们重新列成待开发。</li><li>BoardCard 继续单一引用 Conversation 或 WorkflowRun，自身不执行。</li></ul></details>
+    <details><summary>本阶段暂缓的范围</summary><p>完整 IDE、多租户 SaaS、自己的模型循环、通用插件市场、默认全项目读写、跨供应商无感 session 迁移，以及同时重写前端框架/存储/调度器。</p></details>
+    <details><summary>需要在后续 PRD 明确的决定</summary><p>是否更新现有 North Star；较大目标的卡片与验收模型；自动接受与人工验收边界；是否重开 Schedule 的频率/预算 ADR；何时进入多用户信任模型。对外产品形态还需按实际认证与计费路径核验供应商条件。</p></details>
+  </section>
+  <footer class="footer"><p><a href="coderfleet-product-redesign-20261115.md">完整分析与源码依据</a><a href="coderfleet-agent-product-primary-sources-2026-11.md">官方能力研究</a><a href="https://code.claude.com/docs/en/agent-sdk/overview">Claude SDK 官方文档</a></p><p>离线单文件 · 不请求外部资源 · 示例不连接真实服务。采用 implementation-plan 的阶段、职责图、界面线框与风险说明结构。</p></footer>
+</main>
+<script>
+  function wireTabs(selector, key, panelPrefix) {
+    const tabs = Array.from(document.querySelectorAll(selector));
+    function select(tab, focus) {
+      tabs.forEach(item => {
+        const active = item === tab;
+        item.setAttribute('aria-selected', String(active));
+        item.tabIndex = active ? 0 : -1;
+        document.getElementById(panelPrefix + item.dataset[key]).hidden = !active;
+      });
+      if (focus) tab.focus();
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => select(tab, false));
+      tab.addEventListener('keydown', event => {
+        let next;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % tabs.length;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index - 1 + tabs.length) % tabs.length;
+        if (event.key === 'Home') next = 0;
+        if (event.key === 'End') next = tabs.length - 1;
+        if (next !== undefined) { event.preventDefault(); select(tabs[next], true); }
+      });
+    });
+  }
+  wireTabs('.nav-tab', 'screen', 'screen-');
+  wireTabs('.phase-tab', 'phase', 'phase-');
+</script>
+</body>
+</html>
