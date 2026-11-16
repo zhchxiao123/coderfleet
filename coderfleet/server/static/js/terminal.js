@@ -493,22 +493,24 @@ function switchTab(tabId) {
   if (tabId === 'chat') {
     stopChatFollow();
     activeConversationId = null;
+    try { sessionStorage.removeItem('coderfleet.activeConvId'); } catch (_) {}
     currentChatTaskId = null;
     currentPage = 'chat';
     document.getElementById('page-chat').classList.add('active');
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('[data-page="chat"]').classList.add('active');
     document.getElementById('page-title').textContent = 'AI 对话';
-    loadConversations();
+    return loadConversations();
   } else if (tabId.startsWith('conversation-')) {
     stopChatFollow();
     activeConversationId = conversationIdFromTabId(tabId);
+    try { sessionStorage.setItem('coderfleet.activeConvId', activeConversationId); } catch (_) {}
     currentPage = 'chat';
     document.getElementById('page-chat').classList.add('active');
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('[data-page="chat"]').classList.add('active');
     document.getElementById('page-title').textContent = 'AI 对话';
-    loadConversations();
+    return loadConversations();
   }
 }
 

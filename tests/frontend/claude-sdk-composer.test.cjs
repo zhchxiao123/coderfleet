@@ -59,6 +59,29 @@ test('topbar conversation switches isolate drafts and discard attachments from t
   assert.equal(nodes.get('chat-input').value,'project two draft');
 });
 
+test('the root chat Tab opens the new-chat draft without restoring the previous session over it', async () => {
+  const {context,nodes,loadConversations,selectConversation} = desktop();
+  context.document.querySelectorAll = () => [];
+  context.document.querySelector = () => new Element();
+  context.window = {addEventListener() {}};
+  for (const id of ['topbar-tabs','page-chat','page-title','chat-history-list']) nodes.set(id,new Element());
+  vm.runInContext(fs.readFileSync('coderfleet/server/static/js/terminal.js','utf8'),context);
+  Object.assign(context, {
+    loadConversations, renderTopbarTabs() {}, syncConversationTabLabels() {}, renderConversations() {},
+    renderEmptyChatState() {}, syncBottomTerminalProjectFromContext() {},
+    renderChatWorkspace:async()=>{}, rerenderChatProjectList() {}, upsertConversationTab:id=>id,
+    fetch:async()=>({ok:true,json:async()=>[]}),
+  });
+  context.sessionStorage.setItem('coderfleet.activeConvId','conv-one');
+  nodes.get('chat-input').value='keep this conversation draft';
+  await context.switchTab('chat');
+  assert.equal(vm.runInContext('activeConversationId',context),null);
+  assert.equal(nodes.get('chat-input').value,'');
+  vm.runInContext("chatConversationsList=[{id:'conv-one'}]",context);
+  await selectConversation('conv-one');
+  assert.equal(nodes.get('chat-input').value,'keep this conversation draft');
+});
+
 test('desktop supplementary send uses the actual desktop upload state', async () => {
   const {context,nodes,calls} = desktop();
   nodes.get('chat-input').value = '补充要求';
