@@ -44,7 +44,7 @@ python3 -m coderfleet.data.scripts.install_claude_sdk \
   --venv /absolute/path/to/claude-sdk --python /absolute/path/to/python3
 ```
 
-使用自定义目录时，将 `CODERFLEET_CLAUDE_SDK_PYTHON` 设为该环境的 Python。此路径必须属于实际运行的环境：宿主机路径不能直接用于容器。
+使用自定义目录时，将 `CODERFLEET_CLAUDE_SDK_PYTHON` 设为该环境的 Python。此路径必须属于实际运行的环境：宿主机路径不能直接用于容器。账号的 `CODERFLEET_CLAUDE_SDK_PYTHON` 在新 Task 派发时读取，持久容器无需为此重建；它优先于项目中的同名变量，与临时执行和账号诊断保持一致。可以将独立版本环境放在该账号现有共享挂载中的代码目录，保留旧环境，再切换新任务的解释器。
 
 离线部署可先把目标平台所需的全部 wheels 放入独立目录，再传 `--wheelhouse /absolute/path/to/wheels`。安装器在此模式使用 `--no-index`，不会回退联网。安装失败后环境不会被标为 ready，修复下载源或 wheel 集后可以重跑安装器。
 

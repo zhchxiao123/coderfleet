@@ -4188,6 +4188,12 @@ class Scheduler:
                     pass
 
             if task.execution_backend == "sdk":
+                # Existing containers retain their creation-time environment.
+                # Match ephemeral/doctor launches for the account SDK runtime
+                # without injecting unrelated account credentials or restarting.
+                sdk_python = self.get_account_env(acc.name).get('CODERFLEET_CLAUDE_SDK_PYTHON')
+                if sdk_python:
+                    project_env['CODERFLEET_CLAUDE_SDK_PYTHON'] = sdk_python
                 self._sdk_launching.add(task.id)
                 launch_attempted = True
             try:

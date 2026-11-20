@@ -90,8 +90,9 @@ def test_scheduled_task_keeps_submission_backend_when_account_changes(
     assert scheduler.get_accounts()[0].claude_backend == "cli"
 
 
+@pytest.mark.parametrize('account_sdk_path', [None, '/account/sdk-186/bin/python'])
 def test_sdk_task_runs_through_runtime_and_exposes_versions_and_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, account_sdk_path: str | None,
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -108,6 +109,9 @@ def test_sdk_task_runs_through_runtime_and_exposes_versions_and_output(
                 return FakeProcess(returncode=0)
             if "--spec" not in " ".join(command):
                 return FakeProcess(stdout_chunks=[b"expected SDK worker request"], returncode=1)
+            assert env['CODERFLEET_CLAUDE_SDK_PYTHON'] == (account_sdk_path or '/project/sdk/bin/python')
+            assert env['PROJECT_TEST'] == 'kept'
+            assert 'ANTHROPIC_API_KEY' not in env, 'This runtime-only override must not broaden credential injection'
             requests = list((repo / ".coderfleet-tasks").glob("*.sdk.json"))
             assert len(requests) == 1
             spec = json.loads(requests[0].read_text())
@@ -123,6 +127,9 @@ def test_sdk_task_runs_through_runtime_and_exposes_versions_and_output(
             return FakeProcess(returncode=0)
 
     scheduler = Scheduler(tmp_path, runtime=WorkerRuntime())
+    scheduler.set_project_env('repo', {'CODERFLEET_CLAUDE_SDK_PYTHON':'/project/sdk/bin/python','PROJECT_TEST':'kept'})
+    scheduler.set_account_env('one', {'ANTHROPIC_API_KEY':'must-not-forward',
+        **({'CODERFLEET_CLAUDE_SDK_PYTHON':account_sdk_path} if account_sdk_path else {})})
 
     async def drive():
         task = await scheduler.submit("中文提问", project_name="repo")
