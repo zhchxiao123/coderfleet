@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for the frontend behavioral tests")
-@pytest.mark.parametrize("script", ["rendering.test.cjs", "workbench.test.cjs"])
+@pytest.mark.parametrize("script", ["rendering.test.cjs", "workbench.test.cjs", "message-times.test.cjs", "history-loading.test.cjs", "translation.test.cjs", "conversation-titles.test.cjs"])
 def test_frontend_rendering_regressions(script: str) -> None:
     assert NODE is not None
     result = subprocess.run(

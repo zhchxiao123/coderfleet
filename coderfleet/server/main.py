@@ -291,6 +291,8 @@ from coderfleet.server.platform_routes import build_platform_router
 app.include_router(build_platform_router(lambda: scheduler))
 from coderfleet.server.workbench_routes import build_workbench_router
 app.include_router(build_workbench_router(lambda: scheduler))
+from coderfleet.server.title_routes import build_title_router
+app.include_router(build_title_router(lambda: scheduler))
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -334,6 +336,7 @@ async def reconcile_tasks_on_startup():
 
 @app.on_event("shutdown")
 async def _stop_intervention_mcp_session():
+    await scheduler.titles.close()
     platform_ctx = getattr(app.state, "platform_mcp_session_ctx", None)
     if platform_ctx is not None:
         await platform_ctx.__aexit__(None,None,None)
@@ -519,7 +522,7 @@ async def summarize_conversation_title(req: TitleRequest):
         title = await summarize_title(llm, req.text)
     except SystemLLMError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return TitleResponse(title=title.strip()[:40])
+    return TitleResponse(title=title)
 
 
 # ── 系统设置（config.conf 读写，由 settings_schema 登记表驱动） ──
@@ -911,6 +914,7 @@ async def create_task(req: TaskCreateRequest):
             auto           = req.auto,
             conversation_id   = req.conversation_id,
             conversation_name = req.conversation_name,
+            conversation_auto_title = req.conversation_auto_title,
             project_name      = req.project_name,
             images            = req.images,
             model             = req.model,
@@ -2127,6 +2131,8 @@ class ConversationStatusUpdate(BaseModel):
 
 @app.patch("/api/conversations/{conversation_id}", response_model=ConversationResponse)
 async def update_conversation(conversation_id: str, body: ConversationStatusUpdate):
+    if body.name is not None and (not body.name.strip() or len(body.name.strip()) > 200):
+        raise HTTPException(422, "会话名称不能为空或超过200字")
     try:
         if body.name is not None:
             conv = scheduler.rename_conversation(conversation_id, body.name)

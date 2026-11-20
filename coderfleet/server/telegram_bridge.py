@@ -844,6 +844,7 @@ class TelegramBridge:
                 prompt=prompt,
                 project_name=project_name,
                 conversation_name=prompt[:32],
+                conversation_auto_title=True,
             )
             logger.info("新会话已创建 [project=%s conversation=%s task=%s]",
                         project_name, task.conversation_id, task.id)

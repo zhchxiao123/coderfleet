@@ -50,6 +50,10 @@ coderfleet account add kimi-api TYPE=kimi --auth env
 | 命令 | 说明 |
 | --- | --- |
 | `coderfleet task run "<prompt>" [--project 名称] [--auto]` | 提交异步任务 |
+| `coderfleet task run "<prompt>" --project 名称 --auto-title` | 新建会话并自动提炼标题 |
+| `coderfleet task title <会话ID> [--json]` | 查看会话标题与命名状态 |
+| `coderfleet task title <会话ID> --regenerate` | 根据当前主题重新生成标题 |
+| `coderfleet task title <会话ID> --name "标题"` | 人工命名并锁定标题 |
 | `coderfleet task list [--status 状态] [--account 账号]` | 查看任务列表 |
 | `coderfleet task status <任务ID>` | 查看任务详情 |
 | `coderfleet task logs <任务ID> [-f]` | 查看任务日志 |

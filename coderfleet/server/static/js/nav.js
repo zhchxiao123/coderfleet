@@ -2,7 +2,10 @@
 function showPage(name) {
   const previousPage = currentPage;
   if (typeof Workbench !== 'undefined' && name !== 'work' && name !== 'inbox') Workbench.deactivate();
-  if (previousPage === 'chat' && name !== 'chat') stopChatFollow();
+  if (previousPage === 'chat' && name !== 'chat') {
+    stopChatFollow();
+    if (typeof disposeChatHistory === 'function') disposeChatHistory();
+  }
   if(name!=='digest'&&typeof PlatformAgent!=='undefined')PlatformAgent.deactivate();
   currentPage = name;
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));

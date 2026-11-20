@@ -47,6 +47,7 @@ nav:
       - 项目管理: projects.md
       - Web 控制台: server.md
       - 异步任务: tasks.md
+      - 会话标题: conversation-titles.md
       - 网络与代理: network.md
       - macOS 系统托盘: tray.md
   - 参考:

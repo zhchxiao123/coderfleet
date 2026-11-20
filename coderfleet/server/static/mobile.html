@@ -896,6 +896,13 @@
     <div class="sheet-handle"></div>
     <div class="sheet-ttl" id="action-sheet-title">操作</div>
     <div class="sheet-actions">
+      <p id="action-title-status" class="hdr-sub" hidden></p>
+      <button class="sheet-action-btn" id="action-rename-btn" onclick="editMobileTitle()" hidden>重命名</button>
+      <button class="sheet-action-btn" id="action-retitle-btn" onclick="regenerateMobileTitle()" hidden>重新生成标题</button>
+      <div id="action-title-editor" hidden>
+        <input id="action-title-input" aria-label="会话名称" maxlength="200" style="width:100%;padding:12px;font-size:16px">
+        <button class="sheet-action-btn" onclick="saveMobileTitle()">保存名称</button>
+      </div>
       <button class="sheet-action-btn" id="action-archive-btn" onclick="archiveActionTarget()">归档</button>
       <button class="sheet-action-btn danger" id="action-delete-btn" onclick="deleteActionTarget()">删除</button>
       <button class="sheet-action-btn" onclick="closeActionSheet()">取消</button>
@@ -918,6 +925,9 @@
 <!-- 依赖脚本必须在主逻辑 script 之前加载（移动端 giant inline script 在此之后），否则 renderPendingPreviews 等共享函数未定义会导致发送/上传时崩溃 -->
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/js/utils.js?v=__BUILD__"></script>
+<script src="/static/js/conversation-titles.js?v=__BUILD__"></script>
+<script src="/static/js/log-cache.js?v=__BUILD__"></script>
+<script src="/static/js/chat-history.js?v=__BUILD__"></script>
 <script src="/static/js/workbench.js?v=__BUILD__"></script>
 <script src="/static/js/workbench-mobile.js?v=__BUILD__"></script>
 <script src="/static/js/shared/project-utils.js?v=20260527-shared"></script>
@@ -1057,23 +1067,29 @@ async function initApp() {
 async function refresh() {
   await checkHealth();
   try {
-    [projects, convs, tasks] = await Promise.all([
+    const next = await Promise.all([
       api('/api/projects'),
       api('/api/conversations'),
       api('/api/tasks?limit=600'),
     ]);
+    if (typeof FleetTitles !== 'undefined') FleetTitles.merge(next[1],convs);
+    [projects, convs, tasks] = next;
     renderList();
+    syncMobileConversationTitle();
   } catch {}
 }
 
 async function bgRefresh() {
   if (typeof mobileWorkView !== 'undefined' && document.getElementById('mobile-workbench')?.open) mobileWorkView?.refresh(true);
   try {
-    [convs, tasks] = await Promise.all([
+    const next = await Promise.all([
       api('/api/conversations'),
       api('/api/tasks?limit=600'),
     ]);
+    if (typeof FleetTitles !== 'undefined') FleetTitles.merge(next[0],convs);
+    [convs, tasks] = next;
     renderList();
+    syncMobileConversationTitle();
     if (activeConv && !isListVisible()) syncMessages(false);
   } catch {}
 }
@@ -1413,16 +1429,47 @@ function prepareMobileDraftSwitch(conversationId, projectName = '') {
 
 async function openConv(id) {
   prepareMobileDraftSwitch(id);
+  disposeMobileHistory();
+  const generation = mobileHistoryGeneration;
   activeConv  = convs.find(c => c.id === id) || null;
   mobileInheritedTasks = [];
   document.getElementById('mobile-fork-origin')?.remove();
   pendingProj = null;
-  if (!activeConv) return;
+  if (!activeConv) {
+    activeConv = {id,name:'正在加载…'};
+    try {
+      const record = await api(`/api/conversations/${encodeURIComponent(id)}`);
+      if (generation !== mobileHistoryGeneration) return;
+      if (record.id !== id) throw new Error('返回的会话不匹配');
+      convs = [...convs.filter(conv=>conv.id!==id),record];
+      activeConv = record;
+    } catch (error) {
+      if (generation !== mobileHistoryGeneration) return;
+      activeConv = null;
+      updateSendState();
+      alert('无法打开会话：' + error.message);
+      return;
+    }
+  }
+  mobileHistorySource = conversationHistorySource(id,url=>fetch(url));
+  mobileHistoryHasMore = true;
 
   document.getElementById('chat-ttl').textContent = activeConv.name;
   document.getElementById('chat-sub').textContent = activeConv.project_name || activeConv.project || '';
   showChat();
   syncMessages(true);
+  const ownHistory = mobileHistorySource.refresh().then(page=> {
+    if (activeConv?.id !== id || generation !== mobileHistoryGeneration) return;
+    const byId = new Map(tasks.filter(task=>page.hasMore || task.conversation_id !== id).map(task=>[task.id,task]));
+    for (const task of page.tasks) byId.set(task.id,task);
+    tasks = [...byId.values()];
+    mobileHistoryHasMore = page.hasMore;
+    syncMessages(false,!page.hasMore);
+  }).catch(error=> {
+    if (activeConv?.id !== id || generation !== mobileHistoryGeneration) return;
+    mobileHistoryView.button.title = String(error.message || error);
+    mobileHistoryView.button.textContent = '加载失败，点击重试';
+  });
   if (activeConv.fork) {
     const source = activeConv.fork.source_conversation_id;
     const body = document.getElementById('chat-body');
@@ -1437,24 +1484,40 @@ async function openConv(id) {
     body.insertBefore(banner, body.firstChild);
     try {
       const inherited = await api(`/api/conversations/${encodeURIComponent(id)}/inherited-tasks`);
-      if (activeConv?.id !== id) return;
+      if (activeConv?.id !== id || generation !== mobileHistoryGeneration) return;
       mobileInheritedTasks = inherited;
-      // Rebuild in chronological order even when own turns were already rendered.
-      if (liveStream) { liveStream.close(); liveStream = null; }
-      body.querySelectorAll('.msg-pair').forEach(el => el.remove());
-      syncMessages(true);
+      syncMessages(false);
     } catch (error) {
       if (activeConv?.id === id) banner.appendChild(document.createTextNode(' 历史加载失败：' + error.message));
     }
   }
+  await ownHistory;
 }
 
-function openOneOff(id) {
+async function openOneOff(id) {
   prepareMobileDraftSwitch(`task-${id}`);
+  disposeMobileHistory();
+  mobileHistorySource = null;
+  mobileHistoryHasMore = false;
   mobileInheritedTasks = [];
   document.getElementById('mobile-fork-origin')?.remove();
-  const task = tasks.find(t => t.id === id) || null;
-  if (!task) return;
+  const generation = mobileHistoryGeneration;
+  let task = tasks.find(t => t.id === id) || null;
+  if (!task) {
+    activeConv = {id:`task-${id}`,name:'正在加载…',isOneOff:true};
+    try {
+      task = await api(`/api/tasks/${encodeURIComponent(id)}`);
+      if (generation !== mobileHistoryGeneration) return;
+      if (task.id !== id) throw new Error('返回的任务不匹配');
+      tasks = [...tasks.filter(item=>item.id!==id),task];
+    } catch (error) {
+      if (generation !== mobileHistoryGeneration) return;
+      activeConv = null;
+      updateSendState();
+      alert('无法打开任务：' + error.message);
+      return;
+    }
+  }
   activeConv = {
     id: `task-${task.id}`,
     name: task.prompt,
@@ -1472,44 +1535,45 @@ function openOneOff(id) {
 }
 
 // ── Bubble rendering ──────────────────────────────────────
-function syncMessages(scrollEnd) {
-  const body   = document.getElementById('chat-body');
-  const empty  = document.getElementById('chat-empty');
+let mobileHistoryView = null;
+let mobileHistorySource = null;
+let mobileHistoryGeneration = 0;
+let mobileHistoryHasMore = false;
+
+function disposeMobileHistory() {
+  mobileHistoryGeneration++;
+  mobileHistoryView?.dispose();
+  mobileHistoryView = null;
+  if (liveStream) { liveStream.close(); liveStream = null; }
+}
+
+function syncMessages(scrollEnd, replaceHistory = false) {
+  const body = document.getElementById('chat-body');
+  const empty = document.getElementById('chat-empty');
   const spacer = document.getElementById('chat-top-spacer');
-  const ownTasks = tasks
-    .filter(t => activeConv?.isOneOff
-      ? `task-${t.id}` === activeConv.id
-      : t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id))
-    .sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0));
+  const ownTasks = tasks.filter(t => activeConv?.isOneOff
+    ? `task-${t.id}` === activeConv.id
+    : t.conversation_id === activeConv?.id || (activeConv?.last_task_id && t.id === activeConv.last_task_id));
   updateSendState();
-  const ct = [...mobileInheritedTasks, ...ownTasks];
-
-  if (!ct.length) {
-    body.querySelectorAll('.msg-pair').forEach(el => el.remove());
-    empty.style.display = 'flex';
-    if (spacer) spacer.style.display = 'none';
-    return;
+  const ct = [...mobileInheritedTasks,...ownTasks];
+  empty.style.display = ct.length || mobileHistoryView?.tasks.size ? 'none' : 'flex';
+  if (spacer) spacer.style.display = ct.length ? '' : 'none';
+  if (!mobileHistoryView) {
+    mobileHistoryView = new ChatHistoryView({container:body,viewport:body,
+      follow:()=>!mobileUserScrolledUp,
+      loadOlder:activeConv?.isOneOff ? null : async()=> {
+        const page = await mobileHistorySource();
+        mobileHistoryHasMore = page.hasMore;
+        return page;
+      },
+      loadTurn:async(task,host,context)=> {
+        host.appendChild(makeMsgPair(task));
+        return loadAiContent(task,document.getElementById(`ab-${task.id}`),context);
+      },
+    });
   }
-  empty.style.display = 'none';
-  if (spacer) spacer.style.display = '';
-
-  ct.forEach(task => {
-    const existing = document.getElementById(`mp-${task.id}`);
-    if (!existing) {
-      body.appendChild(makeMsgPair(task));
-      loadAiContent(task);
-    } else if (existing.dataset.status !== (task.status || '')) {
-      const replacement = makeMsgPair(task);
-      existing.replaceWith(replacement);
-      loadAiContent(task);
-    }
-    if (existing) updateTaskExecutionMetadata([task], existing);
-  });
-
-  body.querySelectorAll('.msg-pair').forEach(el => {
-    if (!ct.find(t => `mp-${t.id}` === el.id)) el.remove();
-  });
-
+  mobileHistoryView.update(ct,mobileHistoryHasMore,replaceHistory);
+  if (typeof updateTaskExecutionMetadata === 'function') updateTaskExecutionMetadata(ct,body);
   if (scrollEnd) {
     mobileUserScrolledUp = false;
     _mobileUpdateScrollBtn(false);
@@ -1529,6 +1593,10 @@ function makeMsgPair(task) {
           <div class="user-bubble-text">${x(task.prompt)}</div>
         </div>
         ${renderTaskImages(task)}
+        <div class="message-footer user-message-footer">
+          ${renderMessageTime(task.created, '发送时间')}
+          <button class="user-copy-btn" onclick="copyUserBubble(this)" title="复制" aria-label="复制消息">${copyBtnSVG()}</button>
+        </div>
         <div>${renderTaskExecutionMetadata(task)}</div>
       </div>
     </div>
@@ -1543,33 +1611,25 @@ function makeMsgPair(task) {
   return div;
 }
 
-async function loadAiContent(task) {
-  const wrap = document.getElementById(`ab-${task.id}`);
-  if (!wrap) return;
-
+async function loadAiContent(task, wrap, context) {
+  if (!wrap || !context.isCurrent()) return;
   if (task.status === 'running') {
-    streamAiContent(task, wrap);
+    await streamAiContent(task,wrap,context);
     return;
   }
-  if (task.status === 'pending') {
-    const renderer = new ChatLogRenderer(wrap, false, true, task.project_name || null, task.id);
-    renderer.renderPending();
-    return;
-  }
-  if (task.status === 'scheduled') {
-    const renderer = new ChatLogRenderer(wrap, false, true, task.project_name || null, task.id);
-    renderer.renderScheduled(task.execute_at);
-    return;
-  }
-
-  try {
-    const txt = await fetch(`/api/tasks/${task.id}/logs`).then(r => r.text());
-    const renderer = new ChatLogRenderer(wrap, false, true, task.project_name || null, task.id);
-    renderer.render(stripAnsi(txt), task.type);
+  const renderer = new ChatLogRenderer(wrap,false,true,task.project_name || null,task.id,task);
+  context.signal.addEventListener('abort',()=>renderer._resetSDKRendering(),{once:true});
+  if (task.status === 'pending') { renderer.renderPending(); return; }
+  if (task.status === 'scheduled') { renderer.renderScheduled(task.execute_at); return; }
+  const txt = await _fetchTaskLogCached(task,{signal:context.signal});
+  if (!context.isCurrent()) return;
+  context.mutate(()=> {
+    renderer.render(stripAnsi(txt),task.type);
     if (task.type === 'claude' && task.status === 'done' && task.conversation_id === activeConv?.id) {
-      renderer.addTurnForkAction(button => forkMobileConversation(task, button));
+      renderer.addTurnForkAction(button=>forkMobileConversation(task,button));
     }
-  } catch { wrap.textContent = '加载失败'; }
+  });
+  return {retryOnUpdate:!_looksLikeCompleteTaskLog(txt)};
 }
 
 async function forkMobileConversation(task, button) {
@@ -1611,35 +1671,44 @@ function bindMobileChatScroll() {
   };
 }
 
-async function streamAiContent(task, wrap) {
+async function streamAiContent(task, wrap, context) {
   const id = task.id;
   if (liveStream) { liveStream.close(); liveStream = null; }
-  const renderer = new ChatLogRenderer(wrap, true, true, task.project_name || null, task.id);
-  let skipBytes = 0;
-  try {
-    const txt = await fetch(`/api/tasks/${id}/logs`).then(r => r.ok ? r.text() : '');
-    skipBytes = new TextEncoder().encode(txt).byteLength;
-    if (txt.trim()) {
-      renderer.render(stripAnsi(txt), task.type);
-    } else {
-      renderer.renderPending();
-    }
-  } catch {
-    renderer.renderPending();
+  const renderer = new ChatLogRenderer(wrap,true,true,task.project_name || null,task.id,task);
+  let es = null;
+  context.signal.addEventListener('abort',()=> {
+    renderer._resetSDKRendering();
+    if (es) { es.close(); if (liveStream === es) liveStream = null; }
+  },{once:true});
+  let txt;
+  try { txt = await _fetchTaskLogCached(task,{signal:context.signal}); }
+  catch (error) {
+    if (!context.isCurrent()) return;
+    if (!String(error.message).includes('404')) throw error;
+    txt = '';
   }
-  const body = document.getElementById('chat-body');
+  if (!context.isCurrent()) return;
+  const skipBytes = new TextEncoder().encode(txt).byteLength;
+  context.mutate(()=>txt.trim() ? renderer.render(stripAnsi(txt),task.type) : renderer.renderPending());
   const qs = skipBytes > 0 ? `skip_bytes=${skipBytes}` : 'tail=0';
-  const es = new EventSource(sseUrl(`/api/tasks/${id}/logs/stream?${qs}`));
+  es = new EventSource(sseUrl(`/api/tasks/${id}/logs/stream?${qs}`));
   es.taskId = id;
   liveStream = es;
   es.onmessage = e => {
-    if (e.data === '[DONE]') { renderer.deactivatePendingInterventions(); es.close(); liveStream = null; bgRefresh(); return; }
-    renderer.push(stripAnsi(e.data));
-    if (!mobileUserScrolledUp) body.scrollTop = body.scrollHeight;
+    if (!context.isCurrent()) return;
+    if (e.data === '[DONE]') {
+      renderer.deactivatePendingInterventions();
+      es.close();
+      if (liveStream === es) liveStream = null;
+      bgRefresh();
+      return;
+    }
+    context.mutate(()=>renderer.push(stripAnsi(e.data)));
   };
   es.onerror = () => {
-    es.close(); liveStream = null;
-    bgRefresh();
+    es.close();
+    if (liveStream === es) liveStream = null;
+    if (context.isCurrent()) bgRefresh();
   };
 }
 
@@ -1697,6 +1766,7 @@ async function send() {
         project_name:      pendingProj.name,
         account:           pendingProj.account,
         conversation_name: name,
+        conversation_auto_title: true,
         auto: autoMode,
         images: pendingImages.map(i => i.container_path),
         execute_at: executeAt,
@@ -2047,6 +2117,9 @@ function renderProjSheet(query) {
 
 function startNew(proj) {
   prepareMobileDraftSwitch(null, proj.name);
+  disposeMobileHistory();
+  mobileHistorySource = null;
+  mobileHistoryHasMore = false;
   mobileInheritedTasks = [];
   document.getElementById('mobile-fork-origin')?.remove();
   closeSheet();
@@ -2073,12 +2146,74 @@ function showItemActions(type, id) {
   actionTarget = { type, id };
   const title = document.getElementById('action-sheet-title');
   if (title) title.textContent = type === 'one-off' ? '一次性任务操作' : '对话操作';
+  const conv = type === 'conversation' ? convs.find(item=>item.id===id) : null;
+  document.getElementById('action-rename-btn').hidden = !conv;
+  document.getElementById('action-retitle-btn').hidden = !conv || conv.mode === 'terminal';
+  document.getElementById('action-retitle-btn').disabled = conv?.title?.status === 'pending';
+  document.getElementById('action-title-editor').hidden = true;
+  const status = document.getElementById('action-title-status');
+  status.hidden = !conv;
+  status.textContent = conv ? FleetTitles.statusLabel(conv.title) : '';
   document.getElementById('action-sheet').classList.add('open');
 }
 
 function closeActionSheet() {
   document.getElementById('action-sheet').classList.remove('open');
   actionTarget = null;
+}
+
+function syncMobileConversationTitle() {
+  syncMobileTitleActions();
+  if (!activeConv || activeConv.isOneOff) return;
+  const current = convs.find(conv=>conv.id===activeConv.id);
+  if (!current) return;
+  activeConv.name = current.name;
+  activeConv.title = current.title;
+  const header = document.getElementById('chat-ttl');
+  header.textContent = current.name;
+  header.title = current.name+(typeof FleetTitles !== 'undefined' ? ' · '+FleetTitles.statusLabel(current.title) : '');
+}
+
+function syncMobileTitleActions() {
+  const conv = actionTarget?.type === 'conversation' ? convs.find(item=>item.id===actionTarget.id) : null;
+  if (!conv) return;
+  const button = document.getElementById('action-retitle-btn');
+  const status = document.getElementById('action-title-status');
+  if (button) button.disabled = conv.title?.status === 'pending';
+  if (status) status.textContent = FleetTitles.statusLabel(conv.title);
+}
+
+function editMobileTitle() {
+  const conv = convs.find(item=>item.id===actionTarget?.id);
+  if (!conv) return;
+  document.getElementById('action-title-editor').hidden = false;
+  const input = document.getElementById('action-title-input');
+  input.value = conv.name; input.focus(); input.select();
+}
+
+async function saveMobileTitle() {
+  const target = actionTarget, id = target?.id;
+  if (!id) return;
+  const name = document.getElementById('action-title-input').value.trim();
+  if (!name) return;
+  try {
+    const value = await api('/api/conversations/'+encodeURIComponent(id),{method:'PATCH',body:{name}});
+    FleetTitles.merge(convs,[value]);
+    renderList(); syncMobileConversationTitle();
+    if (actionTarget === target) closeActionSheet();
+  } catch (error) { alert('重命名失败：'+error.message); }
+}
+
+async function regenerateMobileTitle() {
+  const target = actionTarget, id = target?.id;
+  const conv = convs.find(item=>item.id===id);
+  if (!conv) return;
+  try {
+    const value = await FleetTitles.regenerate(conv);
+    FleetTitles.merge(convs,[value]);
+    renderList(); syncMobileConversationTitle();
+    if (actionTarget === target) closeActionSheet();
+  } catch (error) { alert(error.message); }
 }
 
 async function archiveActionTarget() {
@@ -2164,7 +2299,7 @@ function showChat() {
 }
 
 function backToList() {
-  if (liveStream) { liveStream.close(); liveStream = null; }
+  disposeMobileHistory();
   document.getElementById('v-chat').classList.add('slide-out');
   renderList();
 }

@@ -41,18 +41,17 @@ class Element {
 
 function loadUi(fetchImpl = async () => ({ status: 200 })) {
   const context = vm.createContext({
-    console, TextEncoder, Headers,
+    console, TextEncoder, Headers, AbortController, DOMException, setTimeout, clearTimeout,
     document: { createElement: tag => new Element(tag), addEventListener() {} },
     window: { fetch: fetchImpl },
     fetch: fetchImpl,
     localStorage: { getItem: () => '' },
-    _finishedLogCache: new Map(),
-    logCacheGet: async () => null,
-    logCacheSet() {},
   });
-  for (const name of ['utils.js', 'renderer.js', 'chat.js']) {
+  for (const name of ['utils.js', 'log-cache.js', 'renderer.js', 'chat.js']) {
     vm.runInContext(fs.readFileSync(path.join(jsDir, name), 'utf8'), context, { filename: name });
   }
+  context.logCacheGet = async () => null;
+  context.logCacheSet = () => {};
   context.Renderer = vm.runInContext('ChatLogRenderer', context);
   return context;
 }
@@ -155,4 +154,14 @@ test('ordinary raw diagnostics stay readable while long raw text is bounded', ()
   assert.equal(renderer.inner.children[0].textContent, 'Connection failed: retry later');
   renderer._processLine('工具暂时无法连接，请重试。'.repeat(10000));
   assert.ok(renderer.inner.children[1].textContent.length < 2100);
+});
+
+test('replaying routine tool heartbeats does not create raw error cards',()=> {
+  const context=loadUi();
+  const renderer=new context.Renderer(null);
+  renderer.inner=new Element();
+  for(let i=0;i<100;i++) renderer._event({type:'tool_progress',tool_use_id:'bash-one',elapsed_time_seconds:i,heartbeat:true});
+  assert.equal(renderer.inner.children.length,0);
+  renderer._processLine('Connection failed: retry later');
+  assert.match(renderer.inner.textContent,/Connection failed/);
 });

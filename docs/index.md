@@ -134,6 +134,6 @@ proxy relay -> host proxy -> internet
 
 ## 下一步
 
-新用户建议从 [快速开始](quickstart.md) 走完整流程；已经安装过的用户可以直接查看 [命令速查](commands.md) 或 [Web 控制台](server.md)。macOS 用户可以参考 [系统托盘](tray.md) 一键配置后台守护进程。
+新用户建议从 [快速开始](quickstart.md) 走完整流程；已经安装过的用户可以直接查看 [命令速查](commands.md) 或 [Web 控制台](server.md)。会话命名与修改方式见 [会话标题](conversation-titles.md)。macOS 用户可以参考 [系统托盘](tray.md) 一键配置后台守护进程。
 
 </section>

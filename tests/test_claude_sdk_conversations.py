@@ -113,6 +113,32 @@ def select_backend(scheduler: Scheduler, backend: str) -> None:
                            account.runtime, account.sandbox_confirmed, claude_backend=backend)
 
 
+def test_concurrent_chat_identities_survive_repeated_clock_and_legacy_entropy(conversation_system, monkeypatch):
+    from datetime import datetime
+    import coderfleet.server.scheduler as module
+    scheduler, _runtime = conversation_system
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 20, 10, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(module, "datetime", FixedClock)
+    monkeypatch.setattr(module.random, "randint", lambda *_: 2471)
+
+    async def drive():
+        first = await wait_done(scheduler, await scheduler.submit("source", project_name="repo", conversation_name="Source"))
+        second = await wait_done(scheduler, await scheduler.submit("foreign", project_name="repo", conversation_name="Foreign"))
+        assert first.id != second.id
+        assert first.conversation_id != second.conversation_id
+        assert scheduler.get_task(first.id).prompt == "source"
+        assert scheduler.get_conversation(first.conversation_id).name == "Source"
+        assert scheduler.get_conversation(second.conversation_id).name == "Foreign"
+        with pytest.raises(ValueError, match="不属于"):
+            scheduler.fork_conversation(first.conversation_id, second.id)
+    asyncio.run(drive())
+
+
 async def wait_done(scheduler: Scheduler, task: Task) -> Task:
     for _ in range(250):
         current = scheduler.get_task(task.id)
@@ -122,6 +148,40 @@ async def wait_done(scheduler: Scheduler, task: Task) -> Task:
             return current
         await asyncio.sleep(0.02)
     raise AssertionError(f"Task {task.id} did not finish")
+
+
+@pytest.mark.parametrize("backend", ["cli", "sdk"])
+def test_server_titles_survive_real_task_completion_and_session_resume(conversation_system, backend):
+    from coderfleet.server.system_llm import SystemLLM
+    scheduler, runtime = conversation_system
+    select_backend(scheduler, backend)
+    calls = []
+    async def generate(_llm, context):
+        calls.append(context)
+        return "历史消息加载与滚动修复"
+    scheduler.titles.generate = generate
+    scheduler.titles.llm = SystemLLM(api_key="test", model="test")
+
+    async def drive():
+        task = await scheduler.submit("修复历史消息滚动加载的位置跳动", project_name="repo", conversation_auto_title=True)
+        scheduler.titles.tick()
+        await scheduler.titles.wait_idle()
+        first = await wait_done(scheduler, task)
+        conv = scheduler.get_conversation(first.conversation_id)
+        assert conv.name == "历史消息加载与滚动修复"
+        assert conv.title.source == "auto"
+        original_session = conv.native_session_id
+        assert original_session
+        next_task = await scheduler.submit("继续", conversation_id=conv.id)
+        await wait_done(scheduler, next_task)
+        scheduler.titles.tick()
+        await scheduler.titles.wait_idle()
+        conv = scheduler.get_conversation(conv.id)
+        assert conv.name == "历史消息加载与滚动修复"
+        assert conv.native_session_id == original_session
+        assert len(calls) == 1
+        assert len(runtime.requests) == 2  # Naming did not consume a coding Task.
+    asyncio.run(drive())
 
 
 def test_conversation_resumes_cli_to_sdk_and_back_without_changing_session(conversation_system) -> None:

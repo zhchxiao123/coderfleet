@@ -566,7 +566,7 @@ def test_log_renderer_reassembles_multiline_json_events() -> None:
         "_processJsonBodyText(text)",
         "let jsonStart = -1",
         "depth += 1",
-        "this._event(JSON.parse(candidate))",
+        "this._event(JSON.parse(candidate), candidate)",  # Preserve the raw event for persisted clock matching.
     ]:
         assert token in source
 
@@ -813,8 +813,8 @@ def test_mobile_renders_cf_send_download_cards() -> None:
     source = read_mobile()
     renderer_css = read_renderer_css()
 
-    assert "new ChatLogRenderer(wrap, false, true, task.project_name || null, task.id)" in source
-    assert "new ChatLogRenderer(wrap, true, true, task.project_name || null, task.id)" in source
+    assert "new ChatLogRenderer(wrap,false,true,task.project_name || null,task.id,task)" in source
+    assert "new ChatLogRenderer(wrap,true,true,task.project_name || null,task.id,task)" in source
     assert ".cf-download-card" in renderer_css
     assert ".cf-dl-btn" in renderer_css
 
@@ -822,10 +822,11 @@ def test_mobile_renders_cf_send_download_cards() -> None:
 def test_mobile_running_chat_hydrates_history_before_streaming() -> None:
     source = read_mobile()
 
-    assert "existing.dataset.status !== (task.status || '')" in source
-    assert "existing.replaceWith(replacement)" in source
-    assert "const txt = await fetch(`/api/tasks/${id}/logs`).then(r => r.ok ? r.text() : '')" in source
-    assert "skipBytes = new TextEncoder().encode(txt).byteLength" in source
+    shared = read_ui_source()
+    assert "row.status === task.status" in shared
+    assert "row.node.replaceWith(node)" in shared
+    assert "txt = await _fetchTaskLogCached(task,{signal:context.signal})" in source
+    assert "const skipBytes = new TextEncoder().encode(txt).byteLength" in source
     assert "skip_bytes=${skipBytes}" in source
     assert "logs/stream?${qs}" in source
 
@@ -980,7 +981,8 @@ def test_select_conversation_fetches_scoped_tasks_instead_of_full_reload() -> No
     assert match is not None
     body = match.group("body")
 
-    assert "api/tasks?conversation_id=" in body
+    assert "chatHistoryPosition(convId).source.refresh()" in body
+    assert "api/tasks?conversation_id=" in source
     assert "renderChatWorkspace(conv)" in body
 
 
@@ -999,101 +1001,47 @@ def test_chat_poll_uses_heartbeat_instead_of_full_reload() -> None:
     assert "api/tasks/heartbeat" in source
 
 
-def test_chat_reuses_cached_log_for_finished_tasks_instead_of_refetching() -> None:
-    """done/failed/killed 任务的日志内容不会再变；会话因为其它任务状态变化整体
-    重渲染时，不该把这些历史日志重新拉一遍（issue #42 里抽成了 _fetchTaskLogCached，
-    eager 加载和折叠占位点开懒加载两条路径共用同一份缓存逻辑）。"""
+def test_chat_history_uses_one_shared_cached_loader_on_both_clients() -> None:
     source = read_ui_source()
+    assert "async function _fetchTaskLogCached(task, {signal} = {})" in source
+    assert "_logRequests.get(key)" in source
+    assert "logCacheGet(task.id)" in source
+    assert "logCacheSet(task.id,text)" in source
+    assert "_looksLikeCompleteTaskLog(text)" in source
+    assert '<script src="/static/js/log-cache.js' in read_index()
+    assert '<script src="/static/js/log-cache.js' in read_mobile()
+    assert "_fetchTaskLogCached(task,{signal:context.signal})" in read_mobile()
 
-    assert "_finishedLogCache" in source
-    assert "_finishedLogCache.has(task.id)" in source
-    assert "_finishedLogCache.set(task.id, text)" in source
-    assert "async function _fetchTaskLogCached(task)" in source
 
-
-def test_render_chat_workspace_only_eager_fetches_recent_task_logs() -> None:
-    """issue #42：打开/刷新一个会话不该把全部历史任务的日志一次性拉下来渲染——
-    历史越长（比如 /loop 跑出来几十轮），日志累计能到几 MB，一次性全部请求+渲染
-    会把首屏卡住。只应该 eager 拉取渲染最近 CHAT_EAGER_LOG_COUNT 条，更早的任务
-    显示折叠占位，点开才按需拉取。"""
+def test_chat_history_has_bounded_latest_first_windows_instead_of_full_transcripts() -> None:
     source = read_ui_source()
-
-    assert re.search(r"const\s+CHAT_EAGER_LOG_COUNT\s*=\s*\d+", source)
-
-    match = re.search(
-        r"async function renderChatWorkspace\(conv\) \{(?P<body>.*?)\n\}\n\n", source, re.S,
-    )
-    assert match is not None
-    body = match.group("body")
-
-    assert "collapsedTasks" in body
-    assert "eagerTasks" in body
-    assert "CHAT_EAGER_LOG_COUNT" in body
-    assert "_renderCollapsedTaskPlaceholder(task)" in body
-    assert "_fetchTaskLogCached(t)" in body
-    # 折叠占位不该在打开会话时就去拉日志正文——只有 eagerTasks 才在 Promise.all 里请求
-    assert "eagerTasks.map(t => _fetchTaskLogCached(t))" in body
-
-    assert "function _renderCollapsedTaskPlaceholder(task)" in source
-    # 点开折叠占位才按需拉取渲染，复用同一份 _fetchTaskLogCached 缓存逻辑
-    collapsed_match = re.search(
-        r"function _renderCollapsedTaskPlaceholder\(task\) \{(?P<body>.*?)\n\}\n\n", source, re.S,
-    )
-    assert collapsed_match is not None
-    assert "_fetchTaskLogCached(task)" in collapsed_match.group("body")
+    assert "const CHAT_HISTORY_INITIAL_COUNT = 3" in source
+    assert "const CHAT_HISTORY_PAGE_SIZE = 8" in source
+    assert "pending.reverse()" in source
+    assert "new ChatHistoryView" in source
+    assert "new ChatHistoryView" in read_mobile()
+    assert '<script src="/static/js/chat-history.js' in read_index()
+    assert '<script src="/static/js/chat-history.js' in read_mobile()
 
 
-def test_manually_expanded_historical_task_survives_workspace_rerender() -> None:
-    """issue #42 code-review 补充：renderChatWorkspace 每次重渲染（比如心跳触发的整体
-    重渲染）都会把 chatContent 从 collapsedTasks/eagerTasks 重新整个建一遍。如果不记录
-    "用户手动点开过哪些折叠任务"，展开过的历史任务会在下一次重渲染时又变回折叠占位。"""
+def test_history_navigation_retains_the_reading_position_and_cancels_stale_views() -> None:
     source = read_ui_source()
-
-    assert "chatExpandedTaskIds" in source
-    assert re.search(r"const\s+chatExpandedTaskIds\s*=\s*new Set\(\)", source)
-
-    # 点开折叠占位时要记进这个集合
-    collapsed_match = re.search(
-        r"function _renderCollapsedTaskPlaceholder\(task\) \{(?P<body>.*?)\n\}\n\n", source, re.S,
-    )
-    assert collapsed_match is not None
-    assert "chatExpandedTaskIds.add(task.id)" in collapsed_match.group("body")
-
-    # renderChatWorkspace 要读取这个集合，把命中的历史任务当作展开态渲染，而不是折叠占位
-    match = re.search(
-        r"async function renderChatWorkspace\(conv\) \{(?P<body>.*?)\n\}\n\n", source, re.S,
-    )
-    assert match is not None
-    body = match.group("body")
-    assert "manuallyExpanded" in body
-    assert "chatExpandedTaskIds.has(t.id)" in body
-    assert "expandedLogsById" in body
+    assert "chatHistoryPositions" in source
+    assert "position.startId" in source
+    assert "position.offset" in source
+    assert "generation !== chatWorkspaceGeneration" in source
+    assert "row.controller.abort()" in source
+    assert "anchor.getBoundingClientRect().top - before" in source
 
 
-def test_finished_task_logs_persist_across_page_reloads_via_indexeddb() -> None:
-    """issue #43：_finishedLogCache 只是内存 Map，刷新页面就清空，已完成任务的日志
-    每次刷新都要重新整份下载。_fetchTaskLogCached 应该在内存缓存未命中时，
-    先查 IndexedDB 持久层，命中就不必发网络请求；拉取到新内容后两层缓存都要写。"""
+def test_history_cache_has_memory_and_disk_byte_budgets() -> None:
     source = read_ui_source()
-
-    assert '<script src="/static/js/log-cache.js' in INDEX_HTML.read_text(encoding="utf-8")
-
-    assert "async function logCacheGet(taskId)" in source
-    assert "async function logCacheSet(taskId, text)" in source
-    # 有淘汰策略，避免无限占用本地存储
-    assert re.search(r"LOG_CACHE_MAX_ENTRIES\s*=\s*\d+", source)
+    assert "LOG_CACHE_MAX_ENTRIES = 300" in source
+    assert "LOG_CACHE_MAX_BYTES = 64 * 1024 * 1024" in source
+    assert "LOG_MEMORY_MAX_BYTES = 16 * 1024 * 1024" in source
     assert "_evictOldLogCacheEntries" in source
-
-    match = re.search(
-        r"async function _fetchTaskLogCached\(task\) \{(?P<body>.*?)\n\}\n\n", source, re.S,
-    )
-    assert match is not None
-    body = match.group("body")
-
-    assert "logCacheGet(task.id)" in body
-    assert "logCacheSet(task.id, text)" in body
-    # running 任务的日志还在变化，不该走持久缓存
-    assert "task.status !== 'running'" in body
+    assert "task.status !== 'running'" in source
+    assert "isFinished ? '?light=1' : ''" in source
 
 
 def test_open_pipeline_does_not_refetch_full_task_list() -> None:

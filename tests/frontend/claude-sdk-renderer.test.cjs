@@ -27,6 +27,7 @@ class Element {
   focus() {}
   querySelectorAll() { return []; }
   querySelector(selector) {
+    if (selector === '.bubble-translate-btn' && !this._html.includes('class="bubble-translate-btn"')) return null;
     if (selector === '.chat-log') return this.log || (this.log = new Element());
     this.queries ||= new Map();
     if (!this.queries.has(selector)) this.queries.set(selector,new Element());
@@ -276,6 +277,47 @@ test('SDK partial text is visible before the final block and settles into one re
   assert.equal(result.lastBubbleEl,reply);
   assert.equal(container.log.children.filter(child=>child.className.includes('ai-reply')).length,1,'Partial, assistant and result must not create duplicate answers');
   assert.match(reply.querySelector('.bubble-content').innerHTML,/正在回答/);
+});
+
+test('streamed English replies retain translation controls and use the completed text', () => {
+  const {result,context,flushFrames}=renderer();
+  const translations=[];
+  context.toggleBubbleTranslation=(button,content,text)=>translations.push(text);
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'});
+  push({type:'stream_event',event:{type:'message_start',message:{id:'translate-stream'}}});
+  push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Hello'}}});
+  flushFrames();
+  const reply=result.lastBubbleEl;
+  const initialButton=reply.querySelector('.bubble-translate-btn');
+  assert.ok(!initialButton || initialButton.style.display==='none','Very short text has no visible translation control');
+  push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:' from the streamed response.'}}});
+  flushFrames();
+  const button=reply.querySelector('.bubble-translate-btn');
+  assert.ok(button,'English text must gain a translation control after starting as an empty bubble');
+  assert.notEqual(button.style.display,'none');
+  const completed='Hello from the completed response.';
+  push({type:'assistant',message:{id:'translate-stream',content:[{type:'text',text:completed}]}});
+  assert.equal(result.lastBubbleEl,reply,'Settling must retain the existing reply');
+  button.listeners.click();
+  assert.deepEqual(translations,[completed],'Translation uses the latest complete text');
+});
+
+test('translation controls follow the final language for streamed and complete replies', () => {
+  const {result,flushFrames}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'stream_event',event:{type:'message_start',message:{id:'translate-chinese'}}});
+  push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'English introduction'}}});
+  flushFrames();
+  const reply=result.lastBubbleEl;
+  const chinese='这是一段完整的中文回复，不需要显示翻译入口。';
+  push({type:'assistant',message:{id:'translate-chinese',content:[{type:'text',text:chinese}]}});
+  const chineseButton=reply.querySelector('.bubble-translate-btn');
+  assert.ok(!chineseButton || chineseButton.style.display==='none');
+  const complete=result._bubble('A complete English reply without streaming.');
+  const englishButton=complete.querySelector('.bubble-translate-btn');
+  assert.ok(englishButton);
+  assert.notEqual(englishButton.style.display,'none');
 });
 
 

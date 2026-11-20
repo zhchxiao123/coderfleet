@@ -12,6 +12,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import click
 import httpx
@@ -103,6 +104,40 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
 
 # ── task run ──────────────────────────────────────────────
 
+@task_group.command("title")
+@click.argument("conversation_id")
+@click.option("--name", default=None, help="手动命名并锁定标题")
+@click.option("--regenerate", is_flag=True, help="使用当前会话上下文重新生成标题")
+@click.option("--json", "as_json", is_flag=True, help="输出名称和命名状态 JSON")
+def cmd_task_title(conversation_id: str, name: Optional[str], regenerate: bool, as_json: bool) -> None:
+    """View or update a conversation title without submitting a coding Task."""
+    if name is not None and regenerate:
+        raise click.ClickException("--name 和 --regenerate 不能同时使用")
+    api = _require_server()
+    url = f"{api}/api/conversations/{quote(conversation_id, safe='')}"
+    try:
+        response = httpx.get(url, headers=api_headers(api), timeout=10)
+        response.raise_for_status()
+        current = response.json()
+        if name is not None:
+            response = httpx.patch(url, json={"name": name}, headers=api_headers(api), timeout=10)
+        elif regenerate:
+            response = httpx.post(url + "/title", json={"expected_revision": current.get("title", {}).get("revision", 0),
+                                                     "expected_name": current["name"]},
+                                  headers=api_headers(api), timeout=10)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        raise click.ClickException(_http_error_detail(error.response)) from error
+    except httpx.RequestError as error:
+        raise click.ClickException(f"请求失败：{error}") from error
+    value = response.json()
+    title = value.get("title", {})
+    if as_json:
+        click.echo(json.dumps({"id": value["id"], "name": value["name"], "title": title}, ensure_ascii=False))
+    else:
+        click.echo(value["name"])
+        click.echo(f"命名状态：{title.get('status', 'idle')} · 来源：{title.get('source', 'legacy')}")
+
 @task_group.command("run")
 @click.argument("prompt")
 @click.option("--project", "prefer_project", default=None, help="项目名称或宿主机路径")
@@ -114,6 +149,7 @@ def cmd_task_fork(conversation_id: str, task_id: str, name: str) -> None:
 @click.option("--sdk-options", type=click.Path(exists=True,dir_okay=False,path_type=Path), help="SDK 参数 JSON 文件（保存在 Task 快照）")
 @click.option("--conversation", "conversation_id", default=None, help="续接已有任务链 ID")
 @click.option("--new-chain", "conversation_name", default=None, help="新建任务链并命名")
+@click.option("--auto-title", is_flag=True, help="新建会话并由系统模型自动命名")
 @click.option("--at", "execute_at", default=None, help="定时执行时间（ISO 8601）")
 @click.option("--ephemeral", is_flag=True, help="临时容器模式（docker run --rm，无需持久容器）")
 @click.option("--secret", "raw_secrets", multiple=True, metavar="KEY=VAL",
@@ -130,6 +166,7 @@ def cmd_task_run(
     auto: bool,
     conversation_id: Optional[str],
     conversation_name: Optional[str],
+    auto_title: bool,
     execute_at: Optional[str],
     ephemeral: bool,
     raw_secrets: tuple,
@@ -139,6 +176,10 @@ def cmd_task_run(
     api = _require_server()
 
     body: dict = {"prompt": prompt, "auto": auto}
+    if auto_title:
+        if conversation_id or conversation_name:
+            raise click.ClickException("--auto-title 仅用于新会话，不能与 --conversation/--new-chain 同用")
+        body["conversation_auto_title"] = True
     if model.strip():
         body["model"] = model.strip()
     if sdk_options is not None:

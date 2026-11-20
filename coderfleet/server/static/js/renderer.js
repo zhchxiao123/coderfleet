@@ -8,9 +8,10 @@ class ChatLogRenderer {
   // 还没等到 tool_result 时会渲染成可提交的实时表单；SDK 原生提问也走相同表单。
   static INTERVENTION_TOOL_NAME = 'mcp__coderfleet__ask_user_question';
 
-  constructor(container, isRunning = false, foldProcess = false, projectName = null, taskId = null) {
+  constructor(container, isRunning = false, foldProcess = false, projectName = null, taskId = null, taskTiming = {}) {
     this.container = container;   // #log-content div
     this.taskId = taskId;       // 提交 Intervention 答案时要 POST 去哪个任务
+    this.taskTiming = taskTiming || {};
     this.inner = null;        // .chat-log div
     this.permissionMap = {};
     this.toolMap = {};          // tool_use_id → { headerEl, badgeEl, outputEl, exitEl, toolName, input, wrap }
@@ -55,6 +56,8 @@ class ChatLogRenderer {
   }
 
   _resetSDKRendering() {
+    this._timeGeneration = (this._timeGeneration || 0) + 1;
+    this._pendingMessageClock = null;
     if (this.streamFrame != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.streamFrame);
     for (const child of Object.values(this.subagentRenderers || {})) child.renderer._resetSDKRendering();
     this.backgroundTasks = new Map();
@@ -295,7 +298,7 @@ class ChatLogRenderer {
       if (depth === 0) {
         const candidate = text.slice(jsonStart, i + 1);
         try {
-          this._event(JSON.parse(candidate));
+          this._event(JSON.parse(candidate), candidate);
         } catch {
           this._rawLine(candidate);
         }
@@ -389,8 +392,9 @@ class ChatLogRenderer {
     this._jsonLineBuffer = this._jsonLineBuffer ? (this._jsonLineBuffer + line) : line;
     let d;
     try { d = JSON.parse(this._jsonLineBuffer); } catch { return; }
+    const rawEvent = this._jsonLineBuffer;
     this._jsonLineBuffer = '';
-    this._event(d);
+    this._event(d, rawEvent);
   }
 
   _flushJsonLineBuffer() {
@@ -401,7 +405,57 @@ class ChatLogRenderer {
   }
 
   // ── 私有：事件分发 ────────────────────────────────────────
-  _event(d) {
+  _event(d, rawEvent = '') {
+    if (d.type === 'system' && d.subtype === 'coderfleet_event_clock') return this._applyMessageClock(d);
+    const previous = this._messageEvent;
+    const record = {timestamp:d.timestamp ?? d.message?.timestamp ?? d.part?.time?.end ?? d.part?.time?.created,
+      targets:[],rawEvent,order:this._messageOrder = (this._messageOrder || 0) + 1};
+    this._messageEvent = record;
+    try { return this._dispatchEvent(d); }
+    finally {
+      this._pendingMessageClock = rawEvent && record.targets.length ? record : null;
+      this._messageEvent = previous;
+    }
+  }
+
+  _paintMessageTime(node, value, label, order = 0, source = 'event') {
+    const html = renderMessageTime(value, label, source === 'task' ? '本轮完成 · ' : '');
+    if (!html || Number(node.dataset.messageTimeOrder || 0) > order) return;
+    node.querySelector('.bubble-time-slot').innerHTML = html;
+    node.dataset.messageTimeSource = source;
+    node.dataset.messageTimeOrder = String(order);
+  }
+
+  _applyMessageClock(clock) {
+    const record = this._pendingMessageClock;
+    this._pendingMessageClock = null;
+    if (!record || renderMessageTime(record.timestamp, '') || !renderMessageTime(clock.at, '') ||
+        !/^[a-f0-9]{64}$/.test(clock.event_hash || '') || typeof crypto === 'undefined' || !crypto.subtle) return;
+    const generation = this._timeGeneration;
+    // The clock follows its original event. Verify its raw-byte hash before using
+    // it; async completion must not update an old render or a newer message time.
+    crypto.subtle.digest('SHA-256', new TextEncoder().encode(record.rawEvent)).then(bytes => {
+      const hash = Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+      if (hash !== clock.event_hash || generation !== this._timeGeneration) return;
+      for (const {node,label} of record.targets) this._paintMessageTime(node, clock.at, label, record.order);
+    }).catch(() => { /* Keep recorded Task timing when Web Crypto is unavailable. */ });
+  }
+
+  _recordMessageTime(node, label = '回复时间') {
+    if (!node) return;
+    if (this._messageEvent) this._messageEvent.targets.push({node,label});
+    this._paintMessageTime(node, this._messageEvent?.timestamp, label, this._messageEvent?.order);
+  }
+
+  _prepareReplyTime(node) {
+    if (this.lastBubbleEl?.dataset.messageTimeSource === 'task') {
+      this.lastBubbleEl.querySelector('.bubble-time-slot').innerHTML = '';
+    }
+    this._paintMessageTime(node, this.taskTiming.finished, '本轮完成时间（未记录单条回复时间）', 0, 'task');
+    this._recordMessageTime(node);
+  }
+
+  _dispatchEvent(d) {
     // Claude 的 Task/Agent 子agent事件带 parent_tool_use_id，指向发起它的
     // tool_use.id——这类事件属于子agent自己的会话，不进主时间线，转发给
     // 对应工具卡片内嵌的子会话渲染器（后者是一个完整的 ChatLogRenderer 实例，
@@ -422,6 +476,7 @@ class ChatLogRenderer {
       case 'user': return this._claudeUser(d.message);
       case 'result': return this._claudeResult(d);
       case 'rate_limit_event': return this._claudeRateLimit(d);
+      case 'tool_progress': return; // Routine elapsed-time/heartbeat telemetry; tool outcomes retain failures.
       // Codex
       case 'thread.started': return this._pill('会话开始', d.thread_id ? '#' + String(d.thread_id).slice(0, 8) : '');
       case 'turn.started': return; // 太噪，静默
@@ -502,7 +557,7 @@ class ChatLogRenderer {
     if (d.subtype === 'task_progress') return;
     if (d.subtype === 'coderfleet_permission_pending') return this._permissionPending(d);
     if (d.subtype === 'coderfleet_permission_closed') return this._closePermission(d.tool_call_id,d.status);
-    if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || ''); return; }
+    if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || '', '接收时间'); return; }
     if (d.subtype === 'coderfleet_interrupted') { this.interrupted = true; this._pill('已中断', '原生会话可继续'); return; }
     if (d.subtype === 'coderfleet_question_closed') {
       const owner = this._questionRenderer(d.tool_call_id);
@@ -607,8 +662,11 @@ class ChatLogRenderer {
   }
 
   _renderStreamMarkdown(block) {
-    block.node.querySelector(block.type === 'text' ? '.bubble-content' : '.think-bubble').innerHTML =
-      renderMd(block.type === 'text' ? this._injectDownloadCards(block.text) : block.text);
+    if (block.type === 'text') {
+      const button = block.node.querySelector('.bubble-translate-btn');
+      renderBubbleTranslationSource(block.node.querySelector('.bubble-content'),button,block.text,renderMd(this._injectDownloadCards(block.text)));
+      button.style.display = isMostlyNonChinese(block.text) ? '' : 'none';
+    } else block.node.querySelector('.think-bubble').innerHTML = renderMd(block.text);
   }
 
   _flushStreamMarkdown() {
@@ -628,6 +686,7 @@ class ChatLogRenderer {
     if (block.type === 'text') entry.node._bubbleText = entry.text;
     this.streamDirty.delete(entry);
     this._renderStreamMarkdown(entry);
+    if (block.type === 'text') this._recordMessageTime(entry.node);
     return true;
   }
 
@@ -1230,22 +1289,27 @@ class ChatLogRenderer {
     <div class="bubble">
       <div class="bubble-label-row">
         <div class="bubble-label">${esc(label)}</div>
-        <div class="bubble-actions">
-          ${showTranslate ? `<button class="bubble-translate-btn" title="翻译">${translateBtnSVG()}</button>` : ''}
-          <button class="bubble-copy-btn" title="复制">${copyBtnSVG()}</button>
-        </div>
       </div>
       <div class="bubble-content">${renderMd(displayText)}</div>
+    </div>
+    <div class="message-footer ai-message-footer">
+      <div class="bubble-actions">
+        <button class="bubble-copy-btn" title="复制" aria-label="复制回复">${copyBtnSVG()}</button>
+        <button class="bubble-translate-btn" title="翻译" aria-label="翻译回复">${translateBtnSVG()}</button>
+      </div>
+      <span class="bubble-time-slot"></span>
     </div>
   </div>`;
 
     el._bubbleText = text;
+    this._prepareReplyTime(el);
     el.querySelector('.bubble-copy-btn').addEventListener('click', () => {
       copyTextToClipboard(el._bubbleText, el.querySelector('.bubble-copy-btn'));
     });
 
     const tbtn = el.querySelector('.bubble-translate-btn');
     if (tbtn) {
+      tbtn.style.display = showTranslate ? '' : 'none';
       tbtn.addEventListener('click', () => {
         toggleBubbleTranslation(tbtn, el.querySelector('.bubble-content'), el._bubbleText);
       });
@@ -1269,10 +1333,8 @@ class ChatLogRenderer {
   addTurnForkAction(onFork) {
     const reply = this.lastBubbleEl;
     const actions = reply?.querySelector('.bubble-actions');
-    const body = reply?.querySelector('.bubble-body');
-    if (!actions || !body || actions.querySelector('.bubble-fork-btn')) return;
+    if (!actions || actions.querySelector('.bubble-fork-btn')) return;
     actions.classList.add('bubble-turn-actions');
-    body.appendChild(actions);
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'bubble-fork-btn';
@@ -2178,11 +2240,12 @@ class ChatLogRenderer {
   }
 
   // ── 系统药丸 ──────────────────────────────────────────────
-  _pill(label, detail) {
+  _pill(label, detail, timeLabel = '') {
     const el = document.createElement('div');
     el.className = 'chat-sys-event';
     el.classList.add('timeline-node', 'is-muted');
-    el.innerHTML = `<span class="chat-sys-pill">${esc(label)}${detail ? ` <span class="pill-detail">· ${esc(detail)}</span>` : ''}</span>`;
+    el.innerHTML = `<span class="chat-sys-pill">${esc(label)}${detail ? ` <span class="pill-detail">· ${esc(detail)}</span>` : ''}</span>${timeLabel ? '<span class="bubble-time-slot"></span>' : ''}`;
+    if (timeLabel) this._recordMessageTime(el, timeLabel);
     this._appendNode(el);
   }
 
@@ -2245,11 +2308,17 @@ class ChatLogRenderer {
     <div class="bubble">
       <div class="bubble-label-row">
         <div class="bubble-label">Grok</div>
-        <button class="bubble-copy-btn" title="复制">${copyBtnSVG()}</button>
       </div>
       <div class="bubble-content" id="${segId}"></div>
     </div>
+    <div class="message-footer ai-message-footer">
+      <div class="bubble-actions">
+        <button class="bubble-copy-btn" title="复制" aria-label="复制回复">${copyBtnSVG()}</button>
+      </div>
+      <span class="bubble-time-slot"></span>
+    </div>
   </div>`;
+        this._prepareReplyTime(el);
         el.querySelector('.bubble-copy-btn').addEventListener('click', () => {
           copyTextToClipboard(textRef.value, el.querySelector('.bubble-copy-btn'));
         });

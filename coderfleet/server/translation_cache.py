@@ -4,7 +4,8 @@ translation_cache.py — 气泡翻译的内容寻址缓存
 同一段原文永远对应同一段译文，所以按 hash(目标语言 + 原文) 落盘缓存：
   - 抗刷新 / 抗气泡重建（键不依赖易变的 DOM 或 task id，只依赖内容）
   - 天然去重：多处出现的同一段文本只翻一次、全局复用
-  - 永不失效：内容没变，键就没变；换模型不入键，避免整仓译文作废
+  - 模型不入键，避免切换模型导致整仓译文作废
+  - 校验版本变更时按需重译旧条目，不删除原来的缓存文件
 
 深度藏在 get/put 两个方法后面：hash、文件布局、原子落盘都是实现细节，
 复用 store.py 的 JsonStore（先写临时文件再 os.replace）。
@@ -26,6 +27,7 @@ class TranslationRecord(BaseModel):
     translated: str
     source_preview: str = ""
     created: str = ""
+    version: int = 1  # Legacy entries were stored without checking provider completion.
 
 
 def _key(text: str, target: str) -> str:
@@ -40,7 +42,7 @@ class TranslationCache:
 
     def get(self, text: str, target: str) -> str | None:
         rec = self._store.get(_key(text, target))
-        return rec.translated if rec else None
+        return rec.translated if rec and rec.version == 2 and rec.translated.strip() else None
 
     def put(self, text: str, target: str, translated: str) -> None:
         self._store.save(TranslationRecord(
@@ -49,4 +51,5 @@ class TranslationCache:
             translated=translated,
             source_preview=text[:80],
             created=now_iso(),
+            version=2,
         ))

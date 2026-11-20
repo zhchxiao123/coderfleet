@@ -110,6 +110,54 @@ def test_unknown_provider_raises():
         _run(llm.complete([{"role": "user", "content": "x"}]))
 
 
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_missing_stop_reason_at_the_usage_limit_is_not_a_complete_response(provider):
+    def handler(_req):
+        if provider == "anthropic":
+            body = {"content": [{"type": "text", "text": "prefix"}], "usage": {"output_tokens": 32}}
+        else:
+            body = {"choices": [{"message": {"content": "prefix"}}], "usage": {"completion_tokens": 32}}
+        return httpx.Response(200, json=body)
+    llm = SystemLLM(provider=provider, api_key="test", model="test", transport=_mock(handler))
+    with pytest.raises(SystemLLMError, match="上限"):
+        _run(llm.complete([{"role": "user", "content": "x"}], max_tokens=32))
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_compatible_responses_allow_nullable_usage(provider):
+    def handler(_req):
+        body = ({"content": [{"type": "text", "text": "complete"}], "usage": None}
+                if provider == "anthropic" else
+                {"choices": [{"message": {"content": "complete"}}], "usage": None})
+        return httpx.Response(200, json=body)
+    llm = SystemLLM(provider=provider, api_key="test", model="test", transport=_mock(handler))
+    assert _run(llm.complete([{"role": "user", "content": "x"}])) == "complete"
+
+
+@pytest.mark.parametrize("provider,reason", [("anthropic", "model_context_window_exceeded"), ("openai", "length")])
+def test_context_or_output_limit_termination_never_returns_a_prefix(provider, reason):
+    def handler(_req):
+        body = ({"content": [{"type": "text", "text": "prefix"}], "stop_reason": reason}
+                if provider == "anthropic" else
+                {"choices": [{"message": {"content": "prefix"}, "finish_reason": reason}]})
+        return httpx.Response(200, json=body)
+    llm = SystemLLM(provider=provider, api_key="test", model="test", transport=_mock(handler))
+    with pytest.raises(SystemLLMError):
+        _run(llm.complete([{"role": "user", "content": "x"}]))
+
+
+@pytest.mark.parametrize("provider,reason", [("anthropic", "refusal"), ("openai", "content_filter")])
+def test_refused_or_filtered_text_is_not_a_success(provider, reason):
+    def handler(_req):
+        body = ({"content": [{"type": "text", "text": "refusal"}], "stop_reason": reason}
+                if provider == "anthropic" else
+                {"choices": [{"message": {"content": "partial"}, "finish_reason": reason}]})
+        return httpx.Response(200, json=body)
+    llm = SystemLLM(provider=provider, api_key="test", model="test", transport=_mock(handler))
+    with pytest.raises(SystemLLMError):
+        _run(llm.complete([{"role": "user", "content": "x"}]))
+
+
 # ── translate thin function ─────────────────────────────────
 
 def test_translate_empty_short_circuits():

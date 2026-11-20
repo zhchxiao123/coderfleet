@@ -153,6 +153,8 @@ class Scheduler:
         self._continuation_lock = asyncio.Lock()
         # Generic webhook 原始 token 只在创建响应中返回一次；磁盘只保存 SHA-256。
         self._issued_webhook_tokens: dict[str, dict[str, str]] = {}
+        from coderfleet.server.conversation_titles import ConversationTitles
+        self.titles = ConversationTitles(self)
 
     def register_notifier(self, notifier: "Callable[[Task], Awaitable[None]]") -> None:
         """注册一个任务终态通知渠道。"""
@@ -166,6 +168,7 @@ class Scheduler:
             return
         if task.status not in TASK_STATUS_LABELS:
             return
+        self.titles.observe(task)
         if task.execution_backend == "sdk":
             current = self.get_task(task.id)
             if current is None or current.terminal_notified:
@@ -860,8 +863,7 @@ class Scheduler:
     @staticmethod
     def new_task_id() -> str:
         ts   = datetime.now().strftime("%Y%m%d%H%M%S")
-        rand = random.randint(0, 9999)
-        return f"{ts}-{rand:04d}"
+        return f"{ts}-{uuid.uuid4().hex}"
 
     def list_tasks(self) -> list[Task]:
         return Task.load_all(self.tasks_dir)
@@ -1539,8 +1541,7 @@ class Scheduler:
     @staticmethod
     def new_conversation_id() -> str:
         ts   = datetime.now().strftime("%Y%m%d%H%M%S")
-        rand = random.randint(0, 9999)
-        return f"conv-{ts}-{rand:04d}"
+        return f"conv-{ts}-{uuid.uuid4().hex}"
 
     @staticmethod
     def new_board_id() -> str:
@@ -1814,20 +1815,18 @@ class Scheduler:
         return convs
 
     def archive_conversation(self, conversation_id: str, status: ConversationStatus) -> Conversation:
-        conv = self.get_conversation(conversation_id)
-        if conv is None:
-            raise ValueError(f"任务链 '{conversation_id}' 不存在")
-        conv.status = status
-        conv.save(self.conversations_dir)
-        return conv
+        return self.titles.set_status(conversation_id, status)
 
     def rename_conversation(self, conversation_id: str, name: str) -> Conversation:
-        conv = self.get_conversation(conversation_id)
-        if conv is None:
-            raise ValueError(f"任务链 '{conversation_id}' 不存在")
-        conv.name = name.strip() or conv.name
-        conv.save(self.conversations_dir)
-        return conv
+        if not name.strip() or len(name.strip()) > 200:
+            raise ValueError("会话名称不能为空或超过200字")
+        def change(conv: Conversation) -> None:
+            conv.name = name.strip()
+            conv.title.source = "manual"
+            conv.title.status = "ready"
+            conv.title.revision += 1
+            conv.title.error = conv.title.retry_at = ""
+        return Conversation.mutate(self.conversations_dir, conversation_id, change)
 
     def delete_conversation(self, conversation_id: str) -> None:
         path = self.conversations_dir / f"{conversation_id}.json"
@@ -1836,7 +1835,8 @@ class Scheduler:
         conversation = self.get_conversation(conversation_id)
         if conversation and getattr(conversation, "ephemeral_container_name", ""):
             self.close_ephemeral_conversation(conversation_id)
-        path.unlink()
+        with Conversation.lock(self.conversations_dir, conversation_id):
+            path.unlink(missing_ok=True)
 
     def get_conversation(self, conversation_id: str) -> Optional[Conversation]:
         path = self.conversations_dir / f"{conversation_id}.json"
@@ -1915,6 +1915,7 @@ class Scheduler:
                 await self.schedule_next_tasks()
                 await self._check_auto_digest()
                 await self._cleanup_expired_ephemeral_sessions()
+                self.titles.tick()
             except Exception as e:
                 import traceback
                 print("Error in schedule_next_tasks:")
@@ -2107,6 +2108,7 @@ class Scheduler:
         auto:           bool                  = False,
         conversation_id: Optional[str]         = None,
         conversation_name: Optional[str]       = None,
+        conversation_auto_title: bool         = False,
         project_name:   Optional[str]         = None,
         images:         list[str]             = [],
         model:          str                   = "",
@@ -2132,6 +2134,8 @@ class Scheduler:
         """
         from coderfleet.data.scripts.coderfleet_sdk_features import validate_options
         options = validate_options(sdk_options or {})
+        if conversation_auto_title and not conversation_id and not conversation_name:
+            conversation_name = prompt.strip()[:32] or "新会话"
         if platform_run_id:
             if not re.fullmatch(r'[a-f0-9]{32}',platform_run_id) or conversation_id or project_name or prefer_project:
                 raise ValueError('无效的平台执行请求')
@@ -2286,6 +2290,8 @@ class Scheduler:
                     ephemeral_expires_at = self._ephemeral_expires_at(ttl_minutes) if retention == "keep_until_ttl" else "",
                 )
                 conversation.save(self.conversations_dir)
+                if conversation_auto_title:
+                    self.titles.enable(conversation.id)
             elif conversation and is_genuinely_ephemeral and not conversation.ephemeral:
                 # Existing conversation just detected as ephemeral — update its flag
                 conversation.ephemeral = True
@@ -2433,6 +2439,8 @@ class Scheduler:
 
         if conversation is None and conversation_name:
             conversation = self._create_conversation(conversation_name, acc, selected_project, task_project)
+            if conversation_auto_title:
+                self.titles.enable(conversation.id)
 
         # 创建任务记录
         task_id  = self.new_task_id()
@@ -3784,6 +3792,11 @@ class Scheduler:
                 current.interrupted = task.interrupted = True
                 current.sdk_control_ready = task.sdk_control_ready = False
                 current.pending_intervention = task.pending_intervention = None
+            elif event.get('subtype') == 'coderfleet_message_accepted':
+                message = event.get('text')
+                request_id = event.get('request_id')
+                if isinstance(message, str) and isinstance(request_id, str):
+                    self.titles.observe_message(current, message, request_id)
             elif event.get('subtype') == 'coderfleet_question_pending':
                 previous = current.pending_intervention
                 try:
@@ -3925,10 +3938,13 @@ class Scheduler:
             raise RuntimeError('此项目正在恢复文件，请等待恢复完成')
 
     def _touch_submitted_conversation(self, conversation_id: str, task: Task) -> None:
-        current = self.get_conversation(conversation_id)
-        if current is None: return
-        if not task.sdk_action: current.sdk_options = task.sdk_options
-        current.touch(self.conversations_dir,last_task_id=task.id)
+        def change(current: Conversation) -> None:
+            if not task.sdk_action:
+                current.sdk_options = task.sdk_options
+            current.last_task_id = task.id
+            current.updated = now_iso()
+        Conversation.mutate(self.conversations_dir, conversation_id, change)
+        self.titles.observe(task)
 
     def _sdk_workspace_key(self, task: Task) -> tuple[str,str]:
         if task.ephemeral:

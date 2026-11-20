@@ -462,6 +462,27 @@ function renderMd(text) {
 }
 
 // ── 时间格式化 ─────────────────────────────────────────────
+function renderMessageTime(value, label, prefix = '', now = new Date()) {
+  if (value == null || value === '' || !['string', 'number'].includes(typeof value)) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const options = {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false};
+  const clock = date.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+  // Compare local calendar dates, so daylight-saving changes don't shift day labels.
+  const day = d => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000;
+  const daysAgo = day(now) - day(date);
+  let visible = clock;
+  if (daysAgo === 1) visible = `昨天 ${clock}`;
+  else if (daysAgo > 1 && daysAgo < 7) visible = `${date.toLocaleDateString('zh-CN', {weekday:'long'})} ${clock}`;
+  else if (daysAgo !== 0) {
+    const calendar = {month:'2-digit',day:'2-digit'};
+    if (date.getFullYear() !== now.getFullYear()) calendar.year = 'numeric';
+    visible = `${date.toLocaleDateString('zh-CN', calendar)} ${clock}`;
+  }
+  const full = date.toLocaleString('zh-CN', {...options,second:'2-digit',timeZoneName:'short'});
+  return `<time class="chat-message-time" datetime="${date.toISOString()}" title="${esc(label)} · ${esc(full)}">${esc(prefix + visible)}</time>`;
+}
+
 function fmtTime(iso) {
   if (!iso) return '-';
   const d = new Date(iso), now = new Date();
@@ -562,55 +583,101 @@ async function initSystemLlmStatus() {
 }
 document.addEventListener('DOMContentLoaded', initSystemLlmStatus);
 
+// Translation belongs to an exact source snapshot, not just a reusable DOM node.
+function renderBubbleTranslationSource(contentEl, btn, rawText, originalHtml) {
+  let st = bubbleTranslations.get(contentEl);
+  if (st && st.sourceText !== rawText) {
+    st.controller?.abort();
+    bubbleTranslations.delete(contentEl);
+    btn.classList.remove('active','loading','failed');
+    btn.title = '翻译';
+    st = null;
+  }
+  if (st) st.originalHtml = originalHtml;
+  contentEl.innerHTML = st?.showing === 'translated' ? st.translatedHtml : originalHtml;
+}
+
 // 切换某个气泡的原文 / 译文。btn=触发按钮，contentEl=.bubble-content，rawText=原始 markdown
 async function toggleBubbleTranslation(btn, contentEl, rawText) {
+  rawText = String(rawText || '');
+  if (!rawText.trim()) return;
   let st = bubbleTranslations.get(contentEl);
-  if (!st) { st = { showing: 'original', originalHtml: contentEl.innerHTML }; bubbleTranslations.set(contentEl, st); }
+  if (st && st.sourceText !== rawText) {
+    renderBubbleTranslationSource(contentEl,btn,rawText,renderMd(rawText));
+    st = null;
+  }
+  if (!st) {
+    st = {sourceText:rawText,showing:'original',originalHtml:contentEl.innerHTML,requestId:0};
+    bubbleTranslations.set(contentEl,st);
+  }
+  const owns = () => bubbleTranslations.get(contentEl) === st && contentEl.isConnected !== false;
 
   if (st.showing === 'translated') {                  // 译文 → 原文
     contentEl.innerHTML = st.originalHtml;
     st.showing = 'original';
     btn.classList.remove('active');
+    btn.title = '翻译';
     return;
   }
   if (st.translatedHtml) {                             // 命中缓存，直接切回译文
     contentEl.innerHTML = st.translatedHtml;
     st.showing = 'translated';
     btn.classList.add('active');
+    btn.title = '查看原文';
     return;
   }
 
-  if (btn.classList.contains('loading')) return;      // 正在翻译，忽略重复点击
+  if (st.pending) return;
+  st.pending = true;
+  const requestId = ++st.requestId;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  st.controller = controller;
+  btn.classList.remove('failed');
   btn.classList.add('loading');
+  btn.title = '正在翻译完整内容…';
   try {
     const r = await fetch('/api/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: rawText }),
+      ...(controller ? {signal:controller.signal} : {}),
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
       throw new Error(e.detail || `翻译失败 (${r.status})`);
     }
     const d = await r.json();
-    st.originalHtml = contentEl.innerHTML;            // 以当前渲染为准
-    st.translatedHtml = renderMd(d.translated || '');
+    if (!owns()) return;
+    if (typeof d.translated !== 'string' || !d.translated.trim()) throw new Error('未收到完整译文，请重试');
+    st.translatedHtml = renderMd(d.translated);
     contentEl.innerHTML = st.translatedHtml;
     st.showing = 'translated';
     btn.classList.add('active');
+    btn.title = '查看原文';
   } catch (err) {
+    if (!owns() || err?.name === 'AbortError') return;
     btn.classList.add('failed');
     btn.title = String(err && err.message || err);
-    setTimeout(() => { btn.classList.remove('failed'); btn.title = '翻译'; }, 2500);
+    if (typeof showToast === 'function') showToast(btn.title,'error');
+    setTimeout(() => {
+      if (owns() && st.requestId === requestId && !st.pending) {
+        btn.classList.remove('failed'); btn.title = '翻译';
+      }
+    }, 2500);
   } finally {
-    btn.classList.remove('loading');
+    if (owns() && st.requestId === requestId) {
+      st.pending = false;
+      st.controller = null;
+      btn.classList.remove('loading');
+    }
   }
 }
 
 // 用于用户气泡（onclick 内联调用）
 function copyUserBubble(btn) {
-  const content = btn.closest('.user-bubble').querySelector('.user-bubble-content');
-  copyTextToClipboard(content.textContent, btn);
+  const message = btn.closest('.user-message-stack, .user-msg-stack, .user-bubble');
+  const content = message?.querySelector('.user-bubble-content, .user-bubble-text');
+  if (content) copyTextToClipboard(content.textContent, btn);
 }
 
 // ══════════════════════════════════════════════════════════════

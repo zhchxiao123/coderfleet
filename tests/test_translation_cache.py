@@ -46,3 +46,22 @@ def test_identical_text_dedups_to_one_file(tmp_path):
     c.put("same", "简体中文", "一样")
     c.put("same", "简体中文", "一样")   # 覆盖同键，不新增文件
     assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_legacy_cache_is_replaced_only_after_a_complete_new_translation(tmp_path):
+    import json
+    key = _key("original", "zh")
+    path = tmp_path / f"{key}.json"
+    path.write_text(json.dumps({"id": key, "target": "zh", "translated": "legacy prefix"}))
+    cache = TranslationCache(tmp_path)
+    assert cache.get("original", "zh") is None
+    assert json.loads(path.read_text())["translated"] == "legacy prefix"
+    cache.put("original", "zh", "complete translation")
+    assert cache.get("original", "zh") == "complete translation"
+    assert json.loads(path.read_text())["version"] == 2
+
+
+def test_empty_cache_entry_is_not_reused(tmp_path):
+    cache = TranslationCache(tmp_path)
+    cache.put("original", "zh", "")
+    assert cache.get("original", "zh") is None

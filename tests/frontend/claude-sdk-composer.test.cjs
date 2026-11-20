@@ -27,7 +27,7 @@ function desktop() {
     crypto:require('node:crypto'),Event:class {}, API:'',esc:value=>String(value),console,setTimeout,clearTimeout,alert(){},confirmDialog:async()=>false,
     fetch:async(url,options)=>{calls.push({url,body:options?.body?JSON.parse(options.body):null});return{ok:true,json:async()=>url==='/api/tasks'?{id:'queued-task',status:'pending',type:'claude'}:{status:'accepted'}};},
   });
-  for (const file of ['state.js','sdk-task-controls.js','chat.js']) vm.runInContext(fs.readFileSync('coderfleet/server/static/js/'+file,'utf8'),context,{filename:file});
+  for (const file of ['state.js','sdk-task-controls.js','chat-history.js','chat.js']) vm.runInContext(fs.readFileSync('coderfleet/server/static/js/'+file,'utf8'),context,{filename:file});
   vm.runInContext(`activeConversationId='conv-one';currentChatTaskId='task-one';tasksCache=[{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}];`,context);
   const loadConversations = context.loadConversations;
   const selectConversation = context.selectConversation;
@@ -187,6 +187,7 @@ function mobile() {
     fetch:async(url,options)=>{calls.push({url,body:options?.body?JSON.parse(options.body):null});return{ok:true,json:async()=>({status:'accepted'})};},
   });
   vm.runInContext(fs.readFileSync('coderfleet/server/static/js/sdk-task-controls.js','utf8'),context);
+  vm.runInContext(fs.readFileSync('coderfleet/server/static/js/chat-history.js','utf8'),context);
   const html = fs.readFileSync('coderfleet/server/static/mobile.html','utf8');
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
   vm.runInContext(scripts.find(script=>script.includes('let projects  = []')),context,{filename:'mobile.html'});

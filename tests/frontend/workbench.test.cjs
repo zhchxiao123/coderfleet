@@ -50,7 +50,7 @@ test('opening a different project conversation keeps each unsent draft with its 
   };
   sandbox.window = sandbox;
   const context = vm.createContext(sandbox);
-  for (const file of ['state.js', 'chat.js']) vm.runInContext(fs.readFileSync('coderfleet/server/static/js/' + file, 'utf8'), context);
+  for (const file of ['state.js', 'chat-history.js', 'chat.js']) vm.runInContext(fs.readFileSync('coderfleet/server/static/js/' + file, 'utf8'), context);
   context.rerenderChatProjectList = () => {};
   context.renderImagePreviews = () => {};
   context.renderChatWorkspace = async () => {};
@@ -94,6 +94,8 @@ test('mobile work navigation also preserves each conversation draft', async () =
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => null },
   };
   const context = vm.createContext(sandbox);
+  context.fetch = async () => ({ok:true,json:async()=>[]});
+  vm.runInContext(fs.readFileSync('coderfleet/server/static/js/chat-history.js', 'utf8'), context);
   const scripts = [...fs.readFileSync('coderfleet/server/static/mobile.html', 'utf8').matchAll(/<script>([\s\S]*?)<\/script>/g)];
   vm.runInContext(scripts.find(match => match[1].includes('let projects  = []'))[1], context);
   context.renderImagePreviews = () => {};

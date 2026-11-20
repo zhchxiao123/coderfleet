@@ -1,30 +1,21 @@
 // ── AI 对话（聊天室）核心逻辑 ───────────────────────────────────
 
-// 用首条消息生成会话标题（系统级 LLM，不占池化配额）。未配置时静默跳过，
-// 保留调用方已设置的截断兜底名字。失败也静默——命名从来不是关键路径。
-async function _autoTitleConversation(convId, promptText) {
-  if (!systemLlmConfigured || !promptText.trim()) return;
+function syncChatConversationTitles() {
+  for (const conv of chatConversationsList) conversationsCache[conv.id] = conv.name;
+  syncConversationTabLabels();
+  renderTopbarTabs();
+  if (typeof FleetTitles !== 'undefined') FleetTitles.paint(chatConversationsList);
+}
+
+async function regenerateConversationTitle(convId) {
+  const conv = chatConversationsList.find(item => item.id === convId);
+  if (!conv) return;
   try {
-    const r = await fetch(`${API}/api/summarize-title`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: promptText }),
-    });
-    if (!r.ok) return;
-    const { title } = await r.json();
-    if (!title || !title.trim()) return;
-    const rr = await fetch(`${API}/api/conversations/${encodeURIComponent(convId)}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: title.trim() }),
-    });
-    if (!rr.ok) return;
-    const conv = chatConversationsList.find(c => c.id === convId);
-    if (conv) conv.name = title.trim();
-    conversationsCache[convId] = title.trim();
-    syncConversationTabLabels();
+    const value = await FleetTitles.regenerate(conv);
+    FleetTitles.merge(chatConversationsList,[value]);
+    syncChatConversationTitles();
     rerenderChatProjectList();
-  } catch { /* 命名失败静默，兜底名字保留 */ }
+  } catch (error) { alert(error.message); }
 }
 
 // 加载会话列表及数据
@@ -47,6 +38,7 @@ async function loadConversations(renderWorkspace = true, refreshConversationId =
     projectsCache = projects;
     tasksCache = tasks;
     updateTaskExecutionMetadata(tasks);
+    if (typeof FleetTitles !== 'undefined') FleetTitles.merge(convs,chatConversationsList);
     chatConversationsList = convs;
     if (!renderWorkspace && currentPage === 'chat' && activeConversationId) {
       const running = tasks.find(t => t.status === 'running' && (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId));
@@ -58,6 +50,7 @@ async function loadConversations(renderWorkspace = true, refreshConversationId =
     convs.forEach(c => { conversationsCache[c.id] = c.name; });
     syncConversationTabLabels();
     renderTopbarTabs();
+    if (typeof FleetTitles !== 'undefined') FleetTitles.paint(convs);
 
     renderConversations(convs, projects, tasks);
 
@@ -118,6 +111,15 @@ function shouldRefreshActiveChatForTaskStatusChange(nextTasks) {
 // 状态变化」都需要触发一次全量刷新，否则「最近访问」的排序和运行角标会滞后于
 // 其它会话/后台任务的实时变化。
 async function pollChatHeartbeat() {
+  if (typeof FleetTitles !== 'undefined') {
+      const priority = [activeConversationId,...topbarTabs.filter(tab=>tab.kind==='conversation').map(tab=>tab.conversationId)];
+      FleetTitles.refresh(chatConversationsList,priority).then(rows => {
+      if (FleetTitles.merge(chatConversationsList,rows)) {
+        syncChatConversationTitles();
+        rerenderChatProjectList();
+      }
+      }).catch(()=>{}); // Independent of the live Task/control heartbeat.
+  }
   let heartbeat;
   try {
     heartbeat = await fetch(`${API}/api/tasks/heartbeat`).then(r => r.json());
@@ -154,6 +156,9 @@ async function pollChatHeartbeat() {
       const running = tasksCache.find(t => t.status === 'running' && (activeConversationId === `task-${t.id}` || t.conversation_id === activeConversationId));
       currentChatTaskId = running?.id || null;
       _syncChatSendButton(currentChatTaskId, _isChatQueueFull(activeConversationId));
+    }
+    if (chatHistoryView && [...chatHistoryView.rows.values()].some(row=>row.retryOnUpdate)) {
+      chatHistoryView.update(tasksCache.filter(task=>task.conversation_id === activeConversationId && !['pending','scheduled'].includes(task.status)));
     }
   }
 
@@ -712,6 +717,14 @@ function openSessionMenu(event, itemId, itemType) {
   const items = [];
   if (itemType === 'conversation') {
     items.push({ label: '重命名', icon: _menuIcons.rename, action: () => inlineRenameConversation(itemId, clickedItem) });
+    const conversation = chatConversationsList.find(conv=>conv.id===itemId);
+    if (conversation?.mode !== 'terminal') {
+      const titleLabel = conversation?.title?.status === 'retryable_error' ? '重试生成标题'
+        : conversation?.title?.status === 'pending' ? '正在生成标题' : '重新生成标题';
+      items.push({ label: titleLabel, icon: _menuIcons.rename, action: () => {
+        if (conversation?.title?.status !== 'pending') regenerateConversationTitle(itemId);
+      } });
+    }
     items.push({ sep: true });
     items.push({ label: '归档', icon: _menuIcons.archive, action: () => archiveConversation(itemId) });
     items.push({ label: '删除', icon: _menuIcons.trash, danger: true, action: () => deleteConversation(itemId) });
@@ -723,6 +736,7 @@ function openSessionMenu(event, itemId, itemType) {
 }
 
 async function inlineRenameConversation(convId, itemEl) {
+  if (_isRenamingConversation) return;
   if (!itemEl) {
     itemEl = document.querySelector(`.chat-session-item[data-item-id="${CSS.escape(convId)}"]`);
   }
@@ -733,6 +747,7 @@ async function inlineRenameConversation(convId, itemEl) {
   const oldName = nameSpan.textContent;
   const input = document.createElement('input');
   input.type = 'text';
+  input.maxLength = 200;
   input.value = oldName;
   input.className = 'session-rename-input';
   input.addEventListener('click', e => e.stopPropagation());
@@ -741,28 +756,49 @@ async function inlineRenameConversation(convId, itemEl) {
   input.select();
   _isRenamingConversation = true;
 
+  let saving = false;
   const commit = async () => {
-    _isRenamingConversation = false;
+    if (saving) return;
     const newName = input.value.trim();
     input.removeEventListener('blur', commit);
     if (!newName || newName === oldName) {
+      _isRenamingConversation = false;
       rerenderChatProjectList();
       return;
     }
+    saving = true;
+    input.disabled = true;
+    const controller = new AbortController(), timer = setTimeout(()=>controller.abort(),10000);
     try {
       const r = await fetch(`${API}/api/conversations/${encodeURIComponent(convId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newName }),
+        signal: controller.signal,
       });
-      if (r.ok) {
+      if (!r.ok) {
+        const error = await r.json().catch(()=>({}));
+        throw new Error(typeof error.detail === 'string' ? error.detail : '请稍后重试');
+      } else {
+        const value = await r.json();
         const conv = chatConversationsList.find(c => c.id === convId);
         if (conv) {
-          conv.name = newName;
-          conversationsCache[convId] = newName;
+          FleetTitles.merge(chatConversationsList,[value]);
+          conversationsCache[convId] = conv.name;
         }
+        syncChatConversationTitles();
       }
-    } catch { }
+    } catch (error) {
+      input.disabled = false;
+      input.addEventListener('blur', commit);
+      input.focus();
+      alert('重命名失败：'+error.message);
+      return;
+    } finally {
+      saving = false;
+      clearTimeout(timer);
+    }
+    _isRenamingConversation = false;
     rerenderChatProjectList();
   };
 
@@ -841,7 +877,36 @@ function virtualChatForTask(task) {
   };
 }
 
+let chatHistoryView = null;
+let chatWorkspaceGeneration = 0;
+const chatHistoryPositions = new Map();
+
+function disposeChatHistory() {
+  chatWorkspaceGeneration++;
+  if (chatHistoryView) {
+    const position = chatHistoryPositions.get(chatHistoryView.conversationId);
+    if (position) {
+      const top = chatHistoryView.viewport.getBoundingClientRect().top;
+      const anchor = [...chatHistoryView.container.children].find(node=>node.dataset?.historyTask && node.getBoundingClientRect().bottom>top);
+      position.startId = chatUserScrolledUp ? anchor?.dataset.historyTask : null;
+      position.offset = chatUserScrolledUp ? anchor?.getBoundingClientRect().top : null;
+    }
+    chatHistoryView.dispose();
+    chatHistoryView = null;
+  }
+}
+
+function chatHistoryPosition(id) {
+  if (!chatHistoryPositions.has(id)) {
+    chatHistoryPositions.set(id,{source:conversationHistorySource(id,url=>fetch(`${API}${url}`)),startId:null});
+    if (chatHistoryPositions.size > 10) chatHistoryPositions.delete(chatHistoryPositions.keys().next().value);
+  }
+  return chatHistoryPositions.get(id);
+}
+
 async function selectConversation(convId) {
+  disposeChatHistory();
+  const selectionGeneration = chatWorkspaceGeneration;
   stopChatFollow();
   prepareChatDraftSwitch(convId);
   activeConversationId = convId;
@@ -856,7 +921,7 @@ async function selectConversation(convId) {
       const response = await fetch(`${API}/api/tasks/${encodeURIComponent(taskId)}`);
       const task = await response.json();
       if (!response.ok) throw new Error(task.detail || '原任务不可用');
-      if (activeConversationId !== convId) return;
+      if (activeConversationId !== convId || selectionGeneration !== chatWorkspaceGeneration) return;
       tasksCache = [...tasksCache.filter(item => item.id !== task.id), task];
       updateTaskExecutionMetadata([task]);
       await renderChatWorkspace(virtualChatForTask(task));
@@ -878,19 +943,23 @@ async function selectConversation(convId) {
   }
 
   try {
-    const scopedTasks = await fetch(`${API}/api/tasks?conversation_id=${encodeURIComponent(convId)}&limit=200`).then(r => r.json());
+    const page = await chatHistoryPosition(convId).source.refresh();
+    if (activeConversationId !== convId || selectionGeneration !== chatWorkspaceGeneration) return;
+    chatHistoryPosition(convId).page = page;
+    const scopedTasks = page.tasks;
     const byId = new Map(tasksCache.map(t => [t.id, t]));
     scopedTasks.forEach(t => byId.set(t.id, t));
     tasksCache = Array.from(byId.values());
   } catch (_) {}
 
-  if (activeConversationId !== convId) return;
+  if (activeConversationId !== convId || selectionGeneration !== chatWorkspaceGeneration) return;
   await renderChatWorkspace(conv);
   syncBottomTerminalProjectFromContext();
 }
 
 // 开启新会话
 function startNewChat(options = {}) {
+  disposeChatHistory();
   stopChatFollow();
   prepareChatDraftSwitch(null, options.projectName || '');
   activeConversationId = null;
@@ -909,6 +978,7 @@ function startNewChat(options = {}) {
 
 // 渲染新会话空状态（无历史记录的初始界面）
 async function renderEmptyChatState() {
+  disposeChatHistory();
   const workspace = document.getElementById('chat-workspace');
   if (!workspace) return;
 
@@ -1449,7 +1519,7 @@ function renderTerminalConversationWorkspace(conv) {
 <div class="chat-main-header">
   <div class="chat-main-title-area">
     <div class="chat-main-title" title="${esc(conv.name)}">
-      <span style="margin-right:6px;opacity:.7">⌨</span>${esc(conv.name)}
+      <span style="margin-right:6px;opacity:.7">⌨</span><span data-conversation-title-id="${esc(conv.id)}">${esc(conv.name)}</span>
     </div>
     <div class="chat-main-subtitle">
       项目: <strong style="color:var(--accent);">${esc(conv.project_name || conv.project?.split('/').pop() || '未知')}</strong>${headerBranchBadge} ·
@@ -1487,6 +1557,8 @@ function reconnectConversationTerminal(convId) {
 
 // 渲染右侧会话主工作区
 async function renderChatWorkspace(conv) {
+  disposeChatHistory();
+  const generation = chatWorkspaceGeneration;
   const workspace = document.getElementById('chat-workspace');
   if (!workspace) return;
 
@@ -1505,7 +1577,7 @@ async function renderChatWorkspace(conv) {
   currentChatProjectName = conv.project_name || conv.project?.split('/').pop() || '';
 
   const chatAccount = await getChatAccount(conv.account);
-  if (activeConversationId !== conv.id) return;
+  if (activeConversationId !== conv.id || generation !== chatWorkspaceGeneration) return;
   const chatAccountType = chatAccount?.type || '';
   const modelPillHtml = chatAccountType === 'claude' ? buildChatModelPillHtml() : '';
   const usagePillHtml = buildChatUsagePillHtml(chatAccount);
@@ -1515,7 +1587,7 @@ async function renderChatWorkspace(conv) {
 <!-- 会话头部 -->
 <div class="chat-main-header">
   <div class="chat-main-title-area">
-    <div class="chat-main-title" title="${esc(conv.name)}">${esc(conv.name)}${conv.ephemeral ? ' <span style="font-size:11px;color:var(--accent);font-weight:normal" title="临时容器会话，每条消息在独立容器中运行">⚡ 临时</span>' : ''}</div>
+    <div class="chat-main-title" title="${esc(conv.name)}"><span data-conversation-title-id="${esc(conv.id)}">${esc(conv.name)}</span>${conv.ephemeral ? ' <span style="font-size:11px;color:var(--accent);font-weight:normal" title="临时容器会话，每条消息在独立容器中运行">⚡ 临时</span>' : ''}</div>
     <div class="chat-main-subtitle">
       项目: <strong style="color: var(--accent);">${esc(conv.project_name || conv.project?.split('/').pop() || '未知')}</strong>${headerBranchBadge} ·
       账号: <span>${esc(conv.account || '未指定')}</span> ·
@@ -1649,7 +1721,7 @@ async function renderChatWorkspace(conv) {
       if (!response.ok) throw new Error(data.detail || '继承历史加载失败');
       inheritedTasks = data;
     }
-    if (convTasks.length === 0 && inheritedTasks.length === 0) {
+    if (convTasks.length === 0 && inheritedTasks.length === 0 && chatHistoryPosition(conv.id).page?.hasMore === false) {
       chatContent.innerHTML = `<div class="empty">会话目前没有指令记录，发送消息开始交流。</div>`;
       return;
     }
@@ -1657,28 +1729,8 @@ async function renderChatWorkspace(conv) {
     // 只有 done/failed/killed/running 的任务才会渲染消息气泡（排队/定时中的任务跳过，由队列面板管理）
     const renderableTasks = [...inheritedTasks, ...convTasks].filter(t => t.status !== 'pending' && t.status !== 'scheduled');
 
-    // 会话历史越长，日志越大，一次性把全部任务日志都拉下来渲染就越慢（issue #42）。
-    // 只 eager 拉取渲染最近 CHAT_EAGER_LOG_COUNT 条，更早的任务先显示折叠占位，
-    // 点开才按需拉取渲染，命中的话同样写入 _finishedLogCache 复用。
-    const eagerStartIdx = Math.max(0, renderableTasks.length - CHAT_EAGER_LOG_COUNT);
-    const collapsedTasks = renderableTasks.slice(0, eagerStartIdx);
-    const eagerTasks = renderableTasks.slice(eagerStartIdx);
-
-    // 之前手动点开过的历史任务：重渲染（比如心跳触发的整体重渲染）时保持展开状态，
-    // 不要把用户已经展开的记录又折叠回去。
-    const manuallyExpanded = collapsedTasks.filter(t => chatExpandedTaskIds.has(t.id));
-    const expandedLogsById = new Map();
-
-    // 并行获取最近这几条任务的日志，以及手动展开过的历史任务的日志；done/failed/killed
-    // 任务的日志内容不会再变，命中缓存就直接复用，避免会话因为其它任务状态变化整体
-    // 重渲染时全部重新拉取。
-    const [logs, expandedLogs] = await Promise.all([
-      Promise.all(eagerTasks.map(t => _fetchTaskLogCached(t))),
-      Promise.all(manuallyExpanded.map(t => _fetchTaskLogCached(t))),
-    ]);
-    manuallyExpanded.forEach((t, idx) => expandedLogsById.set(t.id, expandedLogs[idx]));
+    if (activeConversationId !== conv.id || generation !== chatWorkspaceGeneration) return;
     chatContent.innerHTML = '';
-
     if (conv.fork) {
       const banner = document.createElement('div');
       banner.className = 'chat-sys-event chat-fork-origin';
@@ -1690,119 +1742,60 @@ async function renderChatWorkspace(conv) {
       banner.appendChild(sourceButton);
       chatContent.appendChild(banner);
     }
-
-    collapsedTasks.forEach(task => {
-      if (expandedLogsById.has(task.id)) {
-        _renderChatTaskTurn(chatContent, task, expandedLogsById.get(task.id));
-      } else {
-        chatContent.appendChild(_renderCollapsedTaskPlaceholder(task));
-      }
+    const position = chatHistoryPosition(conv.id);
+    const viewport = document.getElementById('chat-viewport');
+    const lastOwnTask = convTasks.filter(t => !['pending','scheduled'].includes(t.status)).at(-1);
+    const view = new ChatHistoryView({container:chatContent,viewport,indexContainer:viewport.parentElement,
+      follow:()=>!chatUserScrolledUp,
+      loadOlder:conv.isOneOff ? null : async () => {
+        const page = await position.source();
+        if (activeConversationId === conv.id && generation === chatWorkspaceGeneration) {
+          const byId = new Map(tasksCache.map(task=>[task.id,task]));
+          for (const task of page.tasks) byId.set(task.id,task);
+          tasksCache = [...byId.values()];
+          position.page = page;
+        }
+        return {...page,tasks:page.tasks.filter(t=>!['pending','scheduled'].includes(t.status))};
+      },
+      loadTurn:async (task,host,context) => {
+        const renderer = _renderChatTaskTurn(host,task,'');
+        context.signal.addEventListener('abort',()=>renderer._resetSDKRendering(),{once:true});
+        const logWrap = host.lastElementChild;
+        logWrap.innerHTML = '<div class="chat-history-loading">正在加载回复…</div>';
+        let log;
+        try { log = await _fetchTaskLogCached(task,{signal:context.signal}); }
+        catch (error) {
+          if (task.status !== 'running' || !String(error.message).includes('404')) throw error;
+          log = '';
+        }
+        if (!context.isCurrent()) return;
+        context.mutate(() => {
+          renderer.render(log,task.type);
+          attachChatTurnForkAction(renderer,task);
+        });
+        if (task.id === lastOwnTask?.id) chatRenderer = renderer;
+        if (task.id === runningTask?.id) {
+          chatRenderer = renderer;
+          startChatFollow(task.id,new TextEncoder().encode(log).byteLength);
+        }
+        return {retryOnUpdate:task.status !== 'running' && !_looksLikeCompleteTaskLog(log)};
+      },
     });
-
-    // 循环独立渲染最近几个任务的提问和日志
-    let _lastLocalRenderer = null;
-    eagerTasks.forEach((task, idx) => {
-      _lastLocalRenderer = _renderChatTaskTurn(chatContent, task, logs[idx]);
-      const logWrap = chatContent.lastElementChild;
-      const isLastTask = idx === eagerTasks.length - 1;
-      _selfHealStuckToolStatus(task, logWrap).then(healedRenderer => {
-        if (healedRenderer && isLastTask) chatRenderer = healedRenderer;
-      });
-    });
-    if (_lastLocalRenderer) chatRenderer = _lastLocalRenderer;
-
-    scrollToBottomAndResume();
+    view.conversationId = conv.id;
+    view.startId = position.startId;
+    chatHistoryView = view;
+    view.update(renderableTasks,!conv.isOneOff && position.page?.hasMore !== false);
     bindChatViewportScroll();
-
-    // 追踪任务选择：优先正在运行的任务，其次是第一个 pending 任务，最后是第一个 scheduled 任务
-    const activeTask = runningTask
-      || convTasks.find(t => t.status === 'pending')
-      || convTasks.find(t => t.status === 'scheduled');
-    if (activeTask) {
-      // chatRenderer 始终对应最后一个任务的渲染器，而最后一个任务必然落在 eagerTasks 里。
-      // 若 activeTask 就是最后一个任务（最常见情况），把其日志字节数告知服务端，
-      // 服务端从该偏移量开始推送，避免重新打开会话时内容重复。
-      const lastRenderable = renderableTasks[renderableTasks.length - 1];
-      const alreadyRenderedLog = (lastRenderable && activeTask.id === lastRenderable.id)
-        ? (logs[logs.length - 1] || '') : '';
-      const skipBytes = new TextEncoder().encode(alreadyRenderedLog).byteLength;
-      startChatFollow(activeTask.id, skipBytes);
-    }
+    if (position.startId && position.offset != null) {
+      const anchor = view.rows.get(position.startId)?.node;
+      if (anchor) viewport.scrollTop += anchor.getBoundingClientRect().top - position.offset;
+      chatUserScrolledUp = true;
+      _updateScrollToBottomBtn(true);
+    } else scrollToBottomAndResume();
   } catch (e) {
+    if (activeConversationId !== conv.id || generation !== chatWorkspaceGeneration) return;
     chatContent.innerHTML = `<div style="color:var(--red);padding:16px">加载会话历史失败: ${esc(e.message)}<br><pre style="font-size:11px;color:var(--text-3);margin-top:8px">${esc(e.stack)}</pre></div>`;
   }
-}
-
-// 打开会话时 eager 拉取渲染的最近任务条数，更早的任务折叠懒加载（issue #42）
-const CHAT_EAGER_LOG_COUNT = 8;
-
-// 判断一份任务日志是不是"真的收尾了"——跟 renderer.js render() 里 isFooterSeparator
-// 用的是同一套约定：一行 "======" 之后（跳过空行）紧跟 finished: 或 usage status:。
-// 这两行只有 scheduler.py 的 _append_usage_status/_append_log_footer 真正跑完才会
-// 写进日志文件，而 task.status 翻成 done/failed/killed 发生在这之前（中间隔着一次
-// 可能耗时的 docker exec）。用它当"这份日志是否可以放心长期缓存"的信号——宁可因为
-// 判定过严多拉几次，也不要把一份还没收尾的半成品当成定论存进 IndexedDB 里出不来。
-function _looksLikeCompleteTaskLog(text) {
-  const lines = (text || '').split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim().startsWith('======')) continue;
-    for (let j = i + 1; j < lines.length; j++) {
-      const next = lines[j].trim();
-      if (!next) continue;
-      if (next.startsWith('finished:') || next.startsWith('usage status:')) return true;
-      break;
-    }
-  }
-  return false;
-}
-
-// 拉取单条任务日志；done/failed/killed 任务的日志内容不会再变，命中缓存直接复用。
-// 缓存分两层：内存 Map（当前会话页面内最快）+ IndexedDB（跨页面刷新持久化，issue #43）。
-async function _fetchTaskLogCached(task) {
-  const isFinished = task.status !== 'running' && task.status !== 'pending' && task.status !== 'scheduled';
-  if (isFinished) {
-    if (_finishedLogCache.has(task.id)) return _finishedLogCache.get(task.id);
-    const persisted = await logCacheGet(task.id);
-    if (persisted !== null) {
-      _finishedLogCache.set(task.id, persisted);
-      return persisted;
-    }
-  }
-  // 活跃任务随后用文本的 UTF-8 字节数续读原始 SSE 日志，必须获取原始文本。
-  // light 会移除 tool_use_result，缩短文本后算出的偏移可能落在图片编码中间。
-  const logSuffix = isFinished ? '?light=1' : '';
-  const text = await fetch(`${API}/api/tasks/${task.id}/logs${logSuffix}`).then(r => r.text()).catch(() => '');
-  if (isFinished && _looksLikeCompleteTaskLog(text)) {
-    _finishedLogCache.set(task.id, text);
-    logCacheSet(task.id, text);
-  }
-  return text;
-}
-
-// 自愈：任务已经确定结束（done/failed/killed），日志里却还有工具调用卡片停在 ⏳——
-// 说明当初写进缓存的那份日志被抓取时还没真正收尾（见 _looksLikeCompleteTaskLog 的
-// 注释），是这次修复之前就已经写进某个用户 IndexedDB 里的坏缓存，光靠"以后不再写
-// 坏数据"救不回来。这里检测到这种卡死状态就清掉缓存、强制重新拉一次、重新渲染，
-// 用户不用手动刷新好几轮或者清浏览器数据才能恢复。
-async function _selfHealStuckToolStatus(task, logWrap) {
-  if (task.status === 'running' || task.status === 'pending' || task.status === 'scheduled') return;
-  const stuckPending = [...logWrap.querySelectorAll('.tool-status')]
-    .some(el => el.textContent.trim() === '⏳');
-  if (!stuckPending) return;
-
-  _finishedLogCache.delete(task.id);
-  await logCacheDelete(task.id).catch(() => {});
-  const freshText = await fetch(`${API}/api/tasks/${task.id}/logs?light=1`).then(r => r.text()).catch(() => '');
-  if (!freshText || !_looksLikeCompleteTaskLog(freshText)) return; // 服务端也还没收尾，下次再自愈
-
-  _finishedLogCache.set(task.id, freshText);
-  logCacheSet(task.id, freshText);
-
-  logWrap.innerHTML = '';
-  const healedRenderer = new ChatLogRenderer(logWrap, false, true, task.project_name || null, task.id);
-  healedRenderer.render(freshText, task.type);
-  attachChatTurnForkAction(healedRenderer, task);
-  return healedRenderer;
 }
 
 // 渲染单个任务的完整问答回合（用户气泡 + 日志渲染），返回对应的 ChatLogRenderer
@@ -1811,14 +1804,16 @@ function _renderChatTaskTurn(container, task, logText) {
   const userWrap = document.createElement('div');
   userWrap.className = 'timeline-node-wrapper user-wrapper';
   userWrap.innerHTML = `
-    <div class="user-bubble">
-      <div class="user-bubble-title-row">
-        <div class="user-bubble-title">你:</div>
-        <button class="user-copy-btn" onclick="copyUserBubble(this)" title="复制">${copyBtnSVG()}</button>
+    <div class="user-message-stack">
+      <div class="user-bubble">
+        <div class="user-bubble-content">${esc(task.prompt)}</div>
+        ${renderTaskFileAttachments(task, currentChatProjectName)}
+        <div style="margin-top:6px">${renderTaskExecutionMetadata(task)}</div>
       </div>
-      <div class="user-bubble-content">${esc(task.prompt)}</div>
-      ${renderTaskFileAttachments(task, currentChatProjectName)}
-      <div style="margin-top:6px">${renderTaskExecutionMetadata(task)}</div>
+      <div class="message-footer user-message-footer">
+        ${renderMessageTime(task.created, '发送时间')}
+        <button class="user-copy-btn" onclick="copyUserBubble(this)" title="复制" aria-label="复制消息">${copyBtnSVG()}</button>
+      </div>
     </div>`;
   container.appendChild(userWrap);
 
@@ -1829,7 +1824,7 @@ function _renderChatTaskTurn(container, task, logText) {
 
   // 3. 构建局部的 ChatLogRenderer 并进行渲染
   // 每一个任务在渲染时，均传入 foldProcess=true，把中间执行步骤折叠起来，把回复直接展现
-  const localRenderer = new ChatLogRenderer(logWrap, task.status === 'running', true, task.project_name || null, task.id);
+  const localRenderer = new ChatLogRenderer(logWrap, task.status === 'running', true, task.project_name || null, task.id, task);
   localRenderer.render(logText, task.type);
   attachChatTurnForkAction(localRenderer, task);
   return localRenderer;
@@ -1862,32 +1857,6 @@ async function forkChatConversation(conversationId, taskId, button) {
   }
 }
 
-// 更早历史任务的折叠占位：只显示时间 + prompt 摘要，不请求日志正文；
-// 点开才按需拉取渲染，原地替换掉占位节点。
-function _renderCollapsedTaskPlaceholder(task) {
-  const wrap = document.createElement('div');
-  wrap.className = 'chat-collapsed-task';
-  const promptPreview = (task.prompt || '').replace(/\s+/g, ' ').trim();
-  wrap.innerHTML = `
-    <span class="chat-collapsed-task-caret">▸</span>
-    <span class="chat-collapsed-task-time">${esc(fmtTime(task.created))}</span>
-    <span class="chat-collapsed-task-prompt">${esc(promptPreview)}</span>`;
-  wrap.title = '点击展开完整记录';
-  wrap.addEventListener('click', async () => {
-    if (wrap.dataset.expanding) return;
-    wrap.dataset.expanding = '1';
-    wrap.style.opacity = '0.6';
-    // 记录展开状态：会话因心跳等原因整体重渲染时，renderChatWorkspace 会读取这个
-    // 集合，让这条历史任务直接以展开态渲染，而不是又变回折叠占位。
-    chatExpandedTaskIds.add(task.id);
-    const logText = await _fetchTaskLogCached(task);
-    const expanded = document.createElement('div');
-    _renderChatTaskTurn(expanded, task, logText);
-    wrap.replaceWith(expanded);
-  });
-  return wrap;
-}
-
 // 发送前判断项目绑定账号是否已有任务在跑，决定占位态（排队 or 执行中）
 function _isProjectAccountBusy(projectName) {
   const project = (projectsCache || []).find(p => p.name === projectName);
@@ -1902,19 +1871,22 @@ function _isProjectAccountBusy(projectName) {
 function _appendOptimisticUserMessage(promptText, snapshotPaths, taskId, isPending = false, accountType = '') {
   const chatContent = document.getElementById('chat-content');
   if (!chatContent) return false;
+  const task = (tasksCache || []).find(item => item.id === taskId);
 
   // 排队中的任务不立即显示气泡，等真正执行时再展示；由下方队列面板管理
   if (!isPending) {
     const userWrap = document.createElement('div');
     userWrap.className = 'timeline-node-wrapper user-wrapper';
     userWrap.innerHTML = `
-      <div class="user-bubble">
-        <div class="user-bubble-title-row">
-          <div class="user-bubble-title">你:</div>
-          <button class="user-copy-btn" onclick="copyUserBubble(this)" title="复制">${copyBtnSVG()}</button>
+      <div class="user-message-stack">
+        <div class="user-bubble">
+          <div class="user-bubble-content">${esc(promptText)}</div>
+          ${renderTaskFileAttachments({ images: snapshotPaths, project_name: currentChatProjectName }, currentChatProjectName)}
         </div>
-        <div class="user-bubble-content">${esc(promptText)}</div>
-        ${renderTaskFileAttachments({ images: snapshotPaths, project_name: currentChatProjectName }, currentChatProjectName)}
+        <div class="message-footer user-message-footer">
+          ${renderMessageTime(task?.created, '发送时间')}
+          <button class="user-copy-btn" onclick="copyUserBubble(this)" title="复制" aria-label="复制消息">${copyBtnSVG()}</button>
+        </div>
       </div>`;
     chatContent.appendChild(userWrap);
   }
@@ -1946,7 +1918,7 @@ function _appendOptimisticUserMessage(promptText, snapshotPaths, taskId, isPendi
     logWrap.style.marginBottom = '24px';
     chatContent.appendChild(logWrap);
 
-    const localRenderer = new ChatLogRenderer(logWrap, true, true, currentChatProjectName, taskId);
+    const localRenderer = new ChatLogRenderer(logWrap, true, true, currentChatProjectName, taskId, task);
     localRenderer.accountType = accountType || (tasksCache || []).find(t => t.id === taskId)?.type || '';
     localRenderer.renderExecuting();
     chatRenderer = localRenderer;
@@ -2044,6 +2016,7 @@ async function sendChatMessage() {
           project_name: projectName,
           auto: autoMode,
           conversation_name: conversationName,
+          conversation_auto_title: true,
           images: pendingImages.map(i => i.container_path),
           model,
           execute_at: executeAt,
@@ -2061,7 +2034,6 @@ async function sendChatMessage() {
       activeConversationId = taskData.conversation_id;
       activeTabId = upsertConversationTab(activeConversationId);
       renderTopbarTabs();
-      _autoTitleConversation(activeConversationId, promptText);
       const snapshotPaths = pendingImages.map(i => i.container_path);
       textarea.value = '';
       textarea.style.height = 'auto';

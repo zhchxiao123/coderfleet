@@ -28,6 +28,10 @@ class SystemLLMError(RuntimeError):
     """系统 LLM 调用失败（未配置、网络错误、上游返回非 2xx 等）。"""
 
 
+class SystemLLMOutputLimitError(SystemLLMError):
+    """The provider stopped before completing its answer; never cache its prefix."""
+
+
 Message = dict[str, str]  # {"role": "user"|"assistant", "content": str}
 
 
@@ -105,6 +109,14 @@ class SystemLLM:
             },
             body=body,
         )
+        reason = data.get("stop_reason")
+        if reason in {"max_tokens", "model_context_window_exceeded"}:
+            raise SystemLLMOutputLimitError(f"模型输出未完成（{reason}）")
+        if reason in {"refusal", "pause_turn", "tool_use"}:
+            raise SystemLLMError(f"模型未返回完整文本（{reason}）")
+        output_tokens = (data.get("usage") or {}).get("output_tokens", 0)
+        if reason is None and isinstance(output_tokens, (int, float)) and output_tokens >= max_tokens:
+            raise SystemLLMOutputLimitError("模型输出达到长度上限，未确认完成")
         parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
         return "".join(parts).strip()
 
@@ -124,6 +136,16 @@ class SystemLLM:
         choices = data.get("choices") or []
         if not choices:
             raise SystemLLMError("上游未返回 choices")
+        reason = choices[0].get("finish_reason")
+        if reason == "length":
+            raise SystemLLMOutputLimitError("模型输出未完成（length）")
+        if reason in {"content_filter", "tool_calls", "function_call"}:
+            raise SystemLLMError(f"模型未返回完整文本（{reason}）")
+        if choices[0].get("message", {}).get("refusal"):
+            raise SystemLLMError("模型拒绝了本次请求")
+        output_tokens = (data.get("usage") or {}).get("completion_tokens", 0)
+        if reason is None and isinstance(output_tokens, (int, float)) and output_tokens >= max_tokens:
+            raise SystemLLMOutputLimitError("模型输出达到长度上限，未确认完成")
         return (choices[0].get("message", {}).get("content") or "").strip()
 
     # ── HTTP（httpx，proxy 与容器保持一致由配置控制） ────────

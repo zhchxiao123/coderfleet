@@ -8,13 +8,22 @@
 const LOG_CACHE_DB_NAME    = 'coderfleet-log-cache';
 const LOG_CACHE_STORE      = 'logs';
 const LOG_CACHE_MAX_ENTRIES = 300; // 超过这个条数，按写入时间淘汰最老的，避免无限占用本地存储
+const LOG_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const LOG_MEMORY_MAX_BYTES = 16 * 1024 * 1024;
+const _finishedLogCache = new Map();
+const _logRequests = new Map();
+const _logQueue = [];
+let _logActiveRequests = 0;
 
 let _logCacheDbPromise = null;
+let _logCacheEviction = null;
+let _logCacheEvictionDirty = false;
 
 function _reqToPromise(req) {
   return new Promise((resolve, reject) => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    const timer = setTimeout(()=>reject(new Error('Log cache read timed out')),1000);
+    req.onsuccess = () => {clearTimeout(timer);resolve(req.result);};
+    req.onerror = () => {clearTimeout(timer);reject(req.error);};
   });
 }
 
@@ -26,6 +35,9 @@ function _openLogCacheDb() {
     try {
       req = indexedDB.open(LOG_CACHE_DB_NAME, 1);
     } catch (e) { resolve(null); return; }
+    let settled = false;
+    const finish = db => {if (settled) {db?.close();return;} settled=true;clearTimeout(timer);resolve(db);};
+    const timer = setTimeout(()=>finish(null),1000);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(LOG_CACHE_STORE)) {
@@ -33,8 +45,12 @@ function _openLogCacheDb() {
         store.createIndex('savedAt', 'savedAt');
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null); // 拿不到 IndexedDB（隐私模式/被禁用等）就静默降级为无持久缓存
+    req.onsuccess = () => {
+      req.result.onversionchange = () => {req.result.close();_logCacheDbPromise=null;};
+      finish(req.result);
+    };
+    req.onerror = () => finish(null);
+    req.onblocked = () => finish(null);
   });
   return _logCacheDbPromise;
 }
@@ -46,7 +62,7 @@ async function logCacheGet(taskId) {
   try {
     const tx = db.transaction(LOG_CACHE_STORE, 'readonly');
     const record = await _reqToPromise(tx.objectStore(LOG_CACHE_STORE).get(taskId));
-    return record ? record.text : null;
+    return record?.version === 2 ? record.text : null;
   } catch (e) {
     return null;
   }
@@ -71,31 +87,135 @@ async function logCacheSet(taskId, text) {
   if (!db) return;
   try {
     const tx = db.transaction(LOG_CACHE_STORE, 'readwrite');
-    tx.objectStore(LOG_CACHE_STORE).put({ taskId, text, savedAt: Date.now() });
+    if (text.length * 2 > LOG_MEMORY_MAX_BYTES) return;
+    tx.objectStore(LOG_CACHE_STORE).put({ taskId, text, savedAt: Date.now(), bytes: text.length * 2, version: 2 });
   } catch (e) {
     return;
   }
-  _evictOldLogCacheEntries(db).catch(() => {});
+  _logCacheEvictionDirty = true;
+  if (!_logCacheEviction) {
+    _logCacheEviction = (async()=> {
+      while (_logCacheEvictionDirty) {
+        _logCacheEvictionDirty = false;
+        await _evictOldLogCacheEntries(db);
+      }
+    })().catch(()=>{}).finally(()=>{_logCacheEviction=null;});
+  }
 }
 
 async function _evictOldLogCacheEntries(db) {
-  const tx = db.transaction(LOG_CACHE_STORE, 'readonly');
-  const count = await _reqToPromise(tx.objectStore(LOG_CACHE_STORE).count());
-  if (count <= LOG_CACHE_MAX_ENTRIES) return;
-
-  const toEvict = count - LOG_CACHE_MAX_ENTRIES;
-  const delTx = db.transaction(LOG_CACHE_STORE, 'readwrite');
-  const index = delTx.objectStore(LOG_CACHE_STORE).index('savedAt');
-  let deleted = 0;
+  const tx = db.transaction(LOG_CACHE_STORE, 'readwrite');
+  const index = tx.objectStore(LOG_CACHE_STORE).index('savedAt');
+  let count = 0, bytes = 0;
   await new Promise(resolve => {
-    const cursorReq = index.openCursor(); // savedAt 索引默认升序，最早写入的排最前
+    const cursorReq = index.openCursor(null, 'prev');
     cursorReq.onsuccess = () => {
       const cursor = cursorReq.result;
-      if (!cursor || deleted >= toEvict) { resolve(); return; }
-      cursor.delete();
-      deleted++;
+      if (!cursor) { resolve(); return; }
+      const record = cursor.value;
+      const size = record.bytes || (record.text || '').length * 2;
+      if (record.version !== 2 || count >= LOG_CACHE_MAX_ENTRIES || bytes + size > LOG_CACHE_MAX_BYTES) cursor.delete();
+      else { count++; bytes += size; }
       cursor.continue();
     };
     cursorReq.onerror = () => resolve();
+  });
+}
+
+function _rememberTaskLog(taskId, text) {
+  _finishedLogCache.delete(taskId);
+  if (text.length * 2 > LOG_MEMORY_MAX_BYTES) return;
+  _finishedLogCache.set(taskId,text);
+  let bytes = 0;
+  for (const value of _finishedLogCache.values()) bytes += value.length * 2;
+  while (bytes > LOG_MEMORY_MAX_BYTES || _finishedLogCache.size > LOG_CACHE_MAX_ENTRIES) {
+    const id = _finishedLogCache.keys().next().value;
+    bytes -= _finishedLogCache.get(id).length * 2;
+    _finishedLogCache.delete(id);
+  }
+}
+
+function _looksLikeCompleteTaskLog(text) {
+  return /(?:^|\n)={6,}[^\n]*\n\s*(?:finished:|usage status:)/.test(text || '');
+}
+
+function _drainLogQueue() {
+  while (_logActiveRequests < 3 && _logQueue.length) {
+    const run = _logQueue.shift();
+    run();
+  }
+}
+
+function _downloadTaskLog(url, signal) {
+  return new Promise((resolve,reject) => {
+    const run = () => {
+      if (signal.aborted) { reject(new DOMException('History read cancelled','AbortError')); return; }
+      _logActiveRequests++;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(),30000);
+      const abort = () => controller.abort();
+      signal.addEventListener('abort',abort,{once:true});
+      Promise.resolve().then(() => fetch(url,{signal:controller.signal})).then(response => {
+        if (response.ok === false) throw new Error(`日志请求失败（HTTP ${response.status}）`);
+        return response.text();
+      }).then(resolve,reject).finally(() => {
+        clearTimeout(timeout);
+        signal.removeEventListener('abort',abort);
+        _logActiveRequests--;
+        _drainLogQueue();
+      });
+    };
+    _logQueue.push(run);
+    _drainLogQueue();
+  });
+}
+
+// Coalesce concurrent readers while letting each view cancel independently.
+// The final consumer aborts both a queued request and its underlying download.
+async function _fetchTaskLogCached(task, {signal} = {}) {
+  const isFinished = task.status !== 'running' && task.status !== 'pending' && task.status !== 'scheduled';
+  if (signal?.aborted) throw new DOMException('History read cancelled','AbortError');
+  const key = `${isFinished ? 'finished' : 'raw'}:${task.id}`;
+  let request = _logRequests.get(key);
+  if (!request) {
+    request = {controller:new AbortController(),consumers:new Set()};
+    request.promise = (async () => {
+      if (isFinished) {
+        if (_finishedLogCache.has(task.id)) {
+          const text = _finishedLogCache.get(task.id);
+          _rememberTaskLog(task.id,text);
+          return text;
+        }
+        const persisted = await logCacheGet(task.id);
+        if (persisted !== null && _looksLikeCompleteTaskLog(persisted)) {
+          _rememberTaskLog(task.id,persisted);
+          return persisted;
+        }
+        if (persisted !== null) await logCacheDelete(task.id);
+      }
+      const logSuffix = isFinished ? '?light=1' : '';
+      const text = await _downloadTaskLog(`/api/tasks/${encodeURIComponent(task.id)}/logs${logSuffix}`,request.controller.signal);
+      if (isFinished && !request.controller.signal.aborted && _looksLikeCompleteTaskLog(text)) {
+        _rememberTaskLog(task.id,text);
+        logCacheSet(task.id,text);
+      }
+      return text;
+    })().finally(() => {if (_logRequests.get(key) === request) _logRequests.delete(key);});
+    _logRequests.set(key,request);
+  }
+  return new Promise((resolve,reject) => {
+    const consumer = {};
+    request.consumers.add(consumer);
+    const finish = () => {request.consumers.delete(consumer);signal?.removeEventListener('abort',abort);};
+    const abort = () => {
+      finish();
+      reject(new DOMException('History read cancelled','AbortError'));
+      if (!request.consumers.size) {
+        request.controller.abort();
+        if (_logRequests.get(key) === request) _logRequests.delete(key);
+      }
+    };
+    signal?.addEventListener('abort',abort,{once:true});
+    request.promise.then(value => {finish();resolve(value);},error => {finish();reject(error);});
   });
 }

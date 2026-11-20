@@ -5,7 +5,8 @@ import re
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from threading import RLock
+from typing import Callable, ClassVar, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -275,9 +276,29 @@ class ConversationFork(BaseModel):
     model: str = ""
 
 
+class ConversationTitleInfo(BaseModel):
+    source: Literal["legacy", "fallback", "auto", "manual"] = "legacy"
+    status: Literal["idle", "waiting_context", "pending", "ready", "retryable_error"] = "idle"
+    revision: int = Field(default=0, ge=0)
+    attempts: int = Field(default=0, ge=0)
+    retry_at: str = ""
+    error: str = ""
+
+
+class ConversationTitle(ConversationTitleInfo):
+    first_task_id: str = ""
+    first_goal_task_id: str = ""
+    topic_task_id: str = ""
+    latest_task_id: str = ""
+    context_key: str = ""
+    latest_message: str = Field(default="", max_length=2000)
+
+
 class Conversation(BaseModel):
+    _locks: ClassVar[dict[str, RLock]] = {}
     id:                str
     name:              str
+    title: ConversationTitle = Field(default_factory=ConversationTitle)
     account:           str
     type:              AccountType
     project:           str
@@ -299,7 +320,29 @@ class Conversation(BaseModel):
     ephemeral_expires_at: str = ""
 
     def save(self, conversations_dir: Path) -> None:
-        JsonStore(Conversation, conversations_dir).save(self)
+        with self.lock(conversations_dir, self.id):
+            store = JsonStore(Conversation, conversations_dir)
+            current = store.get(self.id)
+            # A running CLI can still hold a Conversation from before a title
+            # request/manual rename. Never write its older name/metadata back.
+            if current and current.title.revision > self.title.revision:
+                self.name = current.name
+                self.title = current.title.model_copy(deep=True)
+            store.save(self)
+
+    @classmethod
+    def lock(cls, directory: Path, identifier: str) -> RLock:
+        return cls._locks.setdefault(str(directory.resolve() / identifier), RLock())
+
+    @classmethod
+    def mutate(cls, directory: Path, identifier: str, change: Callable[["Conversation"], None]) -> "Conversation":
+        with cls.lock(directory, identifier):
+            current = JsonStore(cls, directory).get(identifier)
+            if current is None:
+                raise ValueError("会话不存在")
+            change(current)
+            current.save(directory)
+            return current
 
     @classmethod
     def load(cls, path: Path) -> "Conversation":
@@ -315,12 +358,18 @@ class Conversation(BaseModel):
         native_session_id: Optional[str] = None,
         last_task_id: Optional[str] = None,
     ) -> None:
-        if native_session_id:
-            self.native_session_id = native_session_id
-        if last_task_id:
-            self.last_task_id = last_task_id
-        self.updated = now_iso()
-        self.save(conversations_dir)
+        def change(current: "Conversation") -> None:
+            if native_session_id:
+                current.native_session_id = native_session_id
+            if last_task_id:
+                current.last_task_id = last_task_id
+            current.updated = now_iso()
+        try:
+            current = self.mutate(conversations_dir, self.id, change)
+        except ValueError:
+            return  # Finishing a Task must not recreate a deleted conversation.
+        for field in ("name", "title", "native_session_id", "last_task_id", "updated", "status"):
+            setattr(self, field, getattr(current, field))
 
 
 class Board(BaseModel):
@@ -631,6 +680,7 @@ class TaskCreateRequest(BaseModel):
     auto:    bool = False                 # 全自动模式（--full-auto / --dangerously-skip-permissions）
     conversation_id:   Optional[str] = None
     conversation_name: Optional[str] = None
+    conversation_auto_title: bool = False
     images:  list[str] = []              # 容器内图片路径列表（--image 参数）
     sdk_options: Optional[dict] = None
     model:   str = ""                    # CLI 模型名（Claude Code 支持 --model）
@@ -821,6 +871,7 @@ class BoardCardResponse(BaseModel):
 class ConversationResponse(BaseModel):
     id:                str
     name:              str
+    title: ConversationTitleInfo = Field(default_factory=ConversationTitleInfo)
     account:           str
     type:              AccountType
     project:           str
@@ -846,6 +897,7 @@ class ConversationResponse(BaseModel):
         return cls(
             id                = c.id,
             name              = c.name,
+            title             = ConversationTitleInfo(**c.title.model_dump()),
             account           = c.account,
             type              = c.type,
             project           = c.project,
