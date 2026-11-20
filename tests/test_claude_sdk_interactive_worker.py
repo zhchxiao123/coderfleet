@@ -129,7 +129,13 @@ def test_live_message_is_not_lost_at_first_result_and_retry_is_idempotent(intera
     events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]
     results = [event['result'] for event in events if event.get('type') == 'result']
     assert results == ['initial', 'supplemental instruction']
-    assert len([event for event in events if event.get('subtype') == 'coderfleet_message_accepted']) == 1
+    receipts = [event for event in events if event.get('subtype') == 'coderfleet_message_accepted']
+    assert len(receipts) == 1
+    identity = receipts[0]['user_message_uuid']
+    assert mailbox.reply('message-one')['result']['user_message_uuid'] == identity
+    native_results = [event for event in events if event.get('type') == 'result']
+    assert native_results[1]['user_message_uuids'] == [identity]
+    assert identity not in native_results[0]['user_message_uuids']
 
 
 @pytest.mark.parametrize('interactive_worker', [{'env':{'FAKE_INTERACTIVE_COALESCE':'1'}}], indirect=True)
@@ -141,7 +147,12 @@ def test_live_input_can_be_consumed_in_the_current_turn(interactive_worker) -> N
     assert mailbox.reply('coalesced')['status'] == 'accepted'
     gate.write_text('complete')
     assert process.wait(timeout=5) == 0
-    assert 'supplement merged into current turn' in (root / 'events.jsonl').read_text()
+    events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]
+    native_results = [event for event in events if event.get('type') == 'result']
+    assert len(native_results) == 1
+    assert 'supplement merged into current turn' in native_results[0]['result']
+    assert mailbox.reply('coalesced')['result']['user_message_uuid'] in native_results[0]['user_message_uuids']
+    assert len(native_results[0]['user_message_uuids']) == 2
 
 
 @pytest.mark.parametrize('interactive_worker', [{'env':{'FAKE_INTERACTIVE_QUESTION':'1'}, 'spec':{'question_timeout_seconds':.1}}], indirect=True)

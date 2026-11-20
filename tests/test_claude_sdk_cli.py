@@ -141,13 +141,14 @@ def test_native_task_commands_authenticate_and_preserve_retry_id(tmp_path, monke
         calls.append((url, kwargs))
         assert kwargs['headers'] == {'Authorization':'Bearer test-operator-key'}
         assert kwargs['json']['request_id'] == 'same-id'
-        return httpx.Response(200, json={'status':'accepted'})
+        return httpx.Response(200, json={'status':'accepted','result':{'user_message_uuid':'11111111-1111-4111-8111-111111111111'}})
     monkeypatch.setattr(httpx, 'post', post)
     result = CliRunner().invoke(task_cmds.task_group, [command, *args])
     assert result.exit_code == 0, result.output
     assert calls[0][0].endswith('/task-1/' + action)
     if command == 'send':
         assert calls[0][1]['json']['text'] == 'supplement'
+        assert '消息 UUID: 11111111-1111-4111-8111-111111111111' in result.output
 
 
 def test_task_run_selects_initial_model_and_sdk_options_together(tmp_path,monkeypatch):

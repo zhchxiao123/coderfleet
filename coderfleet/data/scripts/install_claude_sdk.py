@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-SDK_VERSION = "0.2.180"
-CLI_VERSION = "2.1.321"
+SDK_VERSION = "0.2.186"
+CLI_VERSION = "2.1.329"
 
 # Executed by the destination interpreter: dependency discovery must not inspect
 # the host server's import path or accidentally accept its older MCP package.

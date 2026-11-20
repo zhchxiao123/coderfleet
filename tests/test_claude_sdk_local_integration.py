@@ -111,7 +111,7 @@ def test_local_ordinary_project_uses_real_sdk_and_keeps_large_unicode_metadata(l
     task = asyncio.run(drive())
     log = h.scheduler.get_log_path(task.id).read_text()
     assert task.status == TaskStatus.done, log[-1500:]
-    assert (task.sdk_version, task.cli_version) == ("0.2.180", "2.1.321")
+    assert (task.sdk_version, task.cli_version) == ("0.2.186", "2.1.329")
     assert (task.tokens_input, task.tokens_output, task.cost_usd) == (7, 9, 0.02)
     assert task.project == h.project.path
     assert h.scheduler.get_conversation(task.conversation_id).ephemeral is False

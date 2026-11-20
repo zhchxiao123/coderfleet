@@ -51,8 +51,9 @@ OPTIONS_SCHEMA = obj({
         obj({'type':{'const':'file'},'path':STRING},('type','path'))]},'fallback_model':STRING,
     'max_turns':POSITIVE,'max_budget_usd':{'type':'number','exclusiveMinimum':0},
     'max_thinking_tokens':{'type':'integer','minimum':0},
-    'thinking':{'anyOf':[obj({'type':{'enum':['adaptive','disabled']}},('type',)),
-        obj({'type':{'const':'enabled'},'budget_tokens':POSITIVE},('type','budget_tokens'))]},
+    'thinking':{'anyOf':[obj({'type':{'const':'adaptive'},'display':{'enum':['summarized','omitted']}},('type',)),
+        obj({'type':{'const':'disabled'}},('type',)),
+        obj({'type':{'const':'enabled'},'budget_tokens':POSITIVE,'display':{'enum':['summarized','omitted']}},('type','budget_tokens'))]},
     'effort':EFFORT,'task_budget':obj({'total':POSITIVE},('total',)),
     'output_format':obj({'type':{'const':'json_schema'},'schema':JSON_OBJECT},('type','schema')),
     'betas':STRINGS,'add_dirs':STRINGS,'settings':STRING,
@@ -133,7 +134,7 @@ def validate_options(value: Any) -> dict[str, Any]:
     validate(value,OPTIONS_SCHEMA)
     result: dict[str, Any] = json.loads(raw)  # Own the snapshot, including all nested values.
     if result.get('session_store') and result.get('enable_file_checkpointing'):
-        raise ValueError('SDK 0.2.180 cannot combine session_store with file checkpointing')
+        raise ValueError('SDK 0.2.186 cannot combine session_store with file checkpointing')
     if result.get('extension'):
         path = Path(result['extension']['path'])
         if path.is_absolute() or '..' in path.parts or not path.parts:
@@ -244,14 +245,14 @@ async def build_options(value: dict[str, Any], cwd: str, context: dict[str, Any]
             if key in ('hooks','mcp_servers'):
                 if not isinstance(item,dict): raise ValueError(f'Extension {key} must be a mapping')
                 if key == 'hooks' and set(item) - HOOK_EVENTS:
-                    raise ValueError('Extension contains unsupported hook events for SDK 0.2.180')
+                    raise ValueError('Extension contains unsupported hook events for SDK 0.2.186')
                 overlap = set(options.get(key,{})) & set(item)
                 if overlap: raise ValueError(f'Duplicate extension {key}: {sorted(overlap)}')
                 options[key] = {**options.get(key,{}),**item}
             elif key in options: raise ValueError('Multiple SessionStore providers')
             else: options[key] = item
     if options.get('session_store') and options.get('enable_file_checkpointing'):
-        raise ValueError('SDK 0.2.180 cannot combine SessionStore with file checkpointing')
+        raise ValueError('SDK 0.2.186 cannot combine SessionStore with file checkpointing')
     return options
 
 
@@ -261,8 +262,8 @@ class SessionPreconditionError(ValueError):
 
 async def session_operation(request: dict[str, Any]) -> Any:
     """Native transcript helpers run without starting a model or an agent."""
-    if importlib.metadata.version('claude-agent-sdk') != '0.2.180':
-        raise ValueError('claude-agent-sdk 0.2.180 is required')
+    if importlib.metadata.version('claude-agent-sdk') != '0.2.186':
+        raise ValueError('claude-agent-sdk 0.2.186 is required')
     sdk = importlib.import_module('claude_agent_sdk')
     operation,arguments = request['operation'],dict(request['arguments'])
     validate(arguments,SESSION_SCHEMAS[operation],'arguments')

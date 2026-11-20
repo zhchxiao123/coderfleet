@@ -7,17 +7,18 @@ import sys
 import time
 
 if '--version' in sys.argv:
-    print('2.1.321 (Claude Code)')
+    print('2.1.329 (Claude Code)')
     raise SystemExit(0)
 
 def emit(value):
     print(json.dumps(value), flush=True)
 
-def result(text='answer', aborted=False):
+def result(text='answer', aborted=False, uuids=None):
     error = aborted and os.environ.get('FAKE_INTERACTIVE_ABORT_ERROR')
     emit({'type':'result', 'subtype':'error_during_execution' if error else 'success', 'duration_ms':1, 'duration_api_ms':1,
           'is_error':bool(error), 'errors':['aborted during tool use'] if error else [], 'num_turns':1, 'session_id':'11111111-1111-4111-8111-111111111111',
-          'result':text, 'terminal_reason':'aborted_streaming' if aborted else 'completed'})
+          'result':text, 'terminal_reason':'aborted_streaming' if aborted else 'completed',
+          'user_message_uuids':uuids})
 
 def ask_permission():
     tool = os.environ.get('FAKE_INTERACTIVE_PERMISSION') or 'AskUserQuestion'
@@ -58,7 +59,7 @@ while True:
                 if os.environ.get('FAKE_INTERACTIVE_ABORT_ERROR'): raise SystemExit(1)
                 emit({'type':'system','subtype':'session_state_changed','state':'idle','sdk_host_only':True})
         elif message['type'] == 'user':
-            queued.append(message['message']['content'])
+            queued.append((message['message']['content'], message.get('uuid')))
             if os.environ.get('FAKE_INTERACTIVE_REWIND'):
                 emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
             emit({'type':'system','subtype':'session_state_changed','state':'running','sdk_host_only':True})
@@ -71,10 +72,13 @@ while True:
     for due,reply in delayed[:]:
         if time.monotonic()>=due: emit(reply);delayed.remove((due,reply))
     if queued and Path(os.environ['FAKE_CLAUDE_RELEASE_GATE']).exists():
-        prompt = queued.pop(0)
+        prompt, identity = queued.pop(0)
+        uuids = [identity] if identity else []
         if os.environ.get('FAKE_INTERACTIVE_COALESCE'):
-            prompt = '\n'.join([prompt, *queued]); queued.clear()
-        emit({'type':'assistant','uuid':'33333333-3333-4333-8333-333333333333','message':{'model':'fixture','content':[{'type':'text','text':str(prompt)}]}})
-        result(str(prompt))
+            prompt = '\n'.join([prompt, *(item[0] for item in queued)])
+            uuids.extend(item[1] for item in queued if item[1]); queued.clear()
+        emit({'type':'assistant','uuid':'33333333-3333-4333-8333-333333333333','user_message_uuids':uuids,
+              'message':{'model':'fixture','content':[{'type':'text','text':str(prompt)}]}})
+        result(str(prompt), uuids=uuids)
         if not queued:
             emit({'type':'system','subtype':'session_state_changed','state':'idle','sdk_host_only':True})

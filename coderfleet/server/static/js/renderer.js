@@ -63,6 +63,8 @@ class ChatLogRenderer {
     this.backgroundTasks = new Map();
     this.streamMessageId = ''; this.streamBlocks = new Map(); this.streamDirty = new Set(); this.streamFrame = null;
     this.lastSDKText = null; this.lastSDKMessageId = ''; this.lastSDKTextParts = [];
+    this.sdkInputs = new Map();
+    this.sdkTurnInputs = new Set(); this.sdkTurnTarget = null;
   }
 
   _ensureProcessWrapper() {
@@ -71,30 +73,54 @@ class ChatLogRenderer {
     this.processWrapper = document.createElement('div');
     this.processWrapper.className = 'timeline-node intermediate-process-wrapper';
 
-    const bodyClass = this.isRunning ? 'intermediate-process-body' : 'intermediate-process-body collapsed';
-    const btnText = this.isRunning ? '收起' : '展开';
-
     this.processWrapper.innerHTML = `
-  <div class="intermediate-process-header">
+  <button type="button" class="intermediate-process-header" aria-expanded="false">
     <div class="process-title-area">
-      <span class="process-icon">⚙️</span>
-      <span class="process-title-text">任务执行过程</span>
-      <span class="process-stats-badge" id="ps-${this.idPrefix}" style="display:none">0 个步骤</span>
+      <span class="process-icon" aria-hidden="true">›</span>
+      <span class="process-title-text">${this.isRunning ? '正在处理' : '执行详情'}</span>
+      <span class="process-stats-badge" id="ps-${this.idPrefix}" style="display:none">0 条记录</span>
     </div>
-    <button class="process-toggle-btn" id="pb-${this.idPrefix}">${btnText}</button>
-  </div>
-  <div class="${bodyClass}" id="pbody-${this.idPrefix}"></div>
+    <span class="process-toggle-btn" id="pb-${this.idPrefix}">执行详情</span>
+  </button>
+  <div class="intermediate-process-body collapsed" id="pbody-${this.idPrefix}"></div>
 `;
 
     this.inner.appendChild(this.processWrapper);
     this.processBody = this.processWrapper.querySelector(`#pbody-${this.idPrefix}`);
+    this.processBody.classList.add('collapsed');
 
     const header = this.processWrapper.querySelector('.intermediate-process-header');
     const toggleBtn = this.processWrapper.querySelector(`#pb-${this.idPrefix}`);
     header.addEventListener('click', () => {
       const isCollapsed = this.processBody.classList.toggle('collapsed');
-      toggleBtn.textContent = isCollapsed ? '展开' : '收起';
+      toggleBtn.textContent = isCollapsed ? '执行详情' : '收起详情';
+      header.setAttribute('aria-expanded',String(!isCollapsed));
     });
+  }
+
+  _processStage(label, attention = false) {
+    if (!attention && this.isRunning && this._hasPendingAction()) label = '等待您的回答或授权';
+    if (this.foldProcess) {
+      this._ensureProcessWrapper();
+      this.processWrapper.querySelector('.process-title-text').textContent = label;
+      if (attention && this.isRunning) {
+        this.processBody.classList.remove('collapsed');
+        this.processWrapper.querySelector('.intermediate-process-header').setAttribute('aria-expanded','true');
+        this.processWrapper.querySelector(`#pb-${this.idPrefix}`).textContent = '收起详情';
+      }
+    }
+    if (attention && this.isRunning) this.onNeedsAttention?.();
+  }
+
+  _hasPendingAction() {
+    return Object.values(this.toolMap).some(entry=>entry.isLive) ||
+      Object.values(this.permissionMap).some(entry=>entry.isLive) ||
+      Object.values(this.subagentRenderers).some(child=>child.renderer._hasPendingAction());
+  }
+
+  _refreshWaitingStage() {
+    if (this.isRunning) this._processStage('继续处理中');
+    this.onAttentionResolved?.();
   }
 
   _appendToProcess(el) {
@@ -104,12 +130,12 @@ class ChatLogRenderer {
     const badge = this.processWrapper.querySelector(`#ps-${this.idPrefix}`);
     if (badge) {
       badge.style.display = '';
-      badge.textContent = `${this.toolCount} 个步骤`;
+      badge.textContent = `${this.toolCount} 条记录`;
     }
   }
 
   _appendNode(el) {
-    if (this.foldProcess) {
+    if (this.foldProcess && !el.classList.contains('is-error')) {
       this._appendToProcess(el);
     } else {
       this.inner.appendChild(el);
@@ -411,7 +437,11 @@ class ChatLogRenderer {
     const record = {timestamp:d.timestamp ?? d.message?.timestamp ?? d.part?.time?.end ?? d.part?.time?.created,
       targets:[],rawEvent,order:this._messageOrder = (this._messageOrder || 0) + 1};
     this._messageEvent = record;
-    try { return this._dispatchEvent(d); }
+    try {
+      const result = this._dispatchEvent(d);
+      this._trackSDKInput(d);
+      return result;
+    }
     finally {
       this._pendingMessageClock = rawEvent && record.targets.length ? record : null;
       this._messageEvent = previous;
@@ -453,6 +483,88 @@ class ChatLogRenderer {
     }
     this._paintMessageTime(node, this.taskTiming.finished, '本轮完成时间（未记录单条回复时间）', 0, 'task');
     this._recordMessageTime(node);
+  }
+
+  _inputEntry(identity) {
+    if (!this.sdkInputs.has(identity)) this.sdkInputs.set(identity,{state:'delivered',node:null,target:null});
+    return this.sdkInputs.get(identity);
+  }
+
+  _paintSDKInput(entry) {
+    if (!entry.node) return;
+    const button = entry.node.querySelector('.sdk-input-status');
+    button.textContent = {delivered:'已投递',consumed:'已纳入本轮',completed:'本轮完成',
+      interrupted:'本轮已中断',failed:'本轮失败',unknown:
+        `${entry.taskOutcome === 'killed' ? '任务已中断' : entry.taskOutcome === 'failed' ? '任务失败' : '任务结束'} · 归属未确认`}[entry.state];
+    button.disabled = !entry.target;
+    button.title = entry.target ? '定位对应回复' : '等待 SDK 返回对应消息的处理结果';
+    entry.node.dataset.deliveryState = entry.state;
+  }
+
+  _sdkMessageAccepted(event) {
+    if (event.task_id && this.taskId && event.task_id !== this.taskId) return;
+    // Historical workers have a durable request ID but no native UUID. Keep
+    // these messages visible without guessing which reply consumed them.
+    const identity = event.user_message_uuid || `legacy:${event.request_id}`;
+    const entry = this._inputEntry(identity);
+    if (entry.node) return;
+    const node = document.createElement('div');
+    node.className = 'sdk-supplement-message timeline-node';
+    node.dataset.inputUuid = identity;
+    node.innerHTML = `<div class="sdk-supplement-stack">
+      <div class="user-bubble"><div class="user-bubble-content">${esc(event.text || '')}</div>
+        ${event.attachment_count ? `<small>${esc(event.attachment_count)} 个附件</small>` : ''}</div>
+      <div class="message-footer user-message-footer"><span class="bubble-time-slot"></span>
+        <button type="button" class="sdk-input-status"></button></div></div>`;
+    entry.node = node;
+    node.querySelector('.sdk-input-status').addEventListener('click',()=>{
+      if (!entry.target) return;
+      // A previous reply may now be inside execution details.
+      if (this.processBody?.contains(entry.target)) {
+        this.processBody.classList.remove('collapsed');
+        this.processWrapper.querySelector('.intermediate-process-header').setAttribute('aria-expanded','true');
+        this.processWrapper.querySelector(`#pb-${this.idPrefix}`).textContent = '收起详情';
+      }
+      entry.target.scrollIntoView?.({behavior:'smooth',block:'center'});
+    });
+    this._recordMessageTime(node,'补充消息接收时间');
+    this.inner.appendChild(node);
+    this._paintSDKInput(entry);
+  }
+
+  _trackSDKInput(event) {
+    if (this.executionBackend !== 'sdk' || event.parent_tool_use_id || event.coderfleet_synthetic ||
+        !['assistant','stream_event','result'].includes(event.type)) return;
+    const identities = [event.user_message_uuid,...(Array.isArray(event.user_message_uuids) ? event.user_message_uuids.slice(0,64) : [])]
+      .filter(value=>typeof value === 'string' && /^[a-f0-9-]{36}$/i.test(value));
+    // Native attribution is sparse: only the first event after it changes
+    // carries UUIDs. Keep that context through tool calls/deltas, bounded by
+    // the root result, never by a global "last reply" or accepted input order.
+    for (const identity of identities) this.sdkTurnInputs.add(identity);
+    let target = this._messageEvent?.targets.filter(item=>item.node.classList.contains('ai-reply')).at(-1)?.node;
+    if (event.type === 'stream_event' && event.event?.delta?.type === 'text_delta') {
+      target = this.streamBlocks.get(`${this.streamMessageId}:${event.event.index ?? 0}`)?.node;
+    }
+    if (target) this.sdkTurnTarget = target;
+    for (const identity of this.sdkTurnInputs) {
+      const entry = this._inputEntry(identity);
+      if (this.sdkTurnTarget) entry.target = this.sdkTurnTarget;
+      if (event.type === 'result') {
+        entry.state = event.terminal_reason?.startsWith('aborted') || this.interrupted ? 'interrupted' :
+          event.is_error || event.subtype !== 'success' ? 'failed' : 'completed';
+      } else if (entry.state === 'delivered') entry.state = 'consumed';
+      this._paintSDKInput(entry);
+    }
+    if (event.type === 'result') { this.sdkTurnInputs.clear(); this.sdkTurnTarget = null; }
+  }
+
+  _finishSDKInputs(status) {
+    for (const entry of this.sdkInputs.values()) {
+      if (['delivered','consumed'].includes(entry.state)) {
+        entry.state = 'unknown'; entry.taskOutcome = status;
+        this._paintSDKInput(entry);
+      }
+    }
   }
 
   _dispatchEvent(d) {
@@ -557,7 +669,7 @@ class ChatLogRenderer {
     if (d.subtype === 'task_progress') return;
     if (d.subtype === 'coderfleet_permission_pending') return this._permissionPending(d);
     if (d.subtype === 'coderfleet_permission_closed') return this._closePermission(d.tool_call_id,d.status);
-    if (d.subtype === 'coderfleet_message_accepted') { this._pill('补充消息已接收', d.text || '', '接收时间'); return; }
+    if (d.subtype === 'coderfleet_message_accepted') return this._sdkMessageAccepted(d);
     if (d.subtype === 'coderfleet_interrupted') { this.interrupted = true; this._pill('已中断', '原生会话可继续'); return; }
     if (d.subtype === 'coderfleet_question_closed') {
       const owner = this._questionRenderer(d.tool_call_id);
@@ -568,6 +680,7 @@ class ChatLogRenderer {
         owner._disableAskqInputs(d.tool_call_id);
         owner._setAskqSubmitStatus(d.tool_call_id,
           d.status === 'answered' ? '✓ 已回答' : d.status === 'timed_out' ? '等待回答已超时' : '提问已取消', d.status !== 'answered');
+        owner._refreshWaitingStage();
       }
       return;
     }
@@ -606,6 +719,7 @@ class ChatLogRenderer {
       entry.exitEl.textContent = `${label} · ${taskId}${task.summary ? '\n'+String(task.summary).slice(0,500) : ''}`;
     }
     if (task.status === 'failed' && entry.bodyEl) {
+      this._processStage('后台任务失败',true);
       entry.bodyEl.classList.remove('collapsed');
       if (entry.btnEl) entry.btnEl.textContent = '收起';
     }
@@ -1276,6 +1390,7 @@ class ChatLogRenderer {
 
   // ── AI 文字气泡 ───────────────────────────────────────────
   _bubble(text, model) {
+    if (this.isRunning) this._processStage('正在回复');
     const label = model
       ? model.replace(/^claude-/, '').split('-').slice(0, 2).join('-')
       : 'AI';
@@ -1347,6 +1462,7 @@ class ChatLogRenderer {
 
   // ── 思考气泡 ──────────────────────────────────────────────
   _thinking(text) {
+    if (this.isRunning) this._processStage('思考中');
     if (!text?.trim()) return;
     const el = document.createElement('div');
     el.className = 'chat-bubble-wrap thought-reply';
@@ -1371,6 +1487,7 @@ class ChatLogRenderer {
     if (name === 'TaskUpdate') { this._toolUseTaskUpdate(block); return; }
     if (name === 'TaskList') { this._toolUseTaskList(block); return; }
     const summary = formatToolSummary(name, input);
+    if (this.isRunning) this._processStage(`正在执行 · ${name}`);
     const icon = toolIcon(name);
     // Edit 工具：old_string/new_string 用逐行 diff 展示，比截断后的纯文本预览
     // 更能一眼看出改了什么;其余工具沿用原来的 JSON/命令预览。
@@ -1450,6 +1567,13 @@ class ChatLogRenderer {
         subBtn.textContent = collapsed ? '▸ 子agent 会话' : '▾ 子agent 会话';
       });
       const subRenderer = new ChatLogRenderer(subThread, this.isRunning, false, this.projectName, this.taskId);
+      subRenderer.onNeedsAttention = ()=>{
+        this._processStage('等待您的回答或授权',true);
+        body.classList.remove('collapsed');
+        subThread.classList.remove('collapsed');
+        btn.textContent = '收起'; subBtn.textContent = '▾ 子agent 会话';
+      };
+      subRenderer.onAttentionResolved = ()=>this._refreshWaitingStage();
       subRenderer.executionBackend = this.executionBackend;
       subRenderer.inner = subThread.querySelector('.chat-log');
       this.subagentRenderers[id] = { renderer: subRenderer, toggleRowEl, revealed: false };
@@ -1558,6 +1682,7 @@ class ChatLogRenderer {
     };
 
     if (isLive) {
+      this._processStage('等待您的回答',true);
       questions.forEach((q, i) => {
         if (!q.options?.length) return;
         const other = document.getElementById(`askq-other-${id}-${i}`);
@@ -1671,6 +1796,7 @@ class ChatLogRenderer {
       e.isLive = false;
       this._setAskqSubmitStatus(id, '✓ 已提交，等待任务处理…', false);
       this._disableAskqInputs(id);
+      this._refreshWaitingStage();
     } catch (err) {
       if (definitiveFailure) e.answerAttempt = null;
       if (!e.isLive) return; // Never reopen a question after its authoritative close.
@@ -1698,6 +1824,7 @@ class ChatLogRenderer {
         <span id="permission-status-${esc(id)}" role="status">${this.isRunning ? '等待您的决定' : '请求已结束'}</span></div>`;
     this.permissionMap[id] = {wrap,isLive:this.isRunning,attempt:null};
     this._appendNode(wrap);
+    if (this.isRunning) this._processStage('等待您的授权',true);
     for (const [label,decision] of [['allow','allow'],['deny','deny']]) {
       const button = document.getElementById(`permission-${label}-${id}`);
       if (button) {
@@ -1728,6 +1855,7 @@ class ChatLogRenderer {
     }
     const text = document.getElementById(`permission-status-${id}`);
     if (text) text.textContent = {approved:'✓ 已批准',denied:'已拒绝',timed_out:'授权已超时',cancelled:'授权已取消'}[status] || '请求已结束';
+    owner._refreshWaitingStage();
   }
 
   async _submitPermission(id,decision) {
@@ -2123,6 +2251,7 @@ class ChatLogRenderer {
     if (!e) return;
 
     const ok = !isError;
+    if (isError) this._processStage(`工具执行失败 · ${e.name}`,true);
     e.statusEl.textContent = ok ? '✓' : '✗';
     e.badgeEl.className = `tool-badge ${ok ? 'ok' : 'fail'}`;
     e.badgeEl.textContent = `${toolIcon(e.name)} ${e.name}`;
@@ -2135,6 +2264,7 @@ class ChatLogRenderer {
       e.exitEl.style.display = '';
       e.exitEl.className = `tool-exit ${isTimeout ? 'fail-exit' : (ok ? 'ok-exit' : 'fail-exit')}`;
       e.exitEl.textContent = isTimeout ? '⏱  超时未回应' : (ok ? '✓  已作答' : '✗  未作答');
+      this._refreshWaitingStage();
       return;
     }
 
@@ -2223,6 +2353,8 @@ class ChatLogRenderer {
   _renderFooter(text) {
     if (this._footerRendered) return;
     this._footerRendered = true;
+    this.isRunning = false;
+    this.deactivatePendingInterventions();
     let status = 'done', label = '✓ 任务完成';
     if (typeof text === 'string') {
       if (text.includes('killed')) { status = 'killed'; label = this.interrupted ? '⊘ 已中断，会话可继续' : '⊘ 任务已终止'; }
@@ -2234,6 +2366,8 @@ class ChatLogRenderer {
     }
     const el = document.createElement('div');
     el.className = 'chat-footer';
+    this._finishSDKInputs(status);
+    this._processStage(status === 'done' ? '处理完成' : status === 'killed' ? '已中断，可继续对话' : '任务失败');
     el.classList.add('timeline-node', status === 'failed' ? 'is-error' : 'is-muted');
     el.innerHTML = `<span class="footer-pill ${status}">${esc(label)}</span>`;
     this._appendNode(el);

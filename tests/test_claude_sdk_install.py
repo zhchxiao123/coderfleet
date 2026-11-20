@@ -13,17 +13,17 @@ from zipfile import ZipFile, ZipInfo
 INSTALLER = Path(__file__).resolve().parents[1] / "coderfleet/data/scripts/install_claude_sdk.py"
 
 
-def sdk_wheel(directory: Path, cli_version: str = "2.1.321") -> Path:
+def sdk_wheel(directory: Path, cli_version: str = "2.1.329") -> Path:
     directory.mkdir()
-    wheel = directory / "claude_agent_sdk-0.2.180-py3-none-any.whl"
+    wheel = directory / "claude_agent_sdk-0.2.186-py3-none-any.whl"
     with ZipFile(wheel, "w") as archive:
         archive.writestr("claude_agent_sdk/__init__.py", "")
         cli = ZipInfo("claude_agent_sdk/_bundled/claude")
         cli.external_attr = 0o100755 << 16
         archive.writestr(cli, f'#!/bin/sh\nprintf "{cli_version} (Claude Code)\\n"\n')
-        archive.writestr("claude_agent_sdk-0.2.180.dist-info/METADATA", "Metadata-Version: 2.1\nName: claude-agent-sdk\nVersion: 0.2.180\n")
-        archive.writestr("claude_agent_sdk-0.2.180.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
-        archive.writestr("claude_agent_sdk-0.2.180.dist-info/RECORD", "")
+        archive.writestr("claude_agent_sdk-0.2.186.dist-info/METADATA", "Metadata-Version: 2.1\nName: claude-agent-sdk\nVersion: 0.2.186\n")
+        archive.writestr("claude_agent_sdk-0.2.186.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        archive.writestr("claude_agent_sdk-0.2.186.dist-info/RECORD", "")
     return wheel
 
 
@@ -40,13 +40,13 @@ def test_installer_provisions_and_checks_an_isolated_environment(tmp_path: Path)
     assert installed.returncode == 0, installed.stderr
     data = json.loads(installed.stdout)
     assert data["ready"] is True
-    assert data["sdk_version"] == "0.2.180"
-    assert data["cli_version"] == "2.1.321"
+    assert data["sdk_version"] == "0.2.186"
+    assert data["cli_version"] == "2.1.329"
     assert Path(data["python_path"]) == target / "bin" / "python"
     assert Path(data["cli_path"]).is_relative_to(target)
     checked = subprocess.run([*command, "--check"], capture_output=True, text=True, env=env, timeout=10)
     assert checked.returncode == 0, checked.stderr
-    assert json.loads(checked.stdout)["cli_version"] == "2.1.321"
+    assert json.loads(checked.stdout)["cli_version"] == "2.1.329"
 
 
 def test_check_missing_environment_is_read_only_and_reports_not_ready(tmp_path: Path) -> None:

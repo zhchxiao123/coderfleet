@@ -28,10 +28,11 @@ import secrets
 import signal
 import subprocess
 import sys
+import uuid
 from typing import Any, TextIO, Callable
 
-SDK_VERSION = "0.2.180"
-CLI_VERSION = "2.1.321"
+SDK_VERSION = "0.2.186"
+CLI_VERSION = "2.1.329"
 OWNERSHIP_TOKEN = secrets.token_hex(16)
 
 
@@ -113,7 +114,22 @@ class TaskSpec:
         return cls(**{**data, "images": tuple(images)})
 
 
-async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str, ...], *, strict_uploads: bool = True) -> str | AsyncIterator[dict[str,Any]]:
+def input_message_uuid(task_id: str, request_id: str = '') -> str:
+    # A retried durable command keeps its identity; identical text in another
+    # command or Task is a new input. No prompt or credential enters the UUID.
+    identity = json.dumps([task_id, request_id], separators=(',', ':'))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'coderfleet:input:' + identity))
+
+
+async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str, ...], *, strict_uploads: bool = True, request_id: str = '') -> AsyncIterator[dict[str, Any]]:
+    content = await _input_content(spec, text, images, strict_uploads=strict_uploads)
+    async def messages() -> AsyncIterator[dict[str, Any]]:
+        yield {'type': 'user', 'uuid': input_message_uuid(spec.task_id, request_id),
+               'message': {'role': 'user', 'content': content}, 'parent_tool_use_id': None}
+    return messages()
+
+
+async def _input_content(spec: TaskSpec, text: str, images: list[str] | tuple[str, ...], *, strict_uploads: bool) -> str | list[dict[str, Any]]:
     if not images:
         return text
     configured_root = Path(spec.attachment_root or Path(spec.cwd)/'.coderfleet-uploads')
@@ -140,9 +156,7 @@ async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str
                 'source':{'type':'base64','media_type':mime,'data':base64.b64encode(data).decode('ascii')}})
         else:
             blocks.append({'type':'text','text':'[Attached file: ' + str(path) + ']'})
-    async def messages() -> AsyncIterator[dict[str,Any]]:
-        yield {'type':'user','message':{'role':'user','content':blocks},'parent_tool_use_id':None}
-    return messages()
+    return blocks
 
 
 def emit(event: dict[str, Any]) -> None:
@@ -518,7 +532,7 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                             if engine is None:
                                 raise RuntimeError('SDK client disconnected')
                             try:
-                                prepared = await prepare_input(spec,text,images)
+                                prepared = await prepare_input(spec,text,images,request_id=command['id'])
                             except (OSError,ValueError) as error:
                                 mailbox.acknowledge(command['id'],error=str(error))
                                 continue
@@ -527,8 +541,10 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                             engine._clear_run_end_ceiling()
                             await client.query(prepared)
                             emit({'type':'system', 'subtype':'coderfleet_message_accepted', 'task_id':spec.task_id,
-                                  'request_id':command['id'], 'text':text,'attachment_count':len(images)})
-                            mailbox.acknowledge(command['id'], {'queued_in_sdk': True})
+                                  'request_id':command['id'], 'user_message_uuid':input_message_uuid(spec.task_id,command['id']),
+                                  'text':text,'attachment_count':len(images)})
+                            mailbox.acknowledge(command['id'], {'queued_in_sdk': True,
+                                'user_message_uuid':input_message_uuid(spec.task_id,command['id'])})
                     elif command['kind'] == 'interrupt':
                         await client.interrupt()
                         interrupted = True
