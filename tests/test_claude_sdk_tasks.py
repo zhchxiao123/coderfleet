@@ -16,6 +16,28 @@ from coderfleet.server.scheduler import Scheduler
 from coderfleet.server.models import AccountType, Task, TaskResponse, TaskStatus
 
 
+def test_native_workflow_is_an_opt_in_task_without_changing_project_chat_defaults(tmp_path,monkeypatch):
+    repo=tmp_path/'repo';repo.mkdir()
+    (tmp_path/'accounts.conf').write_text('NAME=one TYPE=claude CLAUDE_BACKEND=sdk\n')
+    (tmp_path/'projects.conf').write_text(f'NAME=repo ACCOUNT=one PATH={repo}\n')
+    monkeypatch.setattr(docker_mgr,'is_container_running',lambda _:True)
+    scheduler=Scheduler(tmp_path,runtime=FakeRuntime())
+    scheduled=(datetime.now()+timedelta(hours=1)).isoformat()
+    async def run():
+        initial=await scheduler.submit('普通项目问答',project_name='repo',conversation_name='项目聊天',
+            sdk_options={'effort':'low'},execute_at=scheduled)
+        audit=await scheduler.submit('核查项目',conversation_id=initial.conversation_id,auto=True,
+            sdk_options={'native_workflow':{'preset':'audit'}},execute_at=scheduled)
+        assert audit.auto is False
+        assert audit.sdk_options['native_workflow']=={'preset':'audit'}
+        assert audit.project_name=='repo' and audit.conversation_id==initial.conversation_id
+        assert scheduler.get_conversation(initial.conversation_id).sdk_options=={'effort':'low'}
+        followup=await scheduler.submit('继续普通问答',conversation_id=initial.conversation_id,execute_at=scheduled)
+        assert followup.sdk_options=={'effort':'low'}
+        assert not followup.board_card_id and not followup.pipeline_id
+    asyncio.run(run())
+
+
 def test_sdk_recovery_keeps_unobservable_worker_busy_without_aborting_startup(tmp_path: Path) -> None:
     (tmp_path / "accounts.conf").write_text(
         "NAME=one TYPE=claude RUNTIME=local PROXY=off CLAUDE_BACKEND=sdk\n",

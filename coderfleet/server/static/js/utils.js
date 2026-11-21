@@ -169,6 +169,7 @@ function formatToolSummary(name, input) {
       return chip + (timeout ? ` · ${timeout}` : '');
     }
     case 'Skill': return input.skill || input.name || input.command || '';
+    case 'Workflow': return input.description || input.name || '原生工作流';
     case 'EnterWorktree': return input.name || input.path || '';
     case 'ExitWorktree': {
       const verb = input.action === 'remove' ? '移除 worktree' : '离开 worktree';
@@ -195,6 +196,9 @@ function formatToolSummary(name, input) {
 
 function formatToolInput(name, input) {
   if (!input) return '';
+  if (name === 'Workflow' && typeof input.script === 'string') {
+    return '编排源码\n'+input.script.slice(0,65536)+(input.script.length > 65536 ? '\n…完整源码保留在原始日志中' : '');
+  }
   if (name === 'Bash') return input.command || '';
   if (name === 'Write') {
     const preview = (input.content || '').slice(0, 300);

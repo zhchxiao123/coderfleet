@@ -41,7 +41,11 @@ AGENT = obj({
 NETWORK = obj({**{name:STRINGS for name in ('allowedDomains','deniedDomains','allowUnixSockets','allowMachLookup')},
     **{name:BOOL for name in ('allowManagedDomainsOnly','allowAllUnixSockets','allowLocalBinding')},
     **{name:{'type':'integer','minimum':1,'maximum':65535} for name in ('httpProxyPort','socksProxyPort')}})
+WORKFLOW_DEFAULTS = {'max_concurrent_agents':2,'timeout_seconds':600,'max_turns':24,'max_budget_usd':2}
 OPTIONS_SCHEMA = obj({
+    'native_workflow':obj({'preset':{'enum':['audit','research']},
+        'max_concurrent_agents':{'type':'integer','minimum':1,'maximum':4},
+        'timeout_seconds':{'type':'integer','minimum':1,'maximum':1800}},('preset',)),
     'permission_mode':PERMISSION,
     'tools':{'anyOf':[STRINGS,obj({'type':{'const':'preset'},'preset':{'const':'claude_code'}},('type','preset'))]},
     'allowed_tools':STRINGS,'disallowed_tools':STRINGS,
@@ -82,6 +86,8 @@ SESSION_SCHEMAS = {
 }
 HOOK_EVENTS = frozenset({'PreToolUse','PostToolUse','PostToolUseFailure','UserPromptSubmit','Stop','SubagentStop','PreCompact','Notification','SubagentStart','PermissionRequest'})
 SESSION_MUTATIONS = frozenset({'rename','tag','fork','delete','import_store'})
+WORKFLOW_OPTIONS = frozenset({'native_workflow','max_turns','max_budget_usd','max_thinking_tokens',
+    'thinking','effort','task_budget','fallback_model','include_partial_messages','forward_subagent_text','output_format'})
 
 
 def validate(value: Any, schema: dict[str, Any], path: str = 'sdk_options') -> None:
@@ -133,6 +139,12 @@ def validate_options(value: Any) -> dict[str, Any]:
     if len(raw.encode()) > 256 * 1024: raise ValueError('sdk_options exceeds 256 KiB')
     validate(value,OPTIONS_SCHEMA)
     result: dict[str, Any] = json.loads(raw)  # Own the snapshot, including all nested values.
+    if result.get('native_workflow'):
+        conflicts = sorted(set(result) - WORKFLOW_OPTIONS)
+        if conflicts:
+            raise ValueError('native_workflow owns the read-only execution policy; conflicting options: '+', '.join(conflicts))
+        if result.get('max_turns',WORKFLOW_DEFAULTS['max_turns']) > 40 or result.get('max_budget_usd',WORKFLOW_DEFAULTS['max_budget_usd']) > 10:
+            raise ValueError('native_workflow allows at most 40 turns and a 10 USD SDK budget')
     if result.get('session_store') and result.get('enable_file_checkpointing'):
         raise ValueError('SDK 0.2.186 cannot combine session_store with file checkpointing')
     if result.get('extension'):
@@ -216,6 +228,36 @@ class SQLiteSessionStore:
 async def build_options(value: dict[str, Any], cwd: str, context: dict[str, Any]) -> dict[str, Any]:
     """Called ONLY in the account worker, where project code may execute."""
     options = validate_options(value)
+    profile = options.pop('native_workflow',None)
+    if profile:
+        tools = ['Read','Glob','Grep','Workflow']
+        if profile['preset'] == 'research': tools += ['WebSearch','WebFetch']
+        settings: dict[str,Any] = {'workflowSizeGuideline':'small'}
+        account_root = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home()/'.claude')
+        project_root = Path(context.get('project_root',cwd))
+        for path in (account_root/'settings.json',project_root/'.claude/settings.json',project_root/'.claude/settings.local.json'):
+            if not path.exists(): continue
+            if path.stat().st_size > 256*1024: raise ValueError('native_workflow policy settings exceed 256 KiB')
+            policy = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(policy,dict) or ('disableWorkflows' in policy and not isinstance(policy['disableWorkflows'],bool)):
+                raise ValueError('native_workflow requires valid workflow policy settings')
+            if policy.get('disableWorkflows') is True: settings['disableWorkflows'] = True
+            permissions = policy.get('permissions',{})
+            if not isinstance(permissions,dict): raise ValueError('native_workflow requires valid permission policy settings')
+            for kind in ('deny','ask'):
+                rules = permissions.get(kind,[])
+                validate(rules,STRINGS,'native_workflow.permissions.'+kind)
+                if rules:
+                    denied = settings.setdefault('permissions',{}).setdefault('deny',[])
+                    denied[:] = list(dict.fromkeys([*denied,*rules]))
+        options.setdefault('max_turns',WORKFLOW_DEFAULTS['max_turns'])
+        options.setdefault('max_budget_usd',WORKFLOW_DEFAULTS['max_budget_usd'])
+        options.update(tools=tools,allowed_tools=tools,permission_mode='dontAsk',
+            disallowed_tools=['Bash','Write','Edit','MultiEdit','NotebookEdit','Agent','Task','EnterWorktree','ExitWorktree'],
+            setting_sources=[],agents={},plugins=[],mcp_servers={},strict_mcp_config=True,
+            env={'CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS':str(profile.get('max_concurrent_agents',WORKFLOW_DEFAULTS['max_concurrent_agents']))},
+            settings=json.dumps(settings))
+        return options
     extension = options.pop('extension',None)
     if isinstance(options.get('mcp_servers'),str):
         data = json.loads((Path(cwd)/options['mcp_servers']).read_text(encoding='utf-8'))

@@ -7,6 +7,11 @@ class ChatLogRenderer {
   // 问答卡片渲染（_toolUseAskUserQuestion），区别只在于：这个工具的卡片在任务运行中、
   // 还没等到 tool_result 时会渲染成可提交的实时表单；SDK 原生提问也走相同表单。
   static INTERVENTION_TOOL_NAME = 'mcp__coderfleet__ask_user_question';
+  static COMMAND_STATES = {
+    queued:{label:'指令排队中',rank:0},started:{label:'指令执行中',rank:1},
+    completed:{label:'指令处理已结束',rank:2},cancelled:{label:'指令已取消',rank:2},
+    discarded:{label:'指令未执行',rank:2},refused:{label:'指令未被接受',rank:2},
+  };
 
   constructor(container, isRunning = false, foldProcess = false, projectName = null, taskId = null, taskTiming = {}) {
     this.container = container;   // #log-content div
@@ -61,6 +66,7 @@ class ChatLogRenderer {
     if (this.streamFrame != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.streamFrame);
     for (const child of Object.values(this.subagentRenderers || {})) child.renderer._resetSDKRendering();
     this.backgroundTasks = new Map();
+    this.nativeCommands = new Map();
     this.streamMessageId = ''; this.streamBlocks = new Map(); this.streamDirty = new Set(); this.streamFrame = null;
     this.lastSDKText = null; this.lastSDKMessageId = ''; this.lastSDKTextParts = [];
     this.sdkInputs = new Map();
@@ -587,6 +593,7 @@ class ChatLogRenderer {
       case 'assistant': return this._claudeAssistant(d.message);
       case 'user': return this._claudeUser(d.message);
       case 'result': return this._claudeResult(d);
+      case 'command_lifecycle': return this._nativeCommandLifecycle(d);
       case 'rate_limit_event': return this._claudeRateLimit(d);
       case 'tool_progress': return; // Routine elapsed-time/heartbeat telemetry; tool outcomes retain failures.
       // Codex
@@ -651,7 +658,34 @@ class ChatLogRenderer {
   }
 
   // ── Claude: system ────────────────────────────────────────
+  _nativeCommandLifecycle(event) {
+    if (typeof event.command_uuid !== 'string' || !event.command_uuid || event.command_uuid.length > 128 ||
+        typeof event.state !== 'string' || !event.state || event.state.length > 64) return;
+    const key = JSON.stringify([event.session_id || '',event.command_uuid]);
+    let command = this.nativeCommands.get(key);
+    if (!command) {
+      const node = document.createElement('div');
+      node.className = 'chat-sys-event timeline-node is-muted native-command-status';
+      node.dataset.commandUuid = event.command_uuid;
+      node.innerHTML = '<span class="chat-sys-pill"></span>';
+      command = {node,state:''};
+      this.nativeCommands.set(key,command);
+      this._appendNode(node);
+    }
+    const previous = ChatLogRenderer.COMMAND_STATES[command.state];
+    const next = ChatLogRenderer.COMMAND_STATES[event.state];
+    if (previous?.rank === 2 || (next && previous && next.rank < previous.rank)) return;
+    command.state = event.state;
+    command.node.dataset.commandState = event.state;
+    command.node.querySelector('.chat-sys-pill').textContent = next?.label || `指令状态：${event.state}`;
+    command.node.title = `${event.command_uuid} · 指令结束不代表回复成功，以回复结果为准`;
+    if (this.isRunning && !this._footerRendered && ['queued','started'].includes(event.state)) {
+      this._processStage(event.state === 'queued' ? '指令排队中' : '正在处理');
+    }
+  }
+
   _claudeSys(d) {
+    if (d.subtype === 'command_lifecycle') return this._nativeCommandLifecycle(d);
     if (d.subtype === 'coderfleet_backend') {
       this.executionBackend = d.execution_backend;
       return;
@@ -666,7 +700,17 @@ class ChatLogRenderer {
       if (d.outcome === 'error' || d.exit_code > 0) this._pill('Hook 执行失败',d.hook_name || '');
       return;
     }
-    if (d.subtype === 'task_progress') return;
+    if (d.subtype === 'task_progress') return this._backgroundTaskEvent(d);
+    if (d.subtype === 'coderfleet_workflow_profile') {
+      this._pill(d.preset === 'research' ? '只读资料研究' : '只读项目审计',
+        `最多 ${d.max_concurrent_agents} 个并发 · SDK 预算 $${d.max_budget_usd} · ${d.timeout_seconds}s`);
+      return;
+    }
+    if (d.subtype === 'coderfleet_workflow_tool_denied') {
+      this._pill('只读工作流已阻止操作',d.tool_name || '未授权工具');
+      this._processStage('已阻止超出只读范围的操作',true);
+      return;
+    }
     if (d.subtype === 'coderfleet_permission_pending') return this._permissionPending(d);
     if (d.subtype === 'coderfleet_permission_closed') return this._closePermission(d.tool_call_id,d.status);
     if (d.subtype === 'coderfleet_message_accepted') return this._sdkMessageAccepted(d);
@@ -694,12 +738,22 @@ class ChatLogRenderer {
   }
 
   _backgroundTaskEvent(event) {
+    if (typeof event.task_id !== 'string' || !event.task_id) return;
     const previous = this.backgroundTasks.get(event.task_id) || {};
+    const settled = ['completed','failed','stopped'].includes(previous.status);
+    if (settled && event.subtype === 'task_progress') return;
     const reported = event.subtype === 'task_updated' ? event.patch?.status || event.status : event.status;
-    const status = event.subtype === 'task_started' ? previous.status || 'running' : reported === 'killed' ? 'stopped' : reported;
+    const status = settled ? previous.status : ['task_started','task_progress'].includes(event.subtype) ? previous.status || 'running' : reported === 'killed' ? 'stopped' : reported || previous.status;
     if (!['running','completed','failed','stopped'].includes(status)) return;
-    if (event.subtype !== 'task_started' && status === 'running') return;
-    const task = {toolUseId:event.tool_use_id || previous.toolUseId,status,summary:event.summary || previous.summary || ''};
+    const usage = {...previous.usage};
+    for (const key of ['tool_uses','total_tokens','duration_ms']) {
+      const value = (event.usage || event.patch?.usage || {})[key];
+      if (Number.isFinite(value) && value >= 0) usage[key] = Math.max(usage[key] || 0,value);
+    }
+    const task = {toolUseId:event.tool_use_id || previous.toolUseId,status,usage,
+      taskType:event.task_type || previous.taskType,
+      description:event.description || event.patch?.description || previous.description || '',
+      summary:event.summary || previous.summary || ''};
     this.backgroundTasks.set(event.task_id,task);
     const entry = task.toolUseId && this.toolMap[task.toolUseId];
     if (entry) this._renderBackgroundTask(entry,event.task_id,task);
@@ -708,15 +762,23 @@ class ChatLogRenderer {
 
   _renderBackgroundTask(entry, taskId, task) {
     entry.backgroundTask = {id:taskId,...task};
-    const label = {running:'后台运行中',completed:'后台任务已完成',failed:'后台任务失败',stopped:'后台任务已停止'}[task.status];
+    const workflow = ['workflow','local_workflow'].includes(task.taskType) || entry.name === 'Workflow';
+    const label = workflow ? {running:'工作流运行中',completed:'工作流已完成',failed:'工作流失败',stopped:'工作流已停止'}[task.status] :
+      {running:'后台运行中',completed:'后台任务已完成',failed:'后台任务失败',stopped:'后台任务已停止'}[task.status];
     entry.statusEl.textContent = {running:'⏳',completed:'✓',failed:'✗',stopped:'■'}[task.status];
     entry.statusEl.title = `${label} · ${taskId}`;
     entry.badgeEl.className = `tool-badge ${task.status === 'running' ? 'pending' : task.status === 'failed' ? 'fail' : 'ok'}`;
     entry.wrap.dataset.backgroundTaskId = taskId;
+    if (workflow) entry.wrap.dataset.nativeTaskType = 'workflow';
     if (entry.exitEl) {
       entry.exitEl.style.display = '';
       entry.exitEl.className = `tool-exit ${task.status === 'failed' ? 'fail-exit' : 'ok-exit'}`;
-      entry.exitEl.textContent = `${label} · ${taskId}${task.summary ? '\n'+String(task.summary).slice(0,500) : ''}`;
+      const usage = task.usage || {};
+      const metrics = [usage.tool_uses != null ? `${usage.tool_uses} 次工具调用` : '',
+        usage.total_tokens != null ? `${usage.total_tokens} tokens` : '',
+        usage.duration_ms != null ? `${Math.floor(usage.duration_ms/1000)}s` : ''].filter(Boolean);
+      entry.exitEl.textContent = `${label} · ${taskId}${metrics.length ? '\n'+metrics.join(' · ') : ''}`+
+        ((task.summary || task.description) ? '\n'+String(task.summary || task.description).slice(0,500) : '');
     }
     if (task.status === 'failed' && entry.bodyEl) {
       this._processStage('后台任务失败',true);
@@ -1513,10 +1575,11 @@ class ChatLogRenderer {
     // 带 parent_tool_use_id 指回这里，用一个嵌套的 ChatLogRenderer 承接（见 _event）。
     // 面板默认隐藏，第一条子agent事件到达时才现身——不是每次 Task 调用都真的分叉出
     // 独立会话，没内容的话不该有一个空面板杵在那儿。
-    const isSubagentSpawn = name === 'Task' || name === 'Agent';
+    const isSubagentSpawn = name === 'Task' || name === 'Agent' || name === 'Workflow';
+    const threadLabel = name === 'Workflow' ? '工作流执行过程' : '子agent 会话';
     const subagentHtml = isSubagentSpawn ? `
     <div class="subagent-toggle-row" id="sar-${id}" style="display:none">
-      <button class="subagent-toggle-btn" id="sabtn-${id}">▸ 子agent 会话</button>
+      <button class="subagent-toggle-btn" id="sabtn-${id}">▸ ${threadLabel}</button>
     </div>
     <div class="subagent-thread collapsed" id="sathread-${id}"><div class="chat-log timeline"></div></div>` : '';
 
@@ -1564,14 +1627,14 @@ class ChatLogRenderer {
       subBtn.addEventListener('click', e => {
         e.stopPropagation();
         const collapsed = subThread.classList.toggle('collapsed');
-        subBtn.textContent = collapsed ? '▸ 子agent 会话' : '▾ 子agent 会话';
+        subBtn.textContent = (collapsed ? '▸ ' : '▾ ')+threadLabel;
       });
       const subRenderer = new ChatLogRenderer(subThread, this.isRunning, false, this.projectName, this.taskId);
       subRenderer.onNeedsAttention = ()=>{
         this._processStage('等待您的回答或授权',true);
         body.classList.remove('collapsed');
         subThread.classList.remove('collapsed');
-        btn.textContent = '收起'; subBtn.textContent = '▾ 子agent 会话';
+        btn.textContent = '收起'; subBtn.textContent = '▾ '+threadLabel;
       };
       subRenderer.onAttentionResolved = ()=>this._refreshWaitingStage();
       subRenderer.executionBackend = this.executionBackend;
@@ -1589,6 +1652,9 @@ class ChatLogRenderer {
       btnEl: btn,
       wrap, name, input,
     };
+    for (const [taskId,task] of this.backgroundTasks) {
+      if (task.toolUseId === id) this._renderBackgroundTask(this.toolMap[id],taskId,task);
+    }
   }
 
   // ── AskUserQuestion：问答卡片 ──────────────────────────────
@@ -2367,6 +2433,12 @@ class ChatLogRenderer {
     const el = document.createElement('div');
     el.className = 'chat-footer';
     this._finishSDKInputs(status);
+    for (const command of this.nativeCommands.values()) {
+      if (ChatLogRenderer.COMMAND_STATES[command.state]?.rank === 2) continue;
+      command.node.dataset.commandTaskOutcome = status;
+      command.node.querySelector('.chat-sys-pill').textContent =
+        ({killed:'任务已中断',failed:'任务失败',done:'任务已结束'}[status])+' · 指令终态未确认';
+    }
     this._processStage(status === 'done' ? '处理完成' : status === 'killed' ? '已中断，可继续对话' : '任务失败');
     el.classList.add('timeline-node', status === 'failed' ? 'is-error' : 'is-muted');
     el.innerHTML = `<span class="footer-pill ${status}">${esc(label)}</span>`;

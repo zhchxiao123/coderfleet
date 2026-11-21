@@ -1981,8 +1981,10 @@ async function sendChatMessage() {
 
   let executeAt = null;
   let sdkOptions;
+  let sdkOptionsAttempt;
   try {
-    sdkOptions = SDKTaskControls.readOptions();
+    sdkOptionsAttempt = SDKTaskControls.captureOptions();
+    sdkOptions = sdkOptionsAttempt.options;
     executeAt = getChatScheduleExecuteAt();
   } catch (e) {
     alert(e.message);
@@ -2030,6 +2032,7 @@ async function sendChatMessage() {
         throw new Error('后端未返回会话 ID');
       }
 
+      SDKTaskControls.taskSubmitted(sdkOptionsAttempt);
       forgetSentChatDraft(draftKey, draftText);
       activeConversationId = taskData.conversation_id;
       activeTabId = upsertConversationTab(activeConversationId);
@@ -2123,6 +2126,7 @@ async function sendChatMessage() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
 
+    SDKTaskControls.taskSubmitted(sdkOptionsAttempt);
     forgetSentChatDraft(draftKey, draftText);
     const snapshotPaths = pendingImages.map(i => i.container_path);
     textarea.value = '';
@@ -2276,7 +2280,7 @@ function _chatSDKEditor() {
   const conversationId = activeConversationId;
   const draftKey = chatDraftKey();
   return {
-    read: () => ({ text: input?.value || '', hasAttachments: pendingImages.length > 0, uploading: chatUploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked }),
+    read: () => ({ text: input?.value || '', hasAttachments: pendingImages.length > 0, uploading: chatUploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked, nativeWorkflow:SDKTaskControls.workflowSelected() }),
     clear: (text,images=[]) => {
       forgetSentChatDraft(draftKey, text);
       if (activeConversationId === conversationId && images.length) { pendingImages=pendingImages.filter(i=>!images.includes(i.container_path)); renderImagePreviews(); }
@@ -2305,7 +2309,8 @@ async function _performChatSDKAction(task, action) {
 function _syncChatSendButton(runningTaskId, isQueueFull) {
   const btn = document.getElementById('chat-send-btn');
   if (!btn) return;
-  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConversationId || chatNewSessionProject || 'new', _chatComposerTasks());
+  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConversationId || chatNewSessionProject || 'new', _chatComposerTasks(),
+    ()=>_syncChatSendButton(currentChatTaskId,_isChatQueueFull(activeConversationId)));
   const sdkHost = document.getElementById('sdk-task-controls');
   const sdkTask = _chatComposerTask(runningTaskId);
   if (sdkHost) SDKTaskControls.mount(sdkHost, sdkTask, _chatSDKEditor());

@@ -68,6 +68,8 @@
 .sdk-runtime-body { display:grid; gap:10px; width:min(520px,calc(100vw - 64px)); padding:12px; border:1px solid var(--border); border-radius:10px; background:var(--surface); }
 .sdk-runtime-fields { display:grid; gap:8px; }
 .sdk-runtime-fields label { display:grid; gap:4px; }
+.sdk-workflow-label { display:grid; gap:6px; }
+.sdk-workflow-label select { width:100%; min-height:44px; }
 .sdk-runtime-body input,.sdk-runtime-body select { color:var(--text); background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:6px; min-width:0; }
 .sdk-runtime-output { white-space:pre-wrap; overflow-wrap:anywhere; max-height:240px; overflow:auto; margin:0; }
 .sdk-permission-card { padding:14px; margin:10px 0; border:1px solid var(--border); border-radius:12px; background:var(--surface-2); }

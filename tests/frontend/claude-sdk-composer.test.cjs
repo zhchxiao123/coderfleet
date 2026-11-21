@@ -35,6 +35,27 @@ function desktop() {
   return {context,nodes,calls,loadConversations,selectConversation};
 }
 
+test('a one-task native workflow preset preserves edited drafts and clears only a confirmed submission',()=>{
+  const {context,nodes}=desktop();
+  const controls=vm.runInContext('SDKTaskControls',context);
+  const host=nodes.get('sdk-options');
+  controls.optionsPanel(host,'conv-one');
+  host._sdkWorkflowPreset.value='audit';
+  host._sdkWorkflowPreset.listeners.change[0]();
+  assert.deepEqual(JSON.parse(JSON.stringify(controls.readOptions())),{native_workflow:{preset:'audit'}});
+  const pending=controls.captureOptions();
+  host._sdkOptions.value=JSON.stringify({native_workflow:{preset:'research'},effort:'low'});
+  host._sdkOptions.listeners.input[0]();
+  controls.taskSubmitted(pending);
+  assert.equal(JSON.parse(host._sdkOptions.value).native_workflow.preset,'research');
+  controls.taskSubmitted(controls.captureOptions());
+  assert.deepEqual(JSON.parse(host._sdkOptions.value),{effort:'low'});
+  host._sdkWorkflowPreset.value='audit';host._sdkWorkflowPreset.listeners.change[0]();
+  host._sdkOptions.value=JSON.stringify({native_workflow:{preset:'audit'}});
+  controls.taskSubmitted(controls.captureOptions());
+  assert.equal(host._sdkOptions.value,'','An empty profile must restore inheritance, not reset the Conversation');
+});
+
 test('topbar conversation switches isolate drafts and discard attachments from the previous chat', async () => {
   const {context,nodes,selectConversation} = desktop();
   context.document.querySelectorAll = () => [];
@@ -193,6 +214,28 @@ function mobile() {
   vm.runInContext(scripts.find(script=>script.includes('let projects  = []')),context,{filename:'mobile.html'});
   vm.runInContext(`activeConv={id:'conv-one'};tasks=[{id:'task-one',conversation_id:'conv-one',status:'running',execution_backend:'sdk',sdk_control_ready:true}];`,context);
   return {context,nodes,calls};
+}
+
+for(const surface of ['desktop','mobile']) {
+  test(`${surface} creates a separate Task for a workflow preset and consumes it only on success`,async()=>{
+    for(const accepted of [true,false]) {
+      const {context,nodes,calls}=surface==='desktop'?desktop():mobile();
+      const ui=vm.runInContext('SDKTaskControls',context);
+      ui.mountOptions(nodes.get('sdk-options'),'conv-one',[]);
+      const preset=nodes.get('sdk-options')._sdkWorkflowPreset;
+      preset.value='audit';preset.listeners.change[0]();
+      const options=nodes.get('sdk-options')._sdkOptions;
+      nodes.get(surface==='desktop'?'chat-input':'ta').value='只读审计这份项目';
+      context._appendOptimisticUserMessage=()=>true;context.syncMessages=()=>{};
+      context.fetch=async(url,request)=>{calls.push({url,body:JSON.parse(request.body)});return{
+        ok:accepted,status:accepted?201:422,json:async()=>accepted?{id:'audit-task',status:'pending',conversation_id:'conv-one'}:{detail:'rejected'},
+      };};
+      await (surface==='desktop'?context.sendChatMessage():context.send());
+      assert.equal(calls[0].url,'/api/tasks','Choosing a preset must not become live input to an unrestricted Task');
+      assert.equal(calls[0].body.sdk_options.native_workflow.preset,'audit');
+      assert.equal(options.value,accepted?'':JSON.stringify({native_workflow:{preset:'audit'}},null,2));
+    }
+  });
 }
 
 for (const surface of ['desktop','mobile']) {

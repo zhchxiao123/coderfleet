@@ -19,6 +19,7 @@ const SDKTaskControls = {
   canInteract(task) { return task?.status === 'running' && task.execution_backend === 'sdk' && task.sdk_control_ready; },
   primaryAction(task, draft, { queued = false, scheduled = false } = {}) {
     if (draft.uploading) return 'uploading';
+    queued = queued || draft.nativeWorkflow;
     const nativeAttachments = draft.nativeAttachments && task?.sdk_capabilities?.includes('multimodal_input');
     const hasInput = !!draft.text.trim() || draft.hasAttachments;
     if (task && this.hasPendingDelivery(task.id) && (task.status !== 'running' || queued || scheduled || (draft.hasAttachments && !nativeAttachments))) return 'check';
@@ -201,8 +202,9 @@ const SDKTaskControls = {
     details.addEventListener('toggle',load);
     return details;
   },
-  mountOptions(host, scope, tasks = []) {
+  mountOptions(host, scope, tasks = [], onChange = null) {
     if (!host) return;
+    host._sdkOptionsChanged = onChange;
     if (host.dataset.scope !== scope) {
       if (this._openMenu === host._sdkMore) this._openMenu = null;
       host.dataset.scope = scope; host.replaceChildren();
@@ -279,12 +281,33 @@ const SDKTaskControls = {
     const details = document.createElement('details'); details.className = 'sdk-runtime-panel';
     const summary = document.createElement('summary'); summary.textContent = '下次任务的高级设置'; details.appendChild(summary);
     const body = document.createElement('div'); body.className = 'sdk-runtime-body'; details.appendChild(body);
-    const note = document.createElement('p'); note.textContent = '通常无需填写。仅在新建 SDK 任务时生效，不修改当前运行。留空沿用会话设置，{} 恢复默认；permission_mode 优先于全自动选项。'; body.appendChild(note);
+    const note = document.createElement('p'); note.textContent = '仅用于 Claude SDK 项目的新任务，普通问答通常无需填写。留空沿用会话设置，{} 恢复默认。只读预设仅影响这一次，默认 2 个并发、$2 SDK 预算和 10 分钟执行时限；成功提交后恢复普通问答。'; body.appendChild(note);
+    const label = document.createElement('label'); label.className = 'sdk-workflow-label'; label.textContent = '本次执行方式';
+    const preset = document.createElement('select'); preset.setAttribute('aria-label','本次执行方式');
+    for (const [value,text] of [['','普通项目问答'],['audit','只读项目审计'],['research','只读资料研究']]) {
+      const option = document.createElement('option'); option.value = value; option.textContent = text; preset.appendChild(option);
+    }
+    label.appendChild(preset); body.appendChild(label); host._sdkWorkflowPreset = preset;
     const input = document.createElement('textarea'); input.rows = 7; input.setAttribute('aria-label','SDK 参数 JSON');
+    input._sdkOptionsScope = scope; input._sdkWorkflowPreset = preset; input._sdkOptionsHost = host;
     try { input.value = localStorage.getItem('coderfleet-sdk-options:' + scope) || ''; } catch { input.value = ''; }
-    input.addEventListener('input',()=>{ try { localStorage.setItem('coderfleet-sdk-options:' + scope,input.value); } catch {} });
+    try { preset.value = JSON.parse(input.value || '{}').native_workflow?.preset || ''; } catch { preset.value = ''; }
+    input.addEventListener('input',()=>{
+      try { preset.value = JSON.parse(input.value || '{}').native_workflow?.preset || ''; } catch {}
+      this.saveOptions(input);
+    });
     body.appendChild(input); host._sdkOptions = input;
     const help = document.createElement('pre'); help.className = 'sdk-runtime-output'; body.appendChild(help);
+    preset.addEventListener('change',()=>{
+      try {
+        const value = JSON.parse(input.value || '{}');
+        if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('SDK 参数必须为 JSON 对象');
+        if (preset.value) value.native_workflow = {preset:preset.value}; else delete value.native_workflow;
+        input.value = Object.keys(value).length ? JSON.stringify(value,null,2) : '';
+        this.saveOptions(input);
+        help.textContent = preset.value ? '只读预设会独立校验现有高级参数；工具、权限、扩展或 settings 等冲突项需要先移除。' : '';
+      } catch (error) { help.textContent = error.message; }
+    });
     details.addEventListener('toggle',async()=>{
       if (!details.open || help.textContent) return;
       try {
@@ -304,6 +327,31 @@ const SDKTaskControls = {
     const value = JSON.parse(input.value);
     if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('SDK 参数必须为 JSON 对象');
     return value;
+  },
+  saveOptions(input) {
+    input._sdkOptionsRevision = (input._sdkOptionsRevision || 0)+1;
+    if (typeof input._sdkOptionsScope === 'string') {
+      try { localStorage.setItem('coderfleet-sdk-options:'+input._sdkOptionsScope,input.value); } catch {}
+    }
+    const host = input._sdkOptionsHost;
+    if (host?._sdkOptions === input) host._sdkOptionsChanged?.();
+  },
+  workflowSelected() {
+    const input = document.getElementById?.('sdk-options')?._sdkOptions;
+    if (input?._sdkWorkflowPreset?.value) return true;
+    try { return !!JSON.parse(input?.value || '{}').native_workflow; } catch { return false; }
+  },
+  captureOptions() {
+    const input = document.getElementById('sdk-options')?._sdkOptions;
+    return {options:this.readOptions(),input,text:input?.value,revision:input?._sdkOptionsRevision};
+  },
+  taskSubmitted(attempt) {
+    const input = attempt?.input;
+    if (!attempt?.options?.native_workflow || !input || input.value !== attempt.text || input._sdkOptionsRevision !== attempt.revision) return;
+    const {native_workflow,...rest} = attempt.options;
+    input.value = Object.keys(rest).length ? JSON.stringify(rest,null,2) : '';
+    if (input._sdkWorkflowPreset) input._sdkWorkflowPreset.value = '';
+    this.saveOptions(input);
   },
   runtimePanel(task) {
     const details = document.createElement('details');

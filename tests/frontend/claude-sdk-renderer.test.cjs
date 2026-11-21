@@ -98,6 +98,104 @@ test('legacy CLI results still render their completion footer', () => {
 const inputOne = '11111111-1111-4111-8111-111111111111';
 const inputTwo = '22222222-2222-4222-8222-222222222222';
 const inputThree = '33333333-3333-4333-8333-333333333333';
+test('native command lifecycle updates one status without raw errors or ending the Task', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  for (const [state,label] of [['queued','指令排队中'],['started','指令执行中'],['completed','指令处理已结束']]) {
+    result.push(JSON.stringify({type:'command_lifecycle',command_uuid:inputOne,state,
+      uuid:`frame-${state}`,session_id:'native-session'}));
+    const rows=container.log.children.filter(node=>node.classList.contains('native-command-status'));
+    assert.equal(rows.length,1);
+    assert.equal(rows[0].dataset.commandState,state);
+    assert.equal(rows[0].querySelector('.chat-sys-pill').textContent,label);
+    assert.equal(rows[0].classList.contains('is-error'),false);
+    assert.doesNotMatch(container.log.innerHTML,/command_lifecycle|frame-queued/);
+    assert.equal(container.log.children.filter(node=>node.classList.contains('chat-footer')).length,0);
+  }
+  result.push('finished: 2026-11-20 11:00:00 [done]');
+  assert.equal(container.log.children.filter(node=>node.classList.contains('chat-footer')).length,1);
+});
+
+test('replayed command events do not regress a terminal or another session command', () => {
+  const {result,container}=renderer();
+  const push=(state,session_id='first')=>result.push(JSON.stringify({
+    type:'command_lifecycle',command_uuid:inputOne,state,session_id,
+  }));
+  push('started'); push('queued');
+  let rows=container.log.children.filter(node=>node.classList.contains('native-command-status'));
+  assert.equal(rows[0].dataset.commandState,'started');
+  push('completed'); push('completed'); push('started'); push('queued');
+  push('queued','second');
+  rows=container.log.children.filter(node=>node.classList.contains('native-command-status'));
+  assert.equal(rows.length,2);
+  assert.deepEqual(rows.map(node=>node.dataset.commandState),['completed','queued']);
+});
+
+test('system command lifecycle is folded and cancellation never becomes a successful reply', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  result.foldProcess=true;
+  for (const state of ['queued','cancelled','completed']) {
+    result.push(JSON.stringify({type:'system',subtype:'command_lifecycle',command_uuid:inputOne,state}));
+  }
+  const rows=result.processBody?.children.filter(node=>node.classList.contains('native-command-status')) || [];
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].querySelector('.chat-sys-pill').textContent,'指令已取消');
+  assert.equal(result.processBody.classList.contains('collapsed'),true);
+  assert.equal(container.log.children.some(node=>node.classList.contains('chat-footer')),false);
+  assert.equal(container.log.children.some(node=>node.classList.contains('is-error')),false);
+});
+
+test('Task termination labels an unfinished native command as unconfirmed instead of still running',()=>{
+  for(const [status,label] of [['killed','任务已中断'],['failed','任务失败'],['done','任务已结束']]) {
+    const {result,container}=renderer();
+    result.push(JSON.stringify({type:'command_lifecycle',command_uuid:inputOne,state:'started'}));
+    result.push(`finished: 2026-11-20 11:00:00 [${status}]`);
+    const row=container.log.children.find(node=>node.classList.contains('native-command-status'));
+    assert.match(row.querySelector('.chat-sys-pill').textContent,new RegExp(label));
+    assert.match(row.querySelector('.chat-sys-pill').textContent,/指令终态未确认/);
+    assert.equal(row.dataset.commandState,'started','Task completion must not invent a native terminal state');
+  }
+});
+
+test('native workflow progress updates its owning card without adding timeline records',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'workflow',name:'Workflow',
+    input:{description:'交叉核验项目',script:"return await agent('Read fixture.md')"}}]}});
+  push({type:'system',subtype:'task_started',task_id:'workflow-run',task_type:'workflow',tool_use_id:'workflow'});
+  const count=container.log.children.length;
+  for(let i=1;i<=300;i++)push({type:'system',subtype:'task_progress',task_id:'workflow-run',
+    description:'交叉核验',usage:{tool_uses:i,total_tokens:i*10,duration_ms:i*1000}});
+  assert.equal(container.log.children.length,count);
+  const entry=result.toolMap.workflow;
+  assert.equal(entry.wrap.dataset.nativeTaskType,'workflow');
+  assert.match(entry.exitEl.textContent,/工作流运行中/);
+  assert.match(entry.exitEl.textContent,/300 次工具调用/);
+  assert.match(entry.exitEl.textContent,/3000 tokens/);
+  assert.match(entry.exitEl.textContent,/交叉核验/);
+  push({type:'system',subtype:'task_notification',task_id:'workflow-run',status:'completed',summary:'已核验'});
+  push({type:'system',subtype:'task_progress',task_id:'workflow-run',usage:{tool_uses:1}});
+  assert.equal(entry.statusEl.textContent,'✓');
+  assert.match(entry.exitEl.textContent,/工作流已完成/);
+  assert.match(entry.exitEl.textContent,/300 次工具调用/);
+});
+
+test('a late workflow owner binds the settled status and keeps delegated output inside details',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'system',subtype:'task_notification',task_id:'late-workflow',status:'completed',summary:'核验完成'});
+  push({type:'system',subtype:'task_started',task_id:'late-workflow',task_type:'workflow',tool_use_id:'late-owner'});
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'late-owner',name:'Workflow',
+    input:{description:'核验三个文件',script:"return await agent('Read fixture.md')"}}]}});
+  const entry=result.toolMap['late-owner'];
+  assert.equal(entry.statusEl.textContent,'✓');
+  assert.match(entry.wrap.innerHTML,/title="核验三个文件"/);
+  const count=container.log.children.length;
+  push({type:'assistant',parent_tool_use_id:'late-owner',message:{content:[{type:'text',text:'内部审计结果'}]}});
+  assert.equal(container.log.children.length,count,'Delegated text stays under its workflow, not in the root conversation');
+});
+
 function acceptInput(result, identity, request = identity) {
   result.push(JSON.stringify({type:'system',subtype:'coderfleet_message_accepted',
     task_id:'task-one',request_id:request,user_message_uuid:identity,text:'同时覆盖 iOS 和 macOS'}));

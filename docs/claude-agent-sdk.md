@@ -108,6 +108,44 @@ interrupt 使用 SDK 原生控制请求，保留 session ID；完成后 Task 的
 
 控制通道是项目 `.coderfleet-tasks/<task-id>.control` 中的原子命令与持久回执，不新增端口。每次 worker 有单独能力令牌，令牌不进入 Task HTTP 响应或业务日志。关闭后拒绝新输入；结果未确认时不重放。旧 worker 没有该能力时明确拒绝，只有新 Task 使用新协议。
 
+## 原生只读工作流
+
+普通项目问答仍为默认。需要多路审计或交叉研究时，在原项目聊天的“更多 → 下次任务的高级设置 → 本次执行方式”选择“只读项目审计”或“只读资料研究”，再输入具体问题。它仍是当前 Conversation 中的一个 Task，无需创建看板或 CoderFleet Workflow DAG。已有任务在运行时，这次请求会进入后续 Task，不能当成给普通任务的插话。
+
+预设只作用于本次任务。服务端保留原 Conversation 的高级设置，客户端只在提交成功后清除这次预设；失败、切换页面或提交期间的新编辑不会被误清空。未选择预设时，原有问答、开发、原生提问、插话和中断保持原行为。
+
+CLI 使用相同的参数 JSON，保存为 `audit.json`：
+
+```json
+{
+  "native_workflow": {
+    "preset": "audit",
+    "max_concurrent_agents": 2,
+    "timeout_seconds": 600
+  },
+  "max_turns": 24,
+  "max_budget_usd": 2
+}
+```
+
+```bash
+coderfleet task run '审计 src 下的鉴权路径，交叉核验发现并给出文件证据' \
+  --project <project-name> --conversation <conversation-id> --sdk-options audit.json
+coderfleet task status <task-id>
+coderfleet task logs <task-id> -f
+coderfleet task interrupt <task-id> --request-id stop-audit-1
+```
+
+`preset` 也可用 `research`，增加 WebSearch / WebFetch。默认最多 2 个原生并发 Agent、24 个 SDK 主轮次、$2 SDK 预算、600 秒执行时限；配置上限分别为 4、40、$10、1800 秒。Agent 总数“小于五个”属于给原生编排的规模指导，不是平台对总数的硬限制。执行时限由 worker 观察并清理运行，初始化和收尾另有运行时等待；SDK 费用口径不等同于实际账单。
+
+审计预设提供 Read / Glob / Grep / Workflow；研究预设增加网络检索工具。独立工具集、原生 PreToolUse 拦截和不可放宽的运行设置共同限制写入；运行时注入的 StructuredOutput 只返回数据，仍允许使用。不会加载项目扩展、插件、自定义 Agent、MCP 或执行 Hook。账号与项目的 `disableWorkflows` 和权限拒绝规则继续保留；原本需要授权的操作在该只读预设内拒绝，不自动批准。常规项目任务的配置不受这些限制影响。
+
+本批预设限定普通已配置项目；平台助手、真正的临时工作区和文件恢复任务明确拒绝。可以切换模型、查看上下文和停止原生后台任务；不能在运行中把此预设变成可写模式。超时、运行时不提供 Workflow，或只有工具尝试而没有真实原生运行完成事件时，任务明确失败，不把普通回答当作工作流验收成功。
+
+执行详情中可展开 Workflow 的编排源码、工具结果、原生后台 ID、工具调用数、token 和耗时。频繁进度更新同一张卡片，子过程收在所属工作流下面；中间模型 result 不结束 CoderFleet Task。此预设的原生中断会请求停止所属 Workflow，再中断主轮次并清理退出，不等待额外后台唤起的模型轮次；原生会话和编排的持久状态保留供之后明确续聊。原生 `command_lifecycle` 的 `queued / started / completed` 按 `command_uuid` 合并为一条中文状态，重复、迟到和历史重载不产生三张红色 JSON 卡；“指令处理已结束”不代替回复成功或 Task 完成。Task 结束但缺少原生命令终态时显示“指令终态未确认”，不会继续显示执行中，也不会编造取消或成功。
+
+官方原生编排的入口与运行边界见 [Workflow 指南](https://code.claude.com/docs/en/workflows) 和 [SDK cookbook](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows)。本阶段验收与后续范围见 [第二阶段记录](research/coderfleet-sdk-workflow-stage2-20261120.md)。
+
 ## 验收记录要求
 
 对每个实际交付的 SDK/CLI/平台/运行路径组合分别记录证据：
