@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self';">
+  <title>CoderFleet</title>
+  <link rel="stylesheet" href="theme.css">
+  <script src="client.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">C</span> CoderFleet</div>
+    <label class="backend-picker">
+      <span>运行后端</span>
+      <select id="backend" aria-label="运行后端"></select>
+    </label>
+    <button id="manage" type="button">管理后端</button>
+  </header>
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-heading"><h2>项目与会话</h2><span id="connection" class="connection" role="status">未连接</span></div>
+      <select id="project" aria-label="项目" disabled></select>
+      <button id="create" type="button" disabled>＋ 新会话</button>
+      <div id="conversations" class="conversations" aria-label="会话"></div>
+    </aside>
+    <section class="conversation" aria-label="会话详情">
+      <header class="conversation-head">
+        <h1 id="title">项目聊天</h1>
+        <p id="subtitle">选择一个 Node.js 后端，开始 Antigravity 会话。</p>
+      </header>
+      <div id="transcript" class="transcript"></div>
+      <form id="compose" class="compose">
+        <label for="prompt" class="sr">输入消息</label>
+        <textarea id="prompt" placeholder="输入消息" required maxlength="60000" rows="2" disabled></textarea>
+        <div class="compose-actions">
+          <select id="model" aria-label="模型" disabled><option value="">当前模型</option></select>
+          <button type="button" id="cancel" hidden>中断</button>
+          <button class="primary" id="send" disabled>发送</button>
+        </div>
+        <div id="error" class="error" role="alert"></div>
+      </form>
+    </section>
+  </main>
+  <dialog id="settings">
+    <div class="dialog-heading"><h2>后端连接</h2><button id="dismiss" type="button">关闭</button></div>
+    <p>本机后端可由 App 启动。远端后端请使用 HTTPS 地址，或通过 SSH 隧道连接。</p>
+    <section class="connection-actions">
+      <button id="local" type="button">打开本机配置</button>
+      <button id="remove" type="button">移除选中的连接</button>
+    </section>
+    <form id="remote">
+      <label>名称<input name="name" required maxlength="100" placeholder="例如 Linux 工作机"></label>
+      <label>服务地址<input name="url" type="url" required placeholder="https://coderfleet.example.com"></label>
+      <label>服务令牌<input name="token" type="password" required minlength="24" autocomplete="off"></label>
+      <button class="primary">保存并连接</button>
+    </form>
+    <div id="settings-error" class="error" role="alert"></div>
+  </dialog>
+</body>
+</html>

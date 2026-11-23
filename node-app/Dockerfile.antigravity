@@ -1,0 +1,23 @@
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git bash procps && rm -rf /var/lib/apt/lists/*
+RUN groupadd --gid 1001 byclaw && useradd --uid 1001 --gid 1001 --create-home --shell /bin/bash byclaw && install -d -o byclaw -g byclaw /workspace
+
+# Google Antigravity CLI. URLs and digests come from the official per-arch updater manifest.
+RUN set -eu; \
+    release="https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.15-5514532022517760"; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) asset=linux-x64/cli_linux_x64.tar.gz; sha=af3f0be58b8475940d79f9abea19e762ecc3d265ea9f56cff8dd805e27ba299b44a305a79504a7ffe6ebdfa29a294c56edc4caed1875990bfaf2fef1508ec8b0 ;; \
+      arm64) asset=linux-arm/cli_linux_arm64.tar.gz; sha=d64ad759781b50dfacfa7d9826c0ad469959d01bdf5a170acd4c83472eba31c677baf0052ac8ab48eef40f0d3f0e26057e752aabd24331c79f4c881d4b872125 ;; \
+      *) echo "Unsupported Antigravity architecture" >&2; exit 1 ;; \
+    esac; \
+    stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT; \
+    curl --fail --silent --show-error --location --retry 3 "$release/$asset" -o "$stage/agy.tar.gz"; \
+    printf '%s  %s\n' "$sha" "$stage/agy.tar.gz" | sha512sum --check --status; \
+    tar -xzf "$stage/agy.tar.gz" -C "$stage" antigravity; \
+    install -m 0755 "$stage/antigravity" /usr/local/bin/agy; \
+    test "$(agy --version)" = "1.5.15"
+
+ENV HOME=/home/byclaw
+USER byclaw
+WORKDIR /workspace
+ENTRYPOINT ["agy"]
