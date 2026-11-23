@@ -180,16 +180,14 @@ async function createWindow(): Promise<void> {
   await mainWindow.loadFile(uiPath);
 }
 
-if (!app.requestSingleInstanceLock()) app.quit();
-else {
+async function startDesktop(): Promise<void> {
   await app.whenReady();
   try {
     profiles = JSON.parse(readFileSync(join(app.getPath('userData'), 'backends.json'), 'utf8'));
     if (!Array.isArray(profiles)) throw new Error('Invalid saved backends');
   } catch (error) {
     if (record(error).code !== 'ENOENT') {
-      dialog.showErrorBox('Could not read backends', message(error));
-      app.quit();
+      throw new Error('Could not read saved backends', { cause: error });
     }
   }
   register();
@@ -198,3 +196,9 @@ else {
   app.on('second-instance', () => { mainWindow?.focus(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }
+
+if (!app.requestSingleInstanceLock()) app.quit();
+else void startDesktop().catch(error => {
+  dialog.showErrorBox('CoderFleet could not start', message(error));
+  app.quit();
+});
