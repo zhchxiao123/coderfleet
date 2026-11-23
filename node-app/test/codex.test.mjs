@@ -1,31 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { environment, lastTurn, until } from './helpers.mjs';
-
-// Fake Codex CLI emitting `codex exec --json` events.
-const fakeCodex = `#!/usr/bin/env node
-const args = process.argv.slice(2);
-const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
-let prompt = '';
-process.stdin.on('data', chunk => { prompt += chunk; });
-process.stdin.on('end', async () => {
-  prompt = prompt.trim();
-  const resume = args[1] === 'resume' ? args[2] : '';
-  send({ type: 'thread.started', thread_id: resume || 'thread-1' });
-  send({ type: 'turn.started' });
-  if (prompt === 'slow') {
-    send({ type: 'item.completed', item: { id: 'm0', type: 'agent_message', text: 'working' } });
-    process.on('SIGINT', () => process.exit(130));
-    setInterval(() => undefined, 1000);
-    return;
-  }
-  if (prompt === 'fail') { send({ type: 'turn.failed', error: { message: 'quota exceeded' } }); process.exit(1); }
-  send({ type: 'item.started', item: { id: 'c1', type: 'command_execution', command: 'ls', status: 'in_progress' } });
-  send({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'ls', aggregated_output: 'a.txt', exit_code: 0, status: 'completed' } });
-  send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'echo:' + prompt + ':' + args.join(' ') } });
-  send({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
-});
-`;
+import { fakeCodex } from './fakes.mjs';
 
 test('Codex turns run with codex exec in the container', { timeout: 120_000 }, async () => {
   const env = await environment({

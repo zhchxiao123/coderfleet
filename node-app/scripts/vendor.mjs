@@ -12,3 +12,10 @@ mkdirSync(target, { recursive: true });
 for (const name of readdirSync(source)) {
   if (name === 'sdk.mjs' || /^core-[\w]+\.mjs$/.test(name) || name === 'package.json' || name === 'LICENSE.md') cpSync(join(source, name), join(target, name));
 }
+
+// xterm.js for the in-App terminal (loaded by the renderer as a classic script).
+const ui = join(root, 'ui', 'vendor');
+rmSync(ui, { recursive: true, force: true });
+mkdirSync(ui, { recursive: true });
+cpSync(join(root, 'node_modules', '@xterm', 'xterm', 'lib', 'xterm.js'), join(ui, 'xterm.js'));
+cpSync(join(root, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), join(ui, 'xterm.css'));

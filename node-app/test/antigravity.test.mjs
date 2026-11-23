@@ -7,41 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { ControlMailbox } from '../dist/control.js';
 import { environment, lastTurn, until } from './helpers.mjs';
-
-// Fake Antigravity CLI speaking ACP over stdio.
-const fakeAgy = `#!/usr/bin/env node
-import { createInterface } from 'node:readline';
-const [command] = process.argv.slice(2);
-if (command === '--version') { console.log('1.5.15'); process.exit(0); }
-if (command === 'models') { console.log('flash\\tGemini Flash'); process.exit(0); }
-if (command !== 'acp') process.exit(2);
-const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
-let sessionId = ''; let model = 'base'; let promptId; let resumed = '';
-const chunk = text => send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
-const options = { configOptions: [{ type: 'select', category: 'mode', id: 'mode', currentValue: 'auto' }, { type: 'select', category: 'model', id: 'model', currentValue: 'base' }] };
-for await (const line of createInterface({ input: process.stdin })) {
-  const { id, method, params, result } = JSON.parse(line);
-  if (method === 'initialize') send({ id, result: { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} } } } });
-  else if (method === 'session/new') { sessionId = 'native-1'; send({ id, result: { sessionId, ...options } }); }
-  else if (method === 'session/resume') { sessionId = resumed = params.sessionId; send({ id, result: options }); }
-  else if (method === 'session/set_config_option') { if (params.configId === 'model') model = params.value; send({ id, result: {} }); }
-  else if (method === 'session/prompt') {
-    promptId = id;
-    const text = params.prompt[0].text;
-    if (text === 'approve') {
-      send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Write file', status: 'pending' } } });
-      send({ id: 'ask', method: 'session/request_permission', params: { sessionId, toolCall: { toolCallId: 't1', title: 'Write file', rawInput: { path: 'a.txt' } }, options: [{ kind: 'allow_once', optionId: 'yes' }, { kind: 'reject_once', optionId: 'no' }] } });
-    } else if (text === 'slow') chunk('working');
-    else { chunk('echo:' + text + ':' + model + (resumed ? ':resumed=' + resumed : '')); send({ id, result: { stopReason: 'end_turn' } }); }
-  } else if (id === 'ask') {
-    const allowed = result.outcome.optionId === 'yes';
-    send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: allowed ? 'completed' : 'failed' } } });
-    chunk(allowed ? 'written' : 'refused');
-    send({ id: promptId, result: { stopReason: 'end_turn' } });
-  } else if (method === 'session/cancel') send({ id: promptId, result: { stopReason: 'cancelled' } });
-  else if (method === 'session/close') send({ id, result: {} });
-}
-`;
+import { fakeAgy } from './fakes.mjs';
 
 const agyEnvironment = options => environment({
   accounts: 'NAME=google-a TYPE=antigravity\nNAME=codex-a TYPE=codex\nNAME=kimi-a TYPE=kimi\n',

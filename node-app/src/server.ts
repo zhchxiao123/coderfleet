@@ -195,7 +195,7 @@ export async function serve(configPath: string): Promise<Server> {
     ['GET', /^conversations$/, async () => store.conversations().sort((left, right) => right.createdAt.localeCompare(left.createdAt)).map(item => {
       const turns = turnsOf(item.id);
       const last = turns.at(-1);
-      return { ...item, updatedAt: last?.createdAt ?? item.createdAt, status: last?.status ?? '', turns: turns.length };
+      return { ...item, updatedAt: last?.createdAt ?? item.createdAt, status: last?.status ?? '', turns: turns.length, attention: Boolean(last?.permission) };
     })],
     ['POST', /^conversations$/, async request => {
       const input = await body(request);
