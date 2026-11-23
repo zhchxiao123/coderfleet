@@ -254,3 +254,68 @@
     }
   };
 })();
+
+(() => {
+  const CF = window.CF;
+  const { h } = CF;
+
+  /** Shows a backend job's log until it finishes; resolves to its result or undefined. */
+  CF.followJob = (jobId, title, subtitle) => new Promise(resolve => {
+    const log = h('pre.log', '…');
+    const status = h('div', { style: 'display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600' }, h('span.spinner'), '进行中');
+    let closed = false;
+    let outcome;
+    const sheet = CF.sheet({ title, subtitle, wide: true, onClose: () => { closed = true; resolve(outcome); } }, () => [status, log]);
+    const done = h('button.btn', { on: { click: () => sheet.close() } }, '关闭');
+    sheet.foot(done);
+    const poll = async () => {
+      if (closed) return;
+      let job;
+      try { job = await CF.transport.job(jobId); } catch (error) { sheet.error(error); return; }
+      const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+      log.textContent = job.log || '…';
+      if (atBottom) log.scrollTop = log.scrollHeight;
+      if (job.status === 'running') { setTimeout(poll, 500); return; }
+      status.replaceChildren(h('span.dot' + (job.status === 'failed' ? '.failed' : '.running')), job.status === 'failed' ? '失败' : '完成');
+      if (job.status === 'failed') { sheet.error(job.error); return; }
+      outcome = job.result;
+      done.className = 'btn primary';
+      done.textContent = '开始使用';
+    };
+    void poll();
+  });
+
+  /** Form for adding (or reinstalling) a remote Docker host over SSH. */
+  CF.addSshBackend = () => new Promise(resolve => {
+    const name = h('input', { placeholder: '例如 构建服务器', maxLength: 100 });
+    const host = h('input', { placeholder: 'user@192.168.1.20 或 ~/.ssh/config 里的别名', spellcheck: false });
+    const port = h('input', { placeholder: '22', inputMode: 'numeric', style: 'width:90px' });
+    const identity = h('input', { placeholder: '默认使用 ~/.ssh 里的密钥和 ssh-agent', spellcheck: false });
+    const pick = CF.transport.pickFile ? h('button.btn', { type: 'button', on: { click: async () => {
+      const chosen = await CF.transport.pickFile();
+      if (chosen) identity.value = chosen;
+    } } }, '选择…') : null;
+    let started = false;
+    const sheet = CF.sheet({
+      title: '通过 SSH 添加远程机器',
+      subtitle: 'App 会把后端装到这台 Linux 机器上并作为服务运行，再通过 SSH 隧道连接，不需要对外开放端口。',
+      onClose: () => { if (!started) resolve(undefined); },
+    }, () => [
+      h('label.field', h('span', '名称'), name),
+      h('div.field', h('span', 'SSH 主机', h('span.hint', ' 需要已配置密钥登录')), h('div.input-row', host, port)),
+      h('div.field', h('span', '密钥文件', h('span.hint', ' 可选')), h('div.input-row', identity, pick)),
+      h('p', { style: 'margin:4px 0 0;color:var(--text-3);font-size:12.5px' }, '要求：Linux x86_64 或 arm64，已安装 Docker，且登录用户可以使用 Docker。'),
+    ]);
+    const submit = h('button.btn.primary', { on: { click: () => CF.busy(submit, async () => {
+      sheet.error('');
+      try {
+        const jobId = await CF.transport.addSsh({ name: name.value, host: host.value, port: port.value, identityFile: identity.value });
+        started = true;
+        sheet.close();
+        resolve(await CF.followJob(jobId, '安装远程后端', host.value.trim()));
+      } catch (error) { sheet.error(error); }
+    }) } }, '连接并安装');
+    sheet.foot(h('button.btn', { on: { click: () => sheet.close() } }, '取消'), submit);
+    host.focus();
+  });
+})();

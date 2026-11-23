@@ -49,10 +49,22 @@ const backendPort = JSON.parse(await readFile(join(env.root, 'config.json'), 'ut
 const transport = `
 window.coderFleet = {
   platform: 'darwin',
-  list: async () => [{ id: 'local', name: '本机', kind: 'local', url: 'http://127.0.0.1:${backendPort}' }],
+  list: async () => [
+    { id: 'local', name: '本机', kind: 'local', url: 'http://127.0.0.1:${backendPort}' },
+    { id: 'build', name: '构建服务器', kind: 'ssh', url: 'ssh://dev@10.0.8.21', host: 'dev@10.0.8.21', version: '0.0.9' },
+  ],
   connect: async () => ({}),
   setupLocal: async () => 'local', addRemote: async () => 'local', remove: async () => [],
-  pickDirectory: null,
+  pickDirectory: null, pickFile: null,
+  bundle: async () => ({ version: '0.1.0' }),
+  addSsh: async () => { window.__jobStart = Date.now(); return 'job'; },
+  reinstallSsh: async () => { window.__jobStart = Date.now(); return 'job'; },
+  job: async () => {
+    const lines = ['连接 dev@10.0.8.21…', '系统：Linux x86_64，Docker 27.3.1', '上传后端安装包…', '安装 CoderFleet 后端 0.1.0 到 /home/dev/.coderfleet-backend',
+      'Docker 27.3.1', '配置：/home/dev/.coderfleet-backend/config.json', '服务已启动（systemd-user）', '后端 0.1.0 已运行（systemd-user），远端端口 8877', '建立 SSH 隧道…', '完成。'];
+    const shown = Math.min(lines.length, Math.floor((Date.now() - window.__jobStart) / 350) + 1);
+    return { status: shown === lines.length ? 'succeeded' : 'running', log: lines.slice(0, shown).join('\\n') + '\\n', result: { id: 'build' } };
+  },
   request: async (_id, method, path, body) => {
     const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
     const data = await response.json();

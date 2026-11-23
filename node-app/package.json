@@ -9,11 +9,12 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/vendor.mjs",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node scripts/vendor.mjs",
     "test": "npm run build && node --test test/*.test.mjs",
     "backend": "node dist/cli.js",
     "desktop": "electron .",
-    "package": "npm run build && electron-packager . CoderFleet --no-asar --out out --ignore='^/(src|test|out|scripts|tsconfig.json|node_modules)'"
+    "package": "npm run package:backend && electron-packager . CoderFleet --no-asar --out out --ignore='^/(src|test|out|scripts|backend|\\.cache|tsconfig.json|node_modules)'",
+    "package:backend": "npm run build && node scripts/package-backend.mjs --arch x64 && node scripts/package-backend.mjs --arch arm64"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.330",

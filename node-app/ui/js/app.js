@@ -123,7 +123,11 @@
       h('h1', '欢迎使用 CoderFleet'),
       h('p', '把多个 AI 编程账号放进各自的容器里，一起用它们的额度。'),
       h('div.welcome-actions', local,
-        h('button.btn', { on: { click: () => { remote.hidden = !remote.hidden; } } }, '连接远端后端…')),
+        h('button.btn', { on: { click: async () => {
+          const result = await CF.addSshBackend();
+          if (result?.id) await CF.app.loadProfiles(result.id);
+        } } }, CF.icon('terminal', 15), '通过 SSH 连接远程机器'),
+        h('button.btn.ghost.small', { on: { click: () => { remote.hidden = !remote.hidden; } } }, '使用服务地址和令牌')),
       remote)));
   }
 
@@ -189,7 +193,7 @@
       '-',
       { label: '管理连接…', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
     ]) } }, h('span.backend-avatar', (current?.name || '?').slice(0, 1)),
-      h('span.names', h('strong', current?.name || '未连接'), h('small', connected ? (current?.kind === 'local' ? '这台电脑' : '远端') + ' · ' + running + ' 个容器运行中' : '未连接')),
+      h('span.names', h('strong', current?.name || '未连接'), h('small', connected ? (current?.kind === 'local' ? '这台电脑' : current?.kind === 'ssh' ? '远程 · ' + current.host : '远端') + ' · ' + running + ' 个容器运行中' : '未连接')),
       CF.icon('down', 13));
     renderConversations();
     // Re-rendering must not interrupt typing in the search field.

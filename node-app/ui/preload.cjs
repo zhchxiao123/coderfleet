@@ -10,5 +10,10 @@ contextBridge.exposeInMainWorld('coderFleet', {
   request: (id, method, path, body) => ipcRenderer.invoke('backends:request', { id, method, path, body }),
   setupLocal: () => ipcRenderer.invoke('backends:setupLocal'),
   pickDirectory: () => ipcRenderer.invoke('dialog:directory'),
+  pickFile: () => ipcRenderer.invoke('dialog:file'),
+  addSsh: input => ipcRenderer.invoke('remote:addSsh', input),
+  reinstallSsh: id => ipcRenderer.invoke('remote:reinstall', id),
+  job: id => ipcRenderer.invoke('jobs:get', id),
+  bundle: () => ipcRenderer.invoke('remote:bundle'),
   platform: process.platform,
 });

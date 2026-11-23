@@ -33,15 +33,23 @@ node scripts/preview.mjs 5173
 CHROMIUM_PATH=/path/to/chrome node scripts/screenshots.mjs /tmp/shots light
 ~~~
 
-## Remote backend
+## Remote Docker hosts (SSH)
 
-On the Docker host, run `node dist/cli.js serve /path/config.json` with a configuration like this one:
+In **设置 → 后端连接 → 通过 SSH 添加** (or on the welcome page), enter `user@host` or an alias from `~/.ssh/config`. The App uses the system `ssh` with your keys. It does not store passwords; set up key login first (`ssh-copy-id`). Then the App:
 
-~~~json
-{ "port": 8877, "token": "a random token of 24+ characters", "workspace": "~/.coderfleet", "stateDirectory": "./node-state" }
-~~~
+1. probes the machine: Linux x86_64 or arm64, and Docker usable by the login user;
+2. uploads the bundled backend (`bundles/coderfleet-backend-<version>-linux-<arch>.tar.gz`). The bundle includes its own Node.js runtime, so the host needs only Docker;
+3. runs `install.sh`. It installs to `~/.coderfleet-backend/versions/<version>`, keeping the previous version. On first install it creates `config.json` with a random token (workspace `~/.coderfleet`, port 8877, loopback only). Then it starts the service with the first option that works:
+   - systemd system service when logging in as root;
+   - systemd user service, with linger enabled;
+   - a background process. This mode does not survive a reboot.
+4. stores the token in the system keychain and forwards a local port to the service through `ssh -N -L`. The tunnel reconnects automatically. No port is opened on the remote host.
 
-The backend listens on loopback. Forward it with `ssh -N -L 127.0.0.1:8878:127.0.0.1:8877 user@host`, or put it behind HTTPS. Then add it in **设置 → 后端连接**.
+When the App ships a newer backend, the connection shows **升级到 …**. Upgrading reinstalls over SSH and keeps the token, workspace and conversations. Turns running in containers continue while the service restarts.
+
+Build the bundles with `npm run package:backend`. It downloads the official Node.js builds, verifies them against `SHASUMS256.txt` and caches them in `.cache/node`. `npm run package` includes the bundles in the App.
+
+A backend you deploy yourself behind HTTPS can still be added with its address and token: run `coderfleet-backend init`, then `coderfleet-backend serve`.
 
 ## Status
 

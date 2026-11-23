@@ -58,6 +58,14 @@ try {
   await page.click('.nav-item:has-text("设置")');
   await page.waitForSelector('text=代理与容器');
   await shot('settings');
+  await page.click('button:has-text("通过 SSH 添加")');
+  await page.fill('dialog input >> nth=0', '构建服务器');
+  await page.fill('dialog input >> nth=1', 'dev@10.0.8.21');
+  await shot('ssh-add');
+  await page.click('button:has-text("连接并安装")');
+  await page.waitForSelector('button:has-text("开始使用")', { timeout: 15000 });
+  await shot('ssh-installed');
+  await page.click('button:has-text("开始使用")');
   await page.click('.nav-item:has-text("项目")');
   await page.click('button[title="终端"] >> nth=0');
   await page.waitForSelector('.xterm-rows');

@@ -13,6 +13,7 @@ import { Lifecycle } from './lifecycle.js';
 import { active, identifier, message, readConfig, record, Store, text, type Turn } from './state.js';
 import { chatSupported, TaskRunner } from './tasks.js';
 import { Terminals } from './terminal.js';
+import { VERSION } from './version.js';
 
 class HttpError extends Error {
   public constructor(public readonly status: number, message: string) { super(message); }
@@ -73,7 +74,7 @@ export async function serve(configPath: string): Promise<Server> {
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 
   const routes: [string, RegExp, Handler][] = [
-    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1 })],
+    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION })],
 
     // Workspace, image and settings
     ['GET', /^overview$/, async () => {
