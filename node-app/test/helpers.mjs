@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -111,13 +112,23 @@ export async function environment({ accounts = '', projects = (project) => '', b
   let server = await serve(config);
   const stop = () => new Promise(done => { server.close(done); server.closeAllConnections(); });
   const base = 'http://127.0.0.1:' + servicePort + '/v1/';
-  const call = async (method, path, value) => {
-    const response = await fetch(base + path, {
-      method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: value === undefined ? undefined : JSON.stringify(value),
+  // No keep-alive: a restarted service must not see requests on a socket the old one closed.
+  const call = (method, path, value) => new Promise((resolve, reject) => {
+    const body = value === undefined ? undefined : JSON.stringify(value);
+    const request = httpRequest(base + path, {
+      method, agent: false,
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}) },
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        try { resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); }
+        catch (error) { reject(error); }
+      });
     });
-    return { status: response.status, body: await response.json() };
-  };
+    request.once('error', reject);
+    request.end(body);
+  });
   return {
     root, workspace, project, bin,
     get: path => call('GET', path),

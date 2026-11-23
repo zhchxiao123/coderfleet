@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { type WorkspaceProject } from './conf.js';
 import { ControlMailbox, type CommandKind } from './control.js';
 import { containerPath, execDetached, quote, signalGroup, workerAlive } from './docker.js';
-import { entries, message, record, text, type RecordValue, type Store, type Turn } from './state.js';
+import { entries, message, record, text, type RecordValue, type Store, type ToolStatus, type Turn } from './state.js';
 
 export const PERMISSION_TIMEOUT_SECONDS = 600;
 const START_GRACE = 60_000;
@@ -71,6 +71,29 @@ function writeShared(path: string, bytes: Buffer | string): void {
 
 export function hostTaskDirectory(project: WorkspaceProject): string { return join(project.path, TASKS); }
 
+const DETAIL_KEYS = ['command', 'cmd', 'file_path', 'filePath', 'path', 'notebook_path', 'pattern', 'query', 'url', 'description', 'prompt', 'skill'];
+
+/** One short line describing a tool call's input, for the conversation view. */
+export function toolDetail(input: unknown): string {
+  const value = record(input);
+  for (const key of DETAIL_KEYS) {
+    const raw = value[key];
+    const line = Array.isArray(raw) ? raw.map(text).join(' ') : text(raw);
+    if (line.trim()) return line.replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+  const changes = entries(value.changes).map(change => text(change.path)).filter(Boolean);
+  if (changes.length) return changes.join(', ').slice(0, 160);
+  return '';
+}
+
+function setTool(turn: Turn, id: string, status: ToolStatus): boolean {
+  const index = turn.tools.findIndex(tool => tool.id === id);
+  const current = turn.tools[index];
+  if (!current || current.status === status) return false;
+  turn.tools[index] = { ...current, status };
+  return true;
+}
+
 /** Applies one worker event to the turn record. Returns true when the record changed. */
 export function applyEvent(turn: Turn, event: RecordValue): boolean {
   const type = event.type;
@@ -81,7 +104,7 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       case 'coderfleet_acp_session': turn.sessionId = text(event.session_id) || turn.sessionId; return true;
       case 'coderfleet_question_pending':
         turn.permission = {
-          id: text(event.tool_call_id), title: '需要你回答', details: '', allow: true,
+          id: text(event.tool_call_id), title: '需要你回答', details: '', allow: true, toolId: text(event.tool_call_id),
           questions: entries(event.questions).map(item => ({
             question: text(item.question), header: text(item.header), multiSelect: item.multiSelect === true,
             options: entries(item.options).map(option => ({ label: text(option.label), description: text(option.description) })),
@@ -91,13 +114,33 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       case 'coderfleet_control_ready': turn.controlReady = true; if (turn.status === 'starting') turn.status = 'running'; return true;
       case 'coderfleet_permission_pending': {
         const details = JSON.stringify(event.tool_input ?? {}, null, 2).slice(0, 16_000);
-        turn.permission = { id: text(event.tool_call_id), title: text(event.tool_name) || 'Tool approval', details, allow: event.can_allow === true };
+        // Claude reports the tool-use ID as the approval ID; Antigravity sends it separately.
+        const toolId = text(event.tool_use_id) || text(event.tool_call_id);
+        turn.permission = { id: text(event.tool_call_id), title: text(event.tool_name) || 'Tool approval', details, allow: event.can_allow === true, toolId };
+        setTool(turn, toolId, 'waiting');
         return true;
       }
       case 'coderfleet_question_closed':
-      case 'coderfleet_permission_closed':
-        if (turn.permission?.id === event.tool_call_id) { delete turn.permission; return true; }
-        return false;
+      case 'coderfleet_permission_closed': {
+        const permission = turn.permission;
+        if (!permission || permission.id !== event.tool_call_id) return false;
+        const toolId = permission.toolId;
+        if (toolId) {
+          const status = event.status === 'approved' || event.status === 'answered' ? 'running'
+            : event.status === 'denied' || event.status === 'timed_out' ? 'denied' : 'interrupted';
+          if (turn.tools.some(tool => tool.id === toolId)) setTool(turn, toolId, status);
+          else if (status !== 'running' && !permission.questions) {
+            // The approval came before the call itself; record the outcome so the later
+            // error result of a rejected call does not read as a failure.
+            let input: unknown;
+            try { input = JSON.parse(permission.details); } catch { input = {}; }
+            turn.tools.push({ id: toolId, title: permission.title, status, detail: toolDetail(input) });
+            (turn.blocks ??= []).push({ kind: 'tool', id: toolId });
+          }
+        }
+        delete turn.permission;
+        return true;
+      }
       case 'coderfleet_interrupted': turn.interrupted = true; return true;
       default: return false;
     }
@@ -105,7 +148,12 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
   if (type === 'stream_event') {
     const delta = record(record(event.event).delta);
     if (record(event.event).type !== 'content_block_delta' || delta.type !== 'text_delta') return false;
-    turn.answer = (turn.answer + text(delta.text)).slice(0, MAX_ANSWER);
+    const chunk = text(delta.text);
+    if (turn.answer.length >= MAX_ANSWER) return false;
+    turn.answer = (turn.answer + chunk).slice(0, MAX_ANSWER);
+    const blocks = turn.blocks ??= [];
+    const last = blocks.at(-1);
+    if (last?.kind === 'text') last.text += chunk; else blocks.push({ kind: 'text', text: chunk });
     return true;
   }
   if (type === 'assistant' || type === 'user') {
@@ -113,12 +161,15 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
     for (const block of Array.isArray(record(event.message).content) ? record(event.message).content as unknown[] : []) {
       const item = record(block);
       if (item.type === 'tool_use' && text(item.id) && !turn.tools.some(tool => tool.id === item.id)) {
-        turn.tools.push({ id: text(item.id), title: text(item.name) || 'Tool', status: 'running' });
+        // The approval can arrive before the tool call itself.
+        const status: ToolStatus = turn.permission?.toolId === item.id ? 'waiting' : 'running';
+        turn.tools.push({ id: text(item.id), title: text(item.name) || 'Tool', status, detail: toolDetail(item.input) });
+        (turn.blocks ??= []).push({ kind: 'tool', id: text(item.id) });
         changed = true;
       } else if (item.type === 'tool_result') {
-        const index = turn.tools.findIndex(tool => tool.id === item.tool_use_id);
-        const current = turn.tools[index];
-        if (current) { turn.tools[index] = { ...current, status: item.is_error ? 'failed' : 'completed' }; changed = true; }
+        const current = turn.tools.find(tool => tool.id === item.tool_use_id);
+        // A rejected call reports an error result; it stays "denied", not "failed".
+        if (current && current.status !== 'denied') changed = setTool(turn, current.id, item.is_error ? 'failed' : 'completed') || changed;
       }
     }
     return changed;
@@ -188,6 +239,9 @@ export class TaskRunner {
 
   private finish(turn: Turn, status: 'done' | 'failed' | 'cancelled', error?: string): void {
     turn.status = status;
+    // Calls still open when the turn ends never reported a result.
+    turn.tools = turn.tools.map(tool => tool.status === 'running' || tool.status === 'waiting'
+      ? { ...tool, status: status === 'done' ? 'unknown' : 'interrupted' } : tool);
     if (error && !turn.error) turn.error = error;
     turn.controlReady = false;
     turn.finishedAt = new Date().toISOString();

@@ -10,25 +10,52 @@
   const STATUS = { starting: '正在启动', running: '正在处理' };
   const isActive = turn => turn.status === 'starting' || turn.status === 'running';
 
-  const TOOL_STATE = { completed: '', failed: '失败', running: '进行中', pending: '等待中', in_progress: '进行中' };
+  // Tool call states and how each one reads in a flow row.
+  const TOOL_STATES = {
+    running: { label: '运行中', className: 'running' },
+    waiting: { label: '等你确认', className: 'waiting' },
+    completed: { label: '完成', className: 'completed' },
+    failed: { label: '失败', className: 'failed' },
+    denied: { label: '已拒绝', className: 'denied' },
+    interrupted: { label: '已中断', className: 'interrupted' },
+    unknown: { label: '没有返回结果', className: 'interrupted' },
+  };
+  const SETTLED = new Set(['completed', 'failed', 'denied', 'interrupted', 'unknown']);
   const openFlows = new Set();
 
-  /** Tool calls as one-line flow rows; finished groups of more than three fold into a summary row. */
-  function toolFlow(turn) {
-    if (!turn.tools.length) return null;
-    const running = turn.tools.some(tool => !['completed', 'failed'].includes(tool.status));
-    const failed = turn.tools.filter(tool => tool.status === 'failed').length;
-    const row = tool => h('div.flow-row', CF.icon(tool.status === 'failed' ? 'x' : tool.status === 'completed' ? 'check' : 'tool', 13),
-      h('span.label', tool.title), TOOL_STATE[tool.status] ? h('span' + (tool.status === 'failed' ? '.state-fail' : ''), TOOL_STATE[tool.status]) : null);
-    if (running || turn.tools.length <= 3) return h('div.flow', turn.tools.map(row));
-    const open = openFlows.has(turn.id);
+  function toolGlyph(status) {
+    if (status === 'running') return h('span.spinner.tool-spinner');
+    if (status === 'waiting') return h('span.tool-glyph.waiting', h('span.dot.waiting'));
+    const icon = { completed: 'check', failed: 'x', denied: 'block', interrupted: 'square', unknown: 'dash' }[status] || 'tool';
+    return h('span.tool-glyph.' + (TOOL_STATES[status]?.className || 'completed'), CF.icon(icon, 12));
+  }
+
+  function toolRow(tool) {
+    const state = TOOL_STATES[tool.status] || TOOL_STATES.running;
+    return h('div.flow-row.tool-' + state.className, { title: tool.detail ? tool.title + ' · ' + tool.detail : tool.title },
+      toolGlyph(tool.status), h('span.label', tool.title),
+      tool.detail ? h('span.detail', tool.detail) : null,
+      tool.status === 'completed' ? null : h('span.tool-state', state.label));
+  }
+
+  /** Tool calls as one-line flow rows; a settled group of more than three folds into a summary row. */
+  function toolFlow(turn, tools = turn.tools, key = turn.id) {
+    if (!tools.length) return null;
+    const settled = tools.every(tool => SETTLED.has(tool.status));
+    if (!settled || tools.length <= 3) return h('div.flow', tools.map(toolRow));
+    const counts = {};
+    for (const tool of tools) counts[tool.status] = (counts[tool.status] || 0) + 1;
+    const extra = ['failed', 'denied', 'interrupted', 'unknown'].filter(status => counts[status])
+      .map(status => h('span.tool-state.tool-' + TOOL_STATES[status].className, counts[status] + ' 个' + TOOL_STATES[status].label));
+    const open = openFlows.has(key);
     const flow = h('div.flow' + (open ? '.open' : ''));
-    const summary = h('button.flow-row', { on: { click: () => {
-      open ? openFlows.delete(turn.id) : openFlows.add(turn.id);
-      flow.replaceWith(toolFlow(turn));
-    } } }, CF.icon('tool', 13), h('span.label', '使用了 ' + turn.tools.length + ' 个工具'),
-      failed ? h('span.state-fail', failed + ' 个失败') : null, h('span.chev', CF.icon('chevron', 11)));
-    flow.append(summary, open ? h('div', { style: 'padding-left:20px' }, turn.tools.map(row)) : null);
+    const summary = h('button.flow-row', { 'aria-expanded': String(open), on: { click: () => {
+      open ? openFlows.delete(key) : openFlows.add(key);
+      flow.replaceWith(toolFlow(turn, tools, key));
+    } } }, toolGlyph(counts.failed ? 'failed' : 'completed'), h('span.label', '使用了 ' + tools.length + ' 个工具'), extra,
+      h('span.chev', CF.icon('chevron', 11)));
+    flow.append(summary);
+    if (open) flow.append(h('div.flow-children', tools.map(toolRow)));
     return flow;
   }
 
@@ -75,13 +102,30 @@
       h('div.approval-actions', deny, allow));
   }
 
+  /** Text and tool groups in the order they happened (older records: tools, then text). */
+  function body(turn) {
+    const blocks = turn.blocks?.length ? turn.blocks
+      : [...turn.tools.map(tool => ({ kind: 'tool', id: tool.id })), ...(turn.answer ? [{ kind: 'text', text: turn.answer }] : [])];
+    const byId = new Map(turn.tools.map(tool => [tool.id, tool]));
+    const nodes = [];
+    let group = [];
+    const flush = () => {
+      if (group.length) nodes.push(toolFlow(turn, group, turn.id + ':' + nodes.length));
+      group = [];
+    };
+    for (const block of blocks) {
+      if (block.kind === 'tool') { const tool = byId.get(block.id); if (tool) group.push(tool); continue; }
+      flush();
+      if (block.text.trim()) nodes.push(h('div.assistant', CF.markdown(block.text)));
+    }
+    flush();
+    return nodes;
+  }
+
   function turnNode(turn) {
-    const assistant = h('div.assistant');
-    if (turn.answer) assistant.append(CF.markdown(turn.answer));
     const node = h('div.turn',
       h('div.user-msg', h('div.bubble', turn.prompt)),
-      toolFlow(turn),
-      assistant,
+      body(turn),
       turn.permission ? approvalCard(turn) : null,
       isActive(turn) && !turn.permission ? h('div.running-status', h('span.orb'), h('span.shimmer', { dataset: { text: STATUS[turn.status] } }, STATUS[turn.status])) : null,
       turn.status === 'cancelled' ? h('div.turn-note', CF.icon('square', 12), '已中断') : null,
@@ -91,7 +135,7 @@
   }
 
   const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '',
-    turn.tools.map(tool => tool.id + tool.status).join(',')].join('|');
+    turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
 
   function project() {
     return CF.state.projects.find(item => item.id === session?.projectId);

@@ -395,9 +395,22 @@ dialog.sheet[open] { animation: sheet-in 0.2s cubic-bezier(0.2, 0.9, 0.3, 1); di
   border: 0; background: none; padding: 0 6px; margin-left: -6px; border-radius: 6px; text-align: left; width: fit-content; max-width: 100%;
 }
 button.flow-row:hover { background: var(--hover); color: var(--text-2); }
-.flow-row .label { color: var(--text-2); font-weight: 520; }
-.flow-row .detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.flow-row .state-fail { color: var(--red); }
+.flow-row .label { color: var(--text-2); font-weight: 520; flex: none; }
+.flow-row .detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--text-3); }
+.flow-children { padding-left: 22px; }
+.tool-glyph { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+.tool-glyph.completed { color: var(--green); }
+.tool-glyph.failed { color: #fff; background: var(--red); }
+.tool-glyph.failed svg { width: 9px; height: 9px; stroke-width: 2.4; }
+.tool-glyph.denied, .tool-glyph.interrupted { color: var(--text-3); }
+.tool-spinner { width: 12px; height: 12px; margin: 0 2px; border-width: 1.6px; }
+.tool-state { flex: none; font-size: 11.5px; font-weight: 560; padding: 0 7px; height: 19px; line-height: 19px; border-radius: 6px; background: var(--fill); color: var(--text-3); }
+.tool-running .label { color: var(--text); }
+.tool-running .tool-state { background: var(--accent-soft); color: var(--accent); }
+.tool-waiting .label { color: var(--text); }
+.tool-waiting .tool-state, .tool-state.tool-waiting { background: var(--amber-soft); color: var(--amber); }
+.tool-failed .tool-state, .tool-state.tool-failed { background: var(--red-soft); color: var(--red); }
+.tool-denied .label, .tool-interrupted .label { color: var(--text-3); text-decoration: line-through; text-decoration-color: var(--line-strong); }
 .flow-row svg { flex: none; }
 .flow-row .chev { transition: transform 0.15s; }
 .flow.open .flow-row .chev { transform: rotate(90deg); }

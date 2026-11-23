@@ -34,13 +34,15 @@ const say = async (projectId, prompts) => {
   const conversation = (await env.post('conversations', { projectId })).body.id;
   for (const prompt of prompts) {
     await env.post('conversations/' + conversation + '/turns', { prompt });
-    await until(() => lastTurn(env, conversation), turn => turn.status !== 'starting' && turn.status !== 'running' || turn.permission, 'turn ' + prompt);
+    await until(() => lastTurn(env, conversation), turn => turn.status !== 'starting' && turn.status !== 'running' || turn.permission
+      || turn.tools.some(tool => tool.status === 'running'), 'turn ' + prompt);
   }
   return conversation;
 };
 await say('reminis-app', ['修一下登录页的样式']);
 await say('coderfleet', ['hello']);
 await say('coderfleet', ['请帮我梳理一下服务启动流程', '请修改端口为读取环境变量']);
+await say('coderfleet', ['请运行检查并修复']);
 
 const token = 'synthetic-node-test-token-0000000';
 const backendPort = JSON.parse(await readFile(join(env.root, 'config.json'), 'utf8')).port;

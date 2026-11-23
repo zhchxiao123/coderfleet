@@ -15,7 +15,7 @@ test('Codex turns run with codex exec in the container', { timeout: 120_000 }, a
     let turn = await until(() => lastTurn(env, conversation), value => !['starting', 'running'].includes(value.status), 'first turn');
     assert.equal(turn.status, 'done', turn.error);
     assert.equal(turn.answer, 'echo:hello:exec --json --skip-git-repo-check --sandbox workspace-write');
-    assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status]), [['Shell', 'completed']]);
+    assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status, tool.detail]), [['Shell', 'completed', 'ls']]);
     assert.equal(turn.sessionId, 'thread-1');
 
     await env.post('conversations/' + conversation + '/turns', { prompt: 'again' });

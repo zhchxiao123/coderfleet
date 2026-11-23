@@ -25,7 +25,10 @@ try {
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.waitForSelector('.conv-item');
-  // The latest conversation opens first: it waits for an approval.
+  // The latest conversation opens first: its build is still running after a failed test.
+  await page.waitForSelector('.tool-running');
+  await shot('chat-tools');
+  await page.click('.conv-item:has-text("请帮我梳理")');
   await page.waitForSelector('.approval');
   await shot('chat-approval');
   await page.evaluate(() => { document.querySelector('.transcript').scrollTop = 0; });

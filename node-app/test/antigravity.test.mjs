@@ -44,7 +44,7 @@ test('Antigravity turns run in the persistent project container and survive a se
     await env.post('conversations/' + conversation + '/turns', { prompt: 'approve', model: '' });
     turn = await until(() => lastTurn(env, conversation), value => value.permission, 'permission');
     assert.equal(turn.permission.title, 'Write file');
-    assert.equal(turn.tools[0].status, 'running');
+    assert.equal(turn.tools[0].status, 'waiting');
     await env.restart();
     assert.equal((await env.post('turns/' + turn.id + '/permission', { id: 'wrong', decision: 'allow' })).status, 409);
     assert.equal((await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, decision: 'allow' })).status, 200);
@@ -59,7 +59,7 @@ test('Antigravity turns run in the persistent project container and survive a se
     await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, decision: 'deny' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'denied turn');
     assert.equal(turn.answer, 'refused');
-    assert.equal(turn.tools[0].status, 'failed');
+    assert.equal(turn.tools[0].status, 'denied');
 
     // Cancel a running turn, then continue the conversation.
     await env.post('conversations/' + conversation + '/turns', { prompt: 'slow', model: '' });

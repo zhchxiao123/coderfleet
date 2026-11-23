@@ -30,13 +30,14 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.equal((await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, decision: 'allow' })).status, 200);
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'approved turn');
     assert.equal(turn.answer, 'ran');
-    assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status]), [['Bash', 'completed']]);
+    assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status, tool.detail]), [['Bash', 'completed', 'ls']]);
 
     await env.post('conversations/' + conversation + '/turns', { prompt: 'tool' });
     turn = await until(() => lastTurn(env, conversation), value => value.permission, 'second permission');
     await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, decision: 'deny' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'denied turn');
     assert.equal(turn.answer, 'denied:Operator denied this tool');
+    assert.deepEqual(turn.tools.map(tool => tool.status), ['denied']);
 
     // Native question.
     await env.post('conversations/' + conversation + '/turns', { prompt: 'ask' });

@@ -103,7 +103,19 @@ async function handle(message) {
     send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: '…' }] } });
     send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'r2', name: 'Grep', input: { pattern: 'listen' } }] } });
     send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'r2', content: '…' }] } });
+    if (prompt.includes('检查')) {
+      const tool = (id, name, input) => send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id, name, input }] } });
+      const done = (id, error) => send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: id, content: '…', is_error: error }] } });
+      tool('c1', 'Bash', { command: 'npm test' }); done('c1', true);
+      tool('c2', 'Read', { file_path: '/workspace/test/server.test.ts' }); done('c2', false);
+      say('有一个测试失败，我先修复再重新构建。');
+      tool('c3', 'Bash', { command: 'npm run build' });
+      await new Promise(resolve => { interrupt = resolve; });
+      finish('error_during_execution', '');
+      return;
+    }
     if (prompt.includes('修改')) {
+      send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'tool-' + (sequence + 1), name: 'Edit', input: { file_path: '/workspace/src/server.ts' } }] } });
       const decision = await ask('Edit', { file_path: '/workspace/src/server.ts', old_string: 'server.listen(8080)', new_string: 'server.listen(Number(process.env.PORT ?? 8080))' });
       say(decision.behavior === 'allow' ? '已修改端口配置。' : '好的，没有修改。');
       finish();

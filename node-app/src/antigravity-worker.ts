@@ -17,7 +17,7 @@ const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 type Id = number | string;
 export type WorkerSpec = BaseSpec;
-interface Permission { request: Id; key: string; title: string; details: Json; choices: Partial<Record<'allow_once' | 'reject_once', string>> }
+interface Permission { request: Id; key: string; toolId: string; title: string; details: Json; choices: Partial<Record<'allow_once' | 'reject_once', string>> }
 
 class AcpError extends Error {
   public constructor(message: string, public readonly code?: number) { super(message); }
@@ -162,7 +162,7 @@ export class Turn {
     this.deadline = Date.now() + timeout * 1000;
     this.flushText();
     this.system('coderfleet_permission_pending', {
-      tool_call_id: permission.key, tool_name: permission.title, tool_input: permission.details,
+      tool_call_id: permission.key, tool_use_id: permission.toolId, tool_name: permission.title, tool_input: permission.details,
       deadline: new Date(Date.now() + timeout * 1000).toISOString(), decision_only: true,
       can_allow: Boolean(permission.choices.allow_once),
     });
@@ -190,7 +190,7 @@ export class Turn {
     }
     const details: Json = {};
     for (const key of ['rawInput', 'content', 'locations']) if (key in tool) details[key] = tool[key];
-    this.permissions.push({ request, key: randomUUID().replaceAll('-', ''), title: str(tool.title) || 'Antigravity tool', details, choices });
+    this.permissions.push({ request, key: randomUUID().replaceAll('-', ''), toolId: str(tool.toolCallId), title: str(tool.title) || 'Antigravity tool', details, choices });
     if (this.permissions.length === 1) this.showPermission();
   }
 

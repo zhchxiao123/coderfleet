@@ -66,11 +66,21 @@ export interface Conversation {
   readonly createdAt: string;
 }
 
+/**
+ * running → waiting (approval pending) → running → completed | failed;
+ * denied when the user rejected it; interrupted or unknown when the turn
+ * ended before the tool reported a result.
+ */
+export type ToolStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'denied' | 'interrupted' | 'unknown';
 export interface Tool {
   readonly id: string;
   readonly title: string;
-  readonly status: string;
+  readonly status: ToolStatus;
+  /** A short line from the tool input: command, path, pattern or query. */
+  readonly detail?: string;
 }
+
+export type Block = { kind: 'text'; text: string } | { kind: 'tool'; id: string };
 
 export interface QuestionOption { readonly label: string; readonly description: string }
 export interface Question { readonly question: string; readonly header: string; readonly multiSelect: boolean; readonly options: readonly QuestionOption[] }
@@ -82,6 +92,8 @@ export interface Permission {
   readonly details: string;
   readonly allow: boolean;
   readonly questions?: readonly Question[];
+  /** The tool call this approval belongs to, when the agent reports it. */
+  readonly toolId?: string;
 }
 
 export type Decision = 'allow' | 'deny';
@@ -99,6 +111,8 @@ export interface Turn {
   model?: string;
   answer: string;
   tools: Tool[];
+  /** Text and tool calls in the order they happened; `answer` keeps the full text. */
+  blocks?: Block[];
   permission?: Permission;
   error?: string;
   interrupted?: boolean;
