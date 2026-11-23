@@ -1,9 +1,18 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { readWorkspace, type WorkspaceProject } from './conf.js';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ACCOUNT_TYPES, accountType } from './accounts.js';
+import {
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv,
+  writeSettings, WorkspaceError, type WorkspaceProject,
+} from './conf.js';
 import { assertContainer, models } from './docker.js';
+import { Lifecycle } from './lifecycle.js';
 import { active, identifier, message, readConfig, record, Store, text, type Turn } from './state.js';
-import { TaskRunner } from './tasks.js';
+import { chatSupported, TaskRunner } from './tasks.js';
+import { Terminals } from './terminal.js';
 
 class HttpError extends Error {
   public constructor(public readonly status: number, message: string) { super(message); }
@@ -23,103 +32,263 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
     if (size > 160_000) throw new HttpError(413, 'The request body is too large');
     chunks.push(buffer);
   }
+  if (!size) return {};
   try { return record(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
   catch { throw new HttpError(400, 'Expected a JSON request body'); }
 }
 
-/** Antigravity projects from projects.conf. Other account types are served by the Python service for now. */
-export function antigravityProjects(workspace: string): WorkspaceProject[] {
-  return readWorkspace(workspace).projects.filter(project => project.account.type === 'antigravity' && project.account.runtime === 'container');
+function size(input: Record<string, unknown>): [number, number] {
+  const cols = Number(input.cols); const rows = Number(input.rows);
+  return [Number.isFinite(cols) ? cols : 100, Number.isFinite(rows) ? rows : 30];
 }
+
+const CLAUDE_MODELS = [
+  { id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
+];
+
+type Handler = (request: IncomingMessage, params: string[], url: URL) => Promise<unknown>;
 
 export async function serve(configPath: string): Promise<Server> {
   const config = readConfig(configPath);
+  const workspace = config.workspace;
   const store = new Store(config.stateDirectory);
   const token = Buffer.from('Bearer ' + config.token);
-  const project = (id: string): WorkspaceProject | undefined => antigravityProjects(config.workspace).find(item => item.name === id);
-  const runner = new TaskRunner(store, config.dockerPath, project);
+  const lifecycle = new Lifecycle(workspace, config.dockerPath);
+  const terminals = new Terminals(workspace, config.dockerPath);
+  const template = fileURLToPath(new URL('../template/', import.meta.url));
+  const chatProject = (id: string): WorkspaceProject | undefined =>
+    readWorkspace(workspace).projects.find(item => item.name === id && chatSupported(item.account.type) && item.account.runtime === 'container');
+  const runner = new TaskRunner(store, config.dockerPath, chatProject);
+  const project = (name: string): WorkspaceProject => {
+    const found = readWorkspace(workspace).projects.find(item => item.name === name);
+    if (!found) throw new HttpError(404, '项目不存在');
+    return found;
+  };
+  const account = (name: string) => {
+    const found = readWorkspace(workspace).accounts.find(item => item.name === name);
+    if (!found) throw new HttpError(404, '账号不存在');
+    return found;
+  };
+  const turnsOf = (conversationId: string): Turn[] => store.turns().filter(turn => turn.conversationId === conversationId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+  const routes: [string, RegExp, Handler][] = [
+    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1 })],
+
+    // Workspace, image and settings
+    ['GET', /^overview$/, async () => {
+      const initialized = existsSync(join(workspace, 'config.conf')) && existsSync(join(workspace, 'Dockerfile'));
+      const docker = await lifecycle.dockerAvailable();
+      return {
+        workspace, initialized, docker, image: docker ? await lifecycle.image() : undefined,
+        accountTypes: Object.values(ACCOUNT_TYPES).map(({ id, label, envAuth, envHint, chat }) => ({ id, label, envAuth, envHint, chat })),
+        operations: lifecycle.recent(),
+      };
+    }],
+    ['POST', /^workspace\/init$/, async () => ({ created: initWorkspace(workspace, template) })],
+    ['GET', /^settings$/, async () => readSettings(workspace)],
+    ['PUT', /^settings$/, async request => {
+      const input = await body(request);
+      writeSettings(workspace, Object.fromEntries(Object.entries(input).map(([key, value]) => [key, text(value).trim()])));
+      return readSettings(workspace);
+    }],
+    ['POST', /^image\/build$/, async () => lifecycle.build()],
+    ['GET', /^operations\/([\w-]+)$/, async (_request, [id]) => {
+      const operation = lifecycle.operation(id as string);
+      if (!operation) throw new HttpError(404, '操作不存在');
+      return operation;
+    }],
+
+    // Accounts
+    ['GET', /^accounts$/, async () => {
+      const { accounts, projects } = readWorkspace(workspace);
+      return accounts.map(item => {
+        const authDirectory = join(workspace, 'accounts', item.name);
+        let hasLogin = false;
+        try { hasLogin = readdirSync(authDirectory).length > 0; } catch { /* none yet */ }
+        return {
+          name: item.name, type: item.type, typeLabel: accountType(item.type).label, auth: item.auth, proxy: item.proxy, runtime: item.runtime,
+          projects: projects.filter(entry => entry.account.name === item.name).map(entry => entry.name),
+          envKeys: envKeys(item), hasLogin,
+        };
+      });
+    }],
+    ['POST', /^accounts$/, async request => {
+      const input = await body(request);
+      const created = addAccount(workspace, {
+        name: text(input.name).trim(), type: text(input.type), auth: input.auth === 'env' ? 'env' : 'login', proxy: input.proxy === 'off' ? 'off' : 'relay',
+      });
+      const env = record(input.env);
+      if (created.auth === 'env' && Object.keys(env).length) updateEnv(created, Object.fromEntries(Object.entries(env).map(([key, value]) => [key, text(value)])));
+      return { name: created.name };
+    }],
+    ['DELETE', /^accounts\/([\w-]+)$/, async (_request, [name]) => { removeAccount(workspace, name as string); return { removed: true }; }],
+    ['PUT', /^accounts\/([\w-]+)\/env$/, async (request, [name]) => {
+      const input = await body(request);
+      updateEnv(account(name as string), Object.fromEntries(Object.entries(record(input.values)).map(([key, value]) => [key, text(value)])));
+      return { envKeys: envKeys(account(name as string)) };
+    }],
+    ['POST', /^accounts\/([\w-]+)\/login$/, async (request, [name]) => {
+      const [cols, rows] = size(await body(request));
+      return { terminalId: await terminals.login(account(name as string), cols, rows) };
+    }],
+
+    // Projects and containers
+    ['GET', /^projects$/, async () => {
+      const { projects } = readWorkspace(workspace);
+      let containers = new Map<string, { state: string; status: string }>();
+      try { containers = await lifecycle.containers(); } catch { /* Docker unavailable: states stay unknown */ }
+      return projects.map(item => ({
+        id: item.name, name: item.name, account: item.account.name, type: item.account.type, typeLabel: accountType(item.account.type).label,
+        path: item.path, active: item.active, runtime: item.account.runtime, container: item.container,
+        state: containers.get(item.container)?.state ?? 'missing', status: containers.get(item.container)?.status ?? '',
+        chat: chatSupported(item.account.type) && item.account.runtime === 'container',
+      }));
+    }],
+    ['POST', /^projects$/, async request => {
+      const input = await body(request);
+      const name = text(input.name).trim();
+      addProject(workspace, { name, account: text(input.account), path: text(input.path) });
+      return input.start === false ? { name } : { name, operation: lifecycle.startProject(name) };
+    }],
+    ['DELETE', /^projects\/([\w-]+)$/, async (_request, [name]) => {
+      if (store.turns().some(turn => turn.projectId === name && active(turn))) throw new HttpError(409, '项目里还有正在运行的对话');
+      return lifecycle.removeProject(name as string);
+    }],
+    ['POST', /^projects\/([\w-]+)\/(start|stop|restart)$/, async (_request, [name, action]) => {
+      if (action === 'start') return lifecycle.startProject(name as string);
+      if (action === 'stop') return lifecycle.stopProject(name as string);
+      return lifecycle.restartProject(name as string);
+    }],
+    ['POST', /^projects\/([\w-]+)\/(enable|disable)$/, async (_request, [name, action]) => {
+      project(name as string);
+      setProjectActive(workspace, name as string, action === 'enable');
+      return { active: action === 'enable' };
+    }],
+    ['POST', /^projects\/([\w-]+)\/terminal$/, async (request, [name]) => {
+      const [cols, rows] = size(await body(request));
+      return { terminalId: await terminals.shell(project(name as string).name, cols, rows) };
+    }],
+    ['GET', /^projects\/([\w-]+)\/models$/, async (_request, [name]) => {
+      const target = chatProject(name as string);
+      if (!target) throw new HttpError(404, '项目不支持对话');
+      if (target.account.type === 'claude') return CLAUDE_MODELS;
+      if (target.account.type !== 'antigravity') return [];
+      try { return await models(config.dockerPath, target); }
+      catch (error) { throw new HttpError(502, '无法列出模型：' + message(error)); }
+    }],
+
+    // Terminals
+    ['GET', /^terminals\/([\w-]+)$/, async (_request, [id], url) => {
+      const offset = Number(url.searchParams.get('offset') ?? 0);
+      const wait = Math.min(Number(url.searchParams.get('wait') ?? 0) || 0, 15_000);
+      return terminals.session(id as string).read(Number.isFinite(offset) ? offset : 0, wait);
+    }],
+    ['POST', /^terminals\/([\w-]+)\/input$/, async (request, [id]) => {
+      const input = await body(request);
+      terminals.session(id as string).write(Buffer.from(text(input.data), 'base64'));
+      return { accepted: true };
+    }],
+    ['DELETE', /^terminals\/([\w-]+)$/, async (_request, [id]) => { terminals.close(id as string); return { closed: true }; }],
+
+    // Conversations
+    ['GET', /^conversations$/, async () => store.conversations().sort((left, right) => right.createdAt.localeCompare(left.createdAt)).map(item => {
+      const turns = turnsOf(item.id);
+      const last = turns.at(-1);
+      return { ...item, updatedAt: last?.createdAt ?? item.createdAt, status: last?.status ?? '', turns: turns.length };
+    })],
+    ['POST', /^conversations$/, async request => {
+      const input = await body(request);
+      const target = chatProject(text(input.projectId));
+      if (!target) throw new HttpError(404, '项目不存在或不支持对话');
+      const conversation = { id: randomUUID(), projectId: target.name, name: text(input.name).trim().slice(0, 100) || '新对话', createdAt: new Date().toISOString() };
+      store.saveConversation(conversation);
+      return conversation;
+    }],
+    ['PUT', /^conversations\/([\w-]+)$/, async (request, [id]) => {
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      const name = text((await body(request)).name).trim().slice(0, 100);
+      if (!name) throw new HttpError(400, '名称不能为空');
+      const renamed = { ...conversation, name };
+      store.saveConversation(renamed);
+      return renamed;
+    }],
+    ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id]) => {
+      if (!store.conversation(identifier(id))) throw new HttpError(404, 'Conversation not found');
+      return turnsOf(id as string).map(publicTurn);
+    }],
+    ['POST', /^conversations\/([\w-]+)\/turns$/, async (request, [id]) => {
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      const input = await body(request);
+      const prompt = text(input.prompt).trim();
+      const model = text(input.model).trim();
+      if (!prompt || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
+      const target = chatProject(conversation.projectId);
+      if (!target) throw new HttpError(404, 'Project not found');
+      try { await assertContainer(config.dockerPath, target); }
+      catch (error) { throw new HttpError(409, message(error)); }
+      // Re-read after the await: the check and the save below run without yielding.
+      const turns = turnsOf(id as string);
+      if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
+      const previous = turns.findLast(turn => turn.sessionId);
+      const turn: Turn = {
+        id: randomUUID(), conversationId: id as string, projectId: conversation.projectId,
+        prompt, requestedModel: model, createdAt: new Date().toISOString(), resumeId: previous?.sessionId ?? '',
+        status: 'starting', answer: '', tools: [],
+      };
+      store.saveTurn(turn);
+      if (turns.length === 0 && conversation.name === '新对话') store.saveConversation({ ...conversation, name: prompt.replace(/\s+/g, ' ').slice(0, 40) });
+      await runner.launch(turn);
+      return publicTurn(turn);
+    }],
+    ['POST', /^turns\/([\w-]+)\/(permission|cancel)$/, async (request, [id, action]) => {
+      const turn = store.turn(identifier(id));
+      if (!turn) throw new HttpError(404, 'Turn not found');
+      if (!active(turn)) throw new HttpError(409, 'The turn has already finished');
+      if (action === 'cancel') { await runner.cancel(turn); return { accepted: true }; }
+      const input = await body(request);
+      const key = identifier(input.id);
+      if (turn.permission?.id !== key) throw new HttpError(409, 'This approval is no longer available');
+      if (turn.permission.questions) {
+        const answers = Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)]));
+        if (!Object.keys(answers).length) throw new HttpError(400, 'Answer the question first');
+        try { await runner.decide(turn, key, { answers }); }
+        catch (error) { throw new HttpError(409, message(error)); }
+      } else {
+        const decision = input.decision;
+        if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'Invalid approval decision');
+        if (decision === 'allow' && !turn.permission.allow) throw new HttpError(409, 'This approval is no longer available');
+        try { await runner.decide(turn, key, { decision }); }
+        catch (error) { throw new HttpError(409, message(error)); }
+      }
+      return { accepted: true };
+    }],
+  ];
 
   const server = createServer(async (request, response) => {
     try {
       const auth = Buffer.from(request.headers.authorization ?? '');
       if (token.length !== auth.length || !timingSafeEqual(auth, token)) throw new HttpError(401, 'Invalid backend token');
-      const method = request.method;
-      const path = new URL(request.url ?? '/', 'http://localhost').pathname;
-      const parts = path.split('/').filter(Boolean);
-      const [version, route, id, sub] = parts;
-      if (version !== 'v1' || parts.length > 4) throw new HttpError(404, 'Unknown API endpoint');
-      if (method === 'GET' && route === 'health' && !id) {
-        reply(response, 200, { service: 'coderfleet-node', version: 1 });
-      } else if (method === 'GET' && route === 'projects' && !id) {
-        reply(response, 200, antigravityProjects(config.workspace).map(item => ({ id: item.name, name: item.name })));
-      } else if (method === 'GET' && route === 'projects' && id && sub === 'models') {
-        const target = project(id);
-        if (!target) throw new HttpError(404, 'Project not found');
-        try { reply(response, 200, await models(config.dockerPath, target)); }
-        catch (error) { throw new HttpError(502, 'Could not list Antigravity models: ' + message(error)); }
-      } else if (method === 'GET' && route === 'conversations' && !id) {
-        reply(response, 200, store.conversations().sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
-      } else if (method === 'POST' && route === 'conversations' && !id) {
-        const input = await body(request);
-        const target = project(text(input.projectId));
-        if (!target) throw new HttpError(404, 'Project not found');
-        const conversation = { id: randomUUID(), projectId: target.name, name: text(input.name).trim().slice(0, 100) || 'New conversation', createdAt: new Date().toISOString() };
-        store.saveConversation(conversation);
-        reply(response, 201, conversation);
-      } else if (route === 'conversations' && id && sub === 'turns') {
-        const conversation = store.conversation(identifier(id));
-        if (!conversation) throw new HttpError(404, 'Conversation not found');
-        const turns = store.turns().filter(turn => turn.conversationId === id)
-          .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-        if (method === 'GET') {
-          reply(response, 200, turns.map(publicTurn));
-        } else if (method === 'POST') {
-          const input = await body(request);
-          const prompt = text(input.prompt).trim();
-          const model = text(input.model).trim();
-          if (!prompt || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
-          const target = project(conversation.projectId);
-          if (!target) throw new HttpError(404, 'Project not found');
-          try { await assertContainer(config.dockerPath, target); }
-          catch (error) { throw new HttpError(409, message(error)); }
-          // Re-read after the await: the check and the save below run without yielding.
-          const current = store.turns().filter(turn => turn.conversationId === id);
-          if (current.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
-          const previous = turns.findLast(turn => turn.sessionId);
-          const turn: Turn = {
-            id: randomUUID(), conversationId: id, projectId: conversation.projectId,
-            prompt, requestedModel: model, createdAt: new Date().toISOString(), resumeId: previous?.sessionId ?? '',
-            status: 'starting', answer: '', tools: [],
-          };
-          store.saveTurn(turn);
-          await runner.launch(turn);
-          reply(response, 202, publicTurn(turn));
-        } else throw new HttpError(405, 'Method not allowed');
-      } else if (method === 'POST' && route === 'turns' && id && (sub === 'permission' || sub === 'cancel')) {
-        const input = sub === 'permission' ? await body(request) : {};
-        const turn = store.turn(identifier(id));
-        if (!turn) throw new HttpError(404, 'Turn not found');
-        if (!active(turn)) throw new HttpError(409, 'The turn has already finished');
-        if (sub === 'cancel') {
-          await runner.cancel(turn);
-        } else {
-          const key = identifier(input.id);
-          const decision = input.decision;
-          if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'Invalid approval decision');
-          if (turn.permission?.id !== key || (decision === 'allow' && !turn.permission.allow)) {
-            throw new HttpError(409, 'This approval is no longer available');
-          }
-          try { await runner.decide(turn, key, decision); }
-          catch (error) { throw new HttpError(409, message(error)); }
-        }
-        reply(response, 202, { accepted: true });
-      } else throw new HttpError(404, 'Unknown API endpoint');
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      if (!url.pathname.startsWith('/v1/')) throw new HttpError(404, 'Unknown API endpoint');
+      const path = url.pathname.slice('/v1/'.length);
+      for (const [method, pattern, handler] of routes) {
+        const match = pattern.exec(path);
+        if (!match || method !== request.method) continue;
+        const result = await handler(request, match.slice(1), url);
+        reply(response, request.method === 'POST' && /^(accounts|projects|conversations)$/.test(path) ? 201 : 200, result);
+        return;
+      }
+      throw new HttpError(404, 'Unknown API endpoint');
     } catch (error) {
       if (error instanceof HttpError) reply(response, error.status, { error: error.message });
+      else if (error instanceof WorkspaceError) reply(response, 400, { error: error.message });
       else if (message(error) === 'Invalid identifier') reply(response, 400, { error: 'Invalid identifier' });
       else {
         console.error('Request failed:', message(error));
-        reply(response, 500, { error: 'Backend request failed' });
+        reply(response, 500, { error: message(error) || 'Backend request failed' });
       }
     }
   });

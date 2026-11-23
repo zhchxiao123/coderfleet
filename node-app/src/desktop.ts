@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -107,6 +108,35 @@ async function connect(profile: Profile): Promise<unknown> {
   } finally { requests.delete(profile.id); }
 }
 
+/**
+ * Creates (once) the App-managed local backend: a configuration in the App's
+ * data directory with a random token, serving the default CoderFleet workspace.
+ */
+function setupLocal(): string {
+  const configPath = join(app.getPath('userData'), 'local-backend.json');
+  if (!existsSync(configPath)) {
+    atomicJSON(configPath, {
+      port: 8877, token: randomBytes(32).toString('base64url'), workspace: join(homedir(), '.coderfleet'),
+      stateDirectory: join(app.getPath('userData'), 'node-state'), dockerPath: dockerExecutable(),
+    });
+  }
+  const existing = profiles.find(profile => profile.configPath === configPath);
+  if (existing) return existing.id;
+  const config = readConfig(configPath);
+  const id = randomUUID();
+  profiles = [{ id, kind: 'local', name: '本机', url: 'http://' + config.host + ':' + config.port, configPath }, ...profiles];
+  persist();
+  return id;
+}
+
+/** Apps started from Finder get a minimal PATH; look in the usual Docker locations. */
+function dockerExecutable(): string {
+  for (const path of ['/usr/local/bin/docker', '/opt/homebrew/bin/docker', join(homedir(), '.orbstack', 'bin', 'docker'), '/usr/bin/docker']) {
+    if (existsSync(path)) return path;
+  }
+  return 'docker';
+}
+
 function register(): void {
   ipcMain.handle('backends:list', event => { guard(event); return publicProfiles(); });
   ipcMain.handle('backends:addLocal', async event => {
@@ -159,16 +189,29 @@ function register(): void {
     const raw = record(input);
     const method = text(raw.method);
     const path = text(raw.path);
-    const valid = (method === 'GET' && /^\/v1\/(projects(\/[\w-]+\/models)?|conversations(\/[\w-]+\/turns)?)$/.test(path)) ||
-      (method === 'POST' && /^\/v1\/(conversations(\/[\w-]+\/turns)?|turns\/[\w-]+\/(permission|cancel))$/.test(path));
-    if (!valid) throw new Error('Unsupported request');
+    // The renderer may call any versioned API path; the backend authorizes and validates it.
+    if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method) || !/^\/v1\/[\w./?=&%-]*$/.test(path) || path.includes('..')) {
+      throw new Error('Unsupported request');
+    }
     return api(findProfile(raw.id), method, path, raw.body);
+  });
+  ipcMain.handle('dialog:directory', async event => {
+    guard(event);
+    const current = mainWindow;
+    if (!current) throw new Error('Window unavailable');
+    const result = await dialog.showOpenDialog(current, { title: '选择项目目录', properties: ['openDirectory', 'createDirectory'] });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle('backends:setupLocal', event => {
+    guard(event);
+    return setupLocal();
   });
 }
 
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
-    width: 1140, height: 820, minWidth: 390, minHeight: 550, title: 'CoderFleet',
+    width: 1280, height: 840, minWidth: 900, minHeight: 600, title: 'CoderFleet',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', backgroundColor: '#f6f5f2',
     webPreferences: {
       sandbox: true, contextIsolation: true, nodeIntegration: false,
       preload: fileURLToPath(new URL('../ui/preload.cjs', import.meta.url)),

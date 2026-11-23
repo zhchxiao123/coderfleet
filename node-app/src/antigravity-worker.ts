@@ -4,37 +4,23 @@
 // exit codes (0 done, 143 interrupted, 1 failed). Only Node built-ins may be
 // imported: the host copies this file into the project's .coderfleet-tasks.
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { pathToFileURL } from 'node:url';
 import type { Command, ControlMailbox } from './control.js';
+import { emit, errorMessage, list, object, openMailbox, runMain, str, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 export const AGY_VERSION = '1.5.15';
 const RPC_TIMEOUT = 30_000;
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
-type Json = Record<string, unknown>;
 type Id = number | string;
-export interface WorkerSpec {
-  task_id: string; cwd: string; prompt: string; session_id: string; model: string; env_auth: boolean;
-  state_path: string; control_module: string; control_directory: string; control_token: string; permission_timeout: number;
-}
+export type WorkerSpec = BaseSpec;
 interface Permission { request: Id; key: string; title: string; details: Json; choices: Partial<Record<'allow_once' | 'reject_once', string>> }
 
 class AcpError extends Error {
   public constructor(message: string, public readonly code?: number) { super(message); }
-}
-
-function object(value: unknown): Json {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : {};
-}
-function list(value: unknown): Json[] { return Array.isArray(value) ? value.map(object) : []; }
-function str(value: unknown): string { return typeof value === 'string' ? value : ''; }
-
-function emit(type: string, fields: Json = {}): void {
-  process.stdout.write(JSON.stringify({ type, ...fields }) + '\n');
 }
 
 class Connection {
@@ -319,6 +305,7 @@ export class Turn {
     this.sessionId = supplied || str(session.sessionId);
     if (!this.sessionId) throw new AcpError('Antigravity ACP returned no session ID');
     this.system('coderfleet_acp_session', { session_id: this.sessionId });
+    this.system('coderfleet_session', { session_id: this.sessionId });
     try {
       await this.configureMode(rpc, session);
       await this.configureModel(rpc, session);
@@ -368,8 +355,7 @@ function agyVersion(env: NodeJS.ProcessEnv): Promise<string> {
 }
 
 export async function runWorker(spec: WorkerSpec): Promise<number> {
-  const protocol = await import(pathToFileURL(spec.control_module).href) as typeof import('./control.js');
-  const mailbox = new protocol.ControlMailbox(spec.control_directory, spec.task_id, spec.control_token);
+  const mailbox = openMailbox(spec);
   const turn = new Turn(spec, mailbox);
   let child: ChildProcessWithoutNullStreams | undefined;
   let rpc: Connection | undefined;
@@ -382,11 +368,7 @@ export async function runWorker(spec: WorkerSpec): Promise<number> {
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
   try {
-    const ownershipToken = randomBytes(16).toString('hex');
-    // The launcher starts the worker through `setsid`, so its PID is the process group.
-    const temporary = spec.state_path + '.tmp';
-    writeFileSync(temporary, JSON.stringify({ task_id: spec.task_id, pid: process.pid, pgid: process.pid, ownership_token: ownershipToken }));
-    renameSync(temporary, spec.state_path);
+    const ownershipToken = writeState(spec);
     const env: NodeJS.ProcessEnv = { ...process.env, CODERFLEET_SDK_OWNER_TOKEN: ownershipToken };
     if (!spec.env_auth) delete env.GEMINI_API_KEY;
     const actual = await agyVersion(env);
@@ -403,7 +385,7 @@ export async function runWorker(spec: WorkerSpec): Promise<number> {
       if (!turn.cancelled) turn.system('coderfleet_interrupted');
       return 143;
     }
-    emit('error', { message: error instanceof Error ? error.message || error.name : String(error) });
+    emit('error', { message: errorMessage(error) });
     return 1;
   } finally {
     try { mailbox.close(); }
@@ -420,16 +402,4 @@ export async function runWorker(spec: WorkerSpec): Promise<number> {
   }
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const index = args.indexOf('--spec');
-  if (index < 0 || !args[index + 1] || !args.includes('--task-marker')) {
-    process.stderr.write('Usage: worker --spec <path> --task-marker <marker>\n');
-    process.exitCode = 2;
-    return;
-  }
-  const spec = JSON.parse(readFileSync(args[index + 1] as string, 'utf8')) as WorkerSpec;
-  process.exitCode = await runWorker(spec);
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+await runMain(import.meta.url, runWorker);

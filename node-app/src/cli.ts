@@ -1,26 +1,18 @@
+// Starts the backend service. The desktop App runs this for a local backend;
+// on a remote Docker host it runs under a process manager.
 import { resolve } from 'node:path';
-import { login } from './docker.js';
-import { antigravityProjects, serve } from './server.js';
-import { message, readConfig } from './state.js';
+import { serve } from './server.js';
+import { message } from './state.js';
 
-const [mode, rawPath, id] = process.argv.slice(2);
+const [mode, rawPath] = process.argv.slice(2);
 
 try {
-  if (!rawPath) throw new Error('Usage: node dist/cli.js serve <config.json> | login <config.json> <project>');
-  const configPath = resolve(rawPath);
-  if (mode === 'serve') {
-    const server = await serve(configPath);
-    const address = server.address();
-    console.log('CoderFleet Node service listening on ' + JSON.stringify(address));
-    const close = () => server.close();
-    process.once('SIGTERM', close);
-    process.once('SIGINT', close);
-  } else if (mode === 'login') {
-    const config = readConfig(configPath);
-    const project = antigravityProjects(config.workspace).find(item => item.name === id);
-    if (!project) throw new Error('Unknown Antigravity project');
-    process.exitCode = await login(config.dockerPath, project);
-  } else throw new Error('Unknown command');
+  if (mode !== 'serve' || !rawPath) throw new Error('Usage: node dist/cli.js serve <config.json>');
+  const server = await serve(resolve(rawPath));
+  console.log('CoderFleet Node service listening on ' + JSON.stringify(server.address()));
+  const close = () => server.close();
+  process.once('SIGTERM', close);
+  process.once('SIGINT', close);
 } catch (error) {
   console.error(message(error));
   process.exitCode = 1;

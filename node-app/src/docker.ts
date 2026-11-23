@@ -1,7 +1,7 @@
 // Docker boundary. Like the Python scheduler, every operation runs inside the
 // project's persistent container (created by `coderfleet apply`) through
 // `docker exec`; this service never creates per-turn containers.
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { type WorkspaceProject } from './conf.js';
 
@@ -89,11 +89,3 @@ export async function models(dockerPath: string, project: WorkspaceProject): Pro
   });
 }
 
-export async function login(dockerPath: string, project: WorkspaceProject): Promise<number> {
-  await assertContainer(dockerPath, project);
-  return new Promise((resolve, reject) => {
-    const child = spawn(dockerPath, ['exec', '-it', project.container, 'agy', 'acp', '--login'], { stdio: 'inherit' });
-    child.once('error', reject);
-    child.once('exit', code => resolve(code ?? 1));
-  });
-}

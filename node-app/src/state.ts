@@ -72,11 +72,16 @@ export interface Tool {
   readonly status: string;
 }
 
+export interface QuestionOption { readonly label: string; readonly description: string }
+export interface Question { readonly question: string; readonly header: string; readonly multiSelect: boolean; readonly options: readonly QuestionOption[] }
+
+/** A pending tool approval, or a native question when `questions` is set. */
 export interface Permission {
   readonly id: string;
   readonly title: string;
   readonly details: string;
   readonly allow: boolean;
+  readonly questions?: readonly Question[];
 }
 
 export type Decision = 'allow' | 'deny';
