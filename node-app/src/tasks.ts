@@ -20,20 +20,30 @@ const MAX_READ = 4 * 1024 * 1024;
 const MAX_ANSWER = 4_000_000;
 const TASKS = '.coderfleet-tasks';
 
-const WORKERS: Readonly<Record<string, string>> = { antigravity: 'antigravity-worker.js', claude: 'claude-worker.js', codex: 'codex-worker.js' };
-const BUNDLE_FILES = ['control.js', 'worker-kit.js', ...Object.values(WORKERS)];
-const SDK_DIRECTORY = 'claude-agent-sdk';
+/** The in-container worker for each account type that supports conversations. */
+const WORKERS: Readonly<Record<string, string>> = {
+  claude: 'claude-worker.js', codex: 'codex-worker.js', opencode: 'opencode-worker.js', pi: 'pi-worker.js', hermes: 'hermes-worker.js',
+  antigravity: 'acp-worker.js', kimi: 'acp-worker.js', grok: 'acp-worker.js',
+};
+const BUNDLE_FILES = ['control.js', 'worker-kit.js', ...new Set(Object.values(WORKERS))];
 
-/** Worker files plus the Claude Agent SDK's ESM bundle, copied into each project under a content hash. */
+/** Worker files plus the vendored SDKs, copied into each project under a content hash. */
 interface Bundle { readonly name: string; readonly files: ReadonlyMap<string, Buffer> }
 let bundle: Bundle | undefined;
+
+function addTree(files: Map<string, Buffer>, directory: string, prefix: string): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) addTree(files, path, prefix + entry.name + '/');
+    else files.set(prefix + entry.name, readFileSync(path));
+  }
+}
 
 function workerBundle(): Bundle {
   if (bundle) return bundle;
   const files = new Map<string, Buffer>();
   for (const name of BUNDLE_FILES) files.set(name, readFileSync(fileURLToPath(new URL('./' + name, import.meta.url))));
-  const sdk = fileURLToPath(new URL('./vendor/' + SDK_DIRECTORY + '/', import.meta.url));
-  for (const name of readdirSync(sdk)) files.set(SDK_DIRECTORY + '/' + name, readFileSync(join(sdk, name)));
+  addTree(files, fileURLToPath(new URL('./vendor/', import.meta.url)), '');
   const hash = createHash('sha256');
   for (const [name, bytes] of [...files].sort(([left], [right]) => left.localeCompare(right))) hash.update(name).update('\0').update(bytes);
   bundle = { name: 'node-workers-' + hash.digest('hex').slice(0, 16), files };
@@ -46,12 +56,14 @@ function installBundle(host: string): string {
   const target = join(host, current.name);
   if (existsSync(join(target, '.complete'))) return current.name;
   const staging = target + '.' + randomBytes(6).toString('hex') + '.tmp';
-  mkdirSync(join(staging, SDK_DIRECTORY), { recursive: true });
-  for (const [name, bytes] of current.files) writeFileSync(join(staging, name), bytes, { mode: 0o644 });
+  mkdirSync(staging, { recursive: true });
+  for (const [name, bytes] of current.files) {
+    mkdirSync(join(staging, name, '..'), { recursive: true, mode: 0o755 });
+    writeFileSync(join(staging, name), bytes, { mode: 0o644 });
+  }
   writeFileSync(join(staging, 'package.json'), '{"type":"module"}\n', { mode: 0o644 });
   writeFileSync(join(staging, '.complete'), '');
   chmodSync(staging, 0o755);
-  chmodSync(join(staging, SDK_DIRECTORY), 0o755);
   try { renameSync(staging, target); }
   catch (error) {
     rmSync(staging, { recursive: true, force: true });
@@ -222,7 +234,8 @@ export class TaskRunner {
         model: turn.requestedModel, env_auth: project.account.auth === 'env',
         state_path: inside(turn.id + '.sdk-state.json'), control_module: inside(bundleName + '/control.js'),
         control_directory: inside(turn.id + '.control'), control_token: turn.controlToken,
-        permission_timeout: PERMISSION_TIMEOUT_SECONDS, sdk_directory: inside(bundleName + '/' + SDK_DIRECTORY),
+        permission_timeout: PERMISSION_TIMEOUT_SECONDS, sdk_directory: inside(bundleName + '/claude-agent-sdk'),
+        vendor_directory: inside(bundleName), agent: project.account.type,
       }));
       turn.launchedAt = new Date().toISOString();
       this.store.saveTurn(turn);

@@ -19,9 +19,8 @@ test('Antigravity turns run in the persistent project container and survive a se
   const env = await agyEnvironment();
   try {
     const projects = (await env.get('projects')).body;
-    assert.deepEqual(projects.map(item => [item.id, item.chat, item.state]), [['agy', true, 'running'], ['other', false, 'missing']]);
+    assert.deepEqual(projects.map(item => [item.id, item.chat, item.state]), [['agy', true, 'running'], ['other', true, 'missing']]);
     assert.deepEqual((await env.get('projects/agy/models')).body, [{ id: 'flash', label: 'Gemini Flash' }]);
-    assert.equal((await env.post('conversations', { projectId: 'other' })).status, 404);
     const conversation = (await env.post('conversations', { projectId: 'agy' })).body.id;
 
     // First turn: new native session with the selected model.

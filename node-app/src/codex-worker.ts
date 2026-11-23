@@ -1,9 +1,11 @@
-// Runs one Codex turn inside the project's persistent container with
-// `codex exec --json`, using the same flags as the Python scheduler's Codex
-// command (manual mode: workspace-write sandbox, resume by thread ID). Codex
-// events are translated into the shared stream-json events.
-import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
+// Runs one Codex turn inside the project's persistent container with the
+// official TypeScript Codex SDK (@openai/codex-sdk), which drives the
+// container's `codex` CLI. Manual mode matches the Python scheduler: the
+// workspace-write sandbox, resume by thread ID. Codex thread events are
+// translated into the shared stream-json events.
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
 import { emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
@@ -62,21 +64,29 @@ export function translate(spec: BaseSpec, event: Json): string | undefined {
   return undefined;
 }
 
-export async function runCodex(spec: BaseSpec): Promise<number> {
+export interface CodexSpec extends BaseSpec { vendor_directory: string }
+
+interface CodexThread { runStreamed(input: string, options: { signal: AbortSignal }): Promise<{ events: AsyncIterable<Json> }> }
+interface CodexClient {
+  startThread(options: Json): CodexThread;
+  resumeThread(id: string, options: Json): CodexThread;
+}
+
+function codexPath(): string {
+  try { return execFileSync('bash', ['-lc', 'command -v codex'], { encoding: 'utf8', timeout: 10_000 }).trim(); }
+  catch { throw new Error('Codex CLI is not installed in this container'); }
+}
+
+export async function runCodex(spec: CodexSpec): Promise<number> {
   const mailbox = openMailbox(spec);
   writeState(spec);
-  const args = spec.session_id
-    ? ['exec', 'resume', spec.session_id, '--json', '--skip-git-repo-check']
-    : ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write'];
-  if (spec.model) args.push('--model', spec.model);
+  const abort = new AbortController();
   let interrupted = false;
-  const child = spawn('codex', args, { cwd: spec.cwd, stdio: ['pipe', 'pipe', 'inherit'] });
   const stop = (): void => {
     if (interrupted) return;
     interrupted = true;
     system(spec, 'coderfleet_interrupted');
-    child.kill('SIGINT');
-    setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
+    abort.abort();
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
@@ -88,29 +98,24 @@ export async function runCodex(spec: BaseSpec): Promise<number> {
   let pump: ReturnType<typeof pumpCommands> | undefined;
   let failure: string | undefined;
   try {
+    const sdk = await import(pathToFileURL(join(spec.vendor_directory, 'codex-sdk', 'index.js')).href) as { Codex: new (options: Json) => CodexClient };
+    const codex = new sdk.Codex({ codexPathOverride: codexPath() });
+    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode: 'workspace-write', ...(spec.model ? { model: spec.model } : {}) };
+    const thread = spec.session_id ? codex.resumeThread(spec.session_id, options) : codex.startThread(options);
     mailbox.publish('accepting');
-    system(spec, 'coderfleet_backend', { execution_backend: 'cli' });
+    system(spec, 'coderfleet_backend', { execution_backend: 'sdk' });
     system(spec, 'coderfleet_control_ready', { capabilities: ['interrupt'], permission_mode: 'workspace-write' });
     pump = pumpCommands(spec, mailbox, handle);
-    child.stdin.end(spec.prompt + '\n');
-    const exit = new Promise<number>((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', code => resolve(code ?? 1));
-    });
-    for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
-      if (!line.trim()) continue;
-      let event: Json;
-      try { event = object(JSON.parse(line)); }
-      catch { process.stderr.write(line + '\n'); continue; }
-      failure = translate(spec, event) ?? failure;
-    }
-    const code = await exit;
+    // A resumed thread does not announce itself again; keep the saved ID.
+    if (spec.session_id) system(spec, 'coderfleet_session', { session_id: spec.session_id });
+    const { events } = await thread.runStreamed(spec.prompt, { signal: abort.signal });
+    for await (const event of events) failure = translate(spec, object(event)) ?? failure;
     if (interrupted) return 143;
-    if (code !== 0 || failure) throw new Error(failure || 'Codex exited with status ' + code);
+    if (failure) throw new Error(failure);
     return 0;
   } catch (error) {
     if (interrupted) return 143;
-    emit('error', { message: errorMessage(error) });
+    emit('error', { message: failure || errorMessage(error) });
     return 1;
   } finally {
     pump?.stop();

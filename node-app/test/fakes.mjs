@@ -142,7 +142,7 @@ let prompt = '';
 process.stdin.on('data', chunk => { prompt += chunk; });
 process.stdin.on('end', async () => {
   prompt = prompt.trim();
-  const resume = args[1] === 'resume' ? args[2] : '';
+  const resume = args.includes('resume') ? args[args.indexOf('resume') + 1] : '';
   send({ type: 'thread.started', thread_id: resume || 'thread-1' });
   send({ type: 'turn.started' });
   if (prompt === 'slow') {
@@ -159,3 +159,144 @@ process.stdin.on('end', async () => {
 });
 `;
 
+
+// Generic ACP agent for Kimi (`kimi acp`) and Grok (`grok --no-auto-update agent stdio`).
+// It exposes a model selector through `models` (session/set_model) and no modes.
+export const fakeAcpAgent = `#!/usr/bin/env node
+import { createInterface } from 'node:readline';
+const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+const name = process.argv[1].split('/').pop();
+let sessionId = ''; let model = 'base'; let promptId; let resumed = '';
+const chunk = text => send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params, result } = JSON.parse(line);
+  if (method === 'initialize') send({ id, result: { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } } } });
+  else if (method === 'session/new') { sessionId = name + '-session'; send({ id, result: { sessionId, models: { currentModelId: 'base', availableModels: [] } } }); }
+  else if (method === 'session/resume') { sessionId = resumed = params.sessionId; send({ id, result: { models: { currentModelId: 'base' } } }); }
+  else if (method === 'session/set_model') { model = params.modelId; send({ id, result: {} }); }
+  else if (method === 'session/prompt') {
+    promptId = id;
+    if (params.prompt[0].text === 'approve') {
+      send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'k1', title: 'Shell', rawInput: { command: 'make' }, status: 'pending' } } });
+      send({ id: 'ask', method: 'session/request_permission', params: { sessionId, toolCall: { toolCallId: 'k1', title: 'Shell', rawInput: { command: 'make' } }, options: [{ kind: 'allow_once', optionId: 'y' }, { kind: 'reject_once', optionId: 'n' }] } });
+    } else { chunk(name + ':' + params.prompt[0].text + ':' + model + (resumed ? ':resumed=' + resumed : '')); send({ id, result: { stopReason: 'end_turn' } }); }
+  } else if (id === 'ask') {
+    send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 'k1', status: result.outcome.optionId === 'y' ? 'completed' : 'failed' } } });
+    chunk(result.outcome.optionId === 'y' ? 'built' : 'skipped');
+    send({ id: promptId, result: { stopReason: 'end_turn' } });
+  }
+}
+`;
+
+// Fake Hermes CLI: stream-json when \`chat --help\` lists --format, plain text otherwise (FAKE_HERMES_PLAIN=1).
+export const fakeHermes = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const plain = process.env.FAKE_HERMES_PLAIN === '1';
+if (args.includes('--help')) { console.log(plain ? 'usage: hermes chat -q QUERY' : 'usage: hermes chat -q QUERY [--format stream-json]'); process.exit(0); }
+const resume = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : '';
+const query = args[args.indexOf('-q') + 1];
+const session = resume || 'hermes-session';
+if (plain) { console.log('echo:' + query + (resume ? ':resumed=' + resume : '')); console.error('Session: ' + session); process.exit(0); }
+const send = value => console.log(JSON.stringify({ timestamp: Date.now(), ...value }));
+send({ type: 'system', subtype: 'init', model: 'm', session_id: session });
+if (query === 'tools') {
+  send({ type: 'tool_use', name: 'terminal', input: { command: 'ls' } });
+  send({ type: 'tool_result', name: 'terminal', output: 'a', is_error: false });
+  send({ type: 'tool_use', name: 'terminal', input: { command: 'false' } });
+  send({ type: 'tool_result', name: 'terminal', output: '', is_error: true });
+}
+if (query === 'fail') { send({ type: 'result', session_id: session, exit_code: 1, error: 'provider quota exceeded' }); process.exit(1); }
+send({ type: 'text', text: 'echo:' + query });
+send({ type: 'text', text: resume ? ':resumed=' + resume : '' });
+send({ type: 'result', session_id: session, exit_code: 0, text: 'echo:' + query });
+`;
+
+// Fake Pi SDK module (loaded through CODERFLEET_PI_SDK).
+export const fakePiSdk = `
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const store = process.env.FAKE_PI_STORE;
+export const SessionManager = {
+  create: cwd => ({ id: 'pi-' + Date.now().toString(36), cwd }),
+  open: path => ({ id: path.split('/').pop(), resumed: true }),
+  list: async () => existsSync(store) ? readdirSync(store).map(id => ({ id, path: join(store, id) })) : [],
+};
+export async function createAgentSession({ sessionManager }) {
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, sessionManager.id), '');
+  const listeners = new Set();
+  let aborted; const messages = [];
+  const fire = event => { for (const listener of listeners) listener(event); };
+  return { session: {
+    sessionId: sessionManager.id, messages,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    async prompt(text) {
+      if (text === 'slow') {
+        fire({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'working' } });
+        await new Promise(resolve => { aborted = resolve; });
+        messages.push({ role: 'assistant', stopReason: 'aborted' });
+        return;
+      }
+      fire({ type: 'tool_execution_start', toolCallId: 'p1', toolName: 'bash', args: { command: 'ls' } });
+      fire({ type: 'tool_execution_end', toolCallId: 'p1', toolName: 'bash', result: { content: [{ type: 'text', text: 'a' }] }, isError: false });
+      fire({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'echo:' + text } });
+      fire({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: sessionManager.resumed ? ':resumed=' + sessionManager.id : '' } });
+      messages.push(text === 'fail' ? { role: 'assistant', stopReason: 'error', errorMessage: 'no API key' } : { role: 'assistant', stopReason: 'stop' });
+    },
+    async abort() { aborted?.(); },
+    dispose() {},
+  } };
+}
+`;
+
+// Fake \`opencode serve\`: the HTTP routes and event stream the OpenCode SDK client uses.
+export const fakeOpencode = `#!/usr/bin/env node
+import { createServer } from 'node:http';
+const port = Number(process.argv.find(arg => arg.startsWith('--port='))?.slice(7));
+const sessions = new Set(['existing']);
+const clients = new Set();
+const waiting = new Map();
+const publish = event => { for (const client of clients) client.write('data: ' + JSON.stringify(event) + '\\n\\n'); };
+const json = (response, status, value) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(value)); };
+const body = async request => { const chunks = []; for await (const chunk of request) chunks.push(chunk); return chunks.length ? JSON.parse(Buffer.concat(chunks)) : {}; };
+createServer(async (request, response) => {
+  const path = new URL(request.url, 'http://x').pathname;
+  if (path === '/event') { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.write('data: {"type":"server.connected","properties":{}}\\n\\n'); clients.add(response); return; }
+  if (request.method === 'POST' && path === '/session') { const id = 'ses_' + sessions.size; sessions.add(id); return json(response, 200, { id }); }
+  let match = /^\\/session\\/([^/]+)$/.exec(path);
+  // Sessions persist across server processes, as OpenCode stores them on disk.
+  if (match && request.method === 'GET') return match[1].startsWith('ses_') ? json(response, 200, { id: match[1] }) : json(response, 404, { name: 'NotFoundError' });
+  match = /^\\/session\\/([^/]+)\\/permissions\\/([^/]+)$/.exec(path);
+  if (match) { const reply = (await body(request)).response; waiting.get(match[2])?.(reply); publish({ type: 'permission.replied', properties: { sessionID: match[1], requestID: match[2], reply } }); return json(response, 200, true); }
+  match = /^\\/session\\/([^/]+)\\/abort$/.exec(path);
+  if (match) { waiting.get('abort')?.(); return json(response, 200, true); }
+  match = /^\\/session\\/([^/]+)\\/message$/.exec(path);
+  if (!match) return json(response, 404, {});
+  const sessionID = match[1];
+  const input = await body(request);
+  const text = input.parts[0].text;
+  const model = input.model ? input.model.providerID + '/' + input.model.modelID : 'default';
+  publish({ type: 'message.part.updated', properties: { part: { id: 'u1', sessionID, messageID: 'mu', type: 'text', text } } });
+  publish({ type: 'message.updated', properties: { info: { id: 'ma', sessionID, role: 'assistant' } } });
+  if (text === 'approve') {
+    publish({ type: 'message.part.updated', properties: { part: { id: 't1', sessionID, messageID: 'ma', type: 'tool', callID: 'call1', tool: 'bash', state: { status: 'pending', input: {} } } } });
+    publish({ type: 'message.part.updated', properties: { part: { id: 't1', sessionID, messageID: 'ma', type: 'tool', callID: 'call1', tool: 'bash', state: { status: 'running', input: { command: 'make' } } } } });
+    publish({ type: 'permission.asked', properties: { id: 'per1', sessionID, permission: 'bash', patterns: ['make'], metadata: {}, tool: { messageID: 'ma', callID: 'call1' } } });
+    const reply = await new Promise(resolve => waiting.set('per1', resolve));
+    const ok = reply === 'once';
+    publish({ type: 'message.part.updated', properties: { part: { id: 't1', sessionID, messageID: 'ma', type: 'tool', callID: 'call1', tool: 'bash', state: ok ? { status: 'completed', input: { command: 'make' }, output: 'ok' } : { status: 'error', input: { command: 'make' }, error: 'rejected' } } } });
+  }
+  if (text === 'slow') {
+    publish({ type: 'message.part.updated', properties: { part: { id: 'x1', sessionID, messageID: 'ma', type: 'text', text: '' } } });
+    publish({ type: 'message.part.delta', properties: { sessionID, messageID: 'ma', partID: 'x1', field: 'text', delta: 'working' } });
+    await new Promise(resolve => waiting.set('abort', resolve));
+    return json(response, 200, { info: { id: 'ma', role: 'assistant', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } }, parts: [] });
+  }
+  const answer = 'opencode:' + text + ':' + model + ':' + sessionID;
+  publish({ type: 'message.part.updated', properties: { part: { id: 'x2', sessionID, messageID: 'ma', type: 'text', text: '' } } });
+  publish({ type: 'message.part.delta', properties: { sessionID, messageID: 'ma', partID: 'x2', field: 'text', delta: answer.slice(0, 9) } });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  // The final part carries the rest; the worker must add only what the deltas missed.
+  json(response, 200, { info: { id: 'ma', role: 'assistant' }, parts: [{ id: 'x2', type: 'text', text: answer }] });
+}).listen(port, '127.0.0.1', () => console.log('opencode server listening on http://127.0.0.1:' + port));
+`;

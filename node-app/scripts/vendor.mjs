@@ -13,6 +13,15 @@ for (const name of readdirSync(source)) {
   if (name === 'sdk.mjs' || /^core-[\w]+\.mjs$/.test(name) || name === 'package.json' || name === 'LICENSE.md') cpSync(join(source, name), join(target, name));
 }
 
+// Codex SDK (a single ESM file) and the OpenCode SDK client, used by the workers.
+const codex = join(root, 'dist', 'vendor', 'codex-sdk');
+mkdirSync(codex, { recursive: true });
+cpSync(join(root, 'node_modules', '@openai', 'codex-sdk', 'dist', 'index.js'), join(codex, 'index.js'));
+cpSync(join(root, 'node_modules', '@openai', 'codex-sdk', 'LICENSE'), join(codex, 'LICENSE'));
+cpSync(join(root, 'node_modules', '@opencode-ai', 'sdk', 'dist'), join(root, 'dist', 'vendor', 'opencode-sdk'), {
+  recursive: true, filter: source => !/\.d\.ts$|\.map$/.test(source),
+});
+
 // xterm.js for the in-App terminal (loaded by the renderer as a classic script).
 const ui = join(root, 'ui', 'vendor');
 rmSync(ui, { recursive: true, force: true });

@@ -83,5 +83,8 @@ export async function runMain<T extends BaseSpec>(moduleUrl: string, run: (spec:
     process.exitCode = 2;
     return;
   }
-  process.exitCode = await run(JSON.parse(readFileSync(args[index + 1] as string, 'utf8')) as T);
+  const code = await run(JSON.parse(readFileSync(args[index + 1] as string, 'utf8')) as T);
+  process.exitCode = code;
+  // Open SDK connections (event streams, pipes) must not keep a finished worker alive.
+  setTimeout(() => process.exit(code), 500).unref();
 }
