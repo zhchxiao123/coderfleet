@@ -68,7 +68,7 @@ async function selectBackend(backendId) {
   project.disabled = true;
   byId('create').disabled = true;
   byId('title').textContent = '项目聊天';
-  byId('subtitle').textContent = backendId ? '正在连接后端…' : '选择一个 Node.js 后端，开始 Antigravity 会话。';
+  byId('subtitle').textContent = backendId ? '正在连接后端…' : '先点右上角「管理后端」，再选「打开本机配置」。';
   byId('connection').textContent = backendId ? '连接中' : '未连接';
   error(null);
   if (!backendId) return;
@@ -259,9 +259,10 @@ byId('remove').addEventListener('click', async () => {
 });
 byId('remote').addEventListener('submit', async event => {
   event.preventDefault();
+  const form = event.currentTarget;
   try {
-    const id = await transport.addRemote(Object.fromEntries(new FormData(event.currentTarget)));
-    event.currentTarget.reset();
+    const id = await transport.addRemote(Object.fromEntries(new FormData(form)));
+    form.reset();
     settings.close();
     await loadProfiles(id);
   } catch (failure) { error(failure, 'settings-error'); }

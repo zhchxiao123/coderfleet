@@ -1,8 +1,7 @@
 import { resolve } from 'node:path';
 import { login } from './docker.js';
-import { serve } from './server.js';
+import { antigravityProjects, serve } from './server.js';
 import { message, readConfig } from './state.js';
-import { executeTurn } from './worker.js';
 
 const [mode, rawPath, id] = process.argv.slice(2);
 
@@ -17,11 +16,10 @@ try {
     process.once('SIGTERM', close);
     process.once('SIGINT', close);
   } else if (mode === 'login') {
-    const project = readConfig(configPath).projects.find(item => item.id === id);
-    if (!project) throw new Error('Unknown project');
-    process.exitCode = await login(project);
-  } else if (mode === 'worker' && id) {
-    await executeTurn(configPath, id);
+    const config = readConfig(configPath);
+    const project = antigravityProjects(config.workspace).find(item => item.name === id);
+    if (!project) throw new Error('Unknown Antigravity project');
+    process.exitCode = await login(config.dockerPath, project);
   } else throw new Error('Unknown command');
 } catch (error) {
   console.error(message(error));

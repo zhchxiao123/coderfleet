@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { linkSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 export type RecordValue = Record<string, unknown>;
@@ -32,26 +33,14 @@ export function atomicJSON(path: string, value: unknown, exclusive = false): voi
   }
 }
 
-export interface Project {
-  readonly id: string;
-  readonly name: string;
-  readonly image: string;
-  readonly dockerPath: string;
-  readonly containerUser: string;
-  readonly workspace: string;
-  readonly accountDirectory: string;
-  readonly network: string;
-  readonly dns: readonly string[];
-  readonly environment: Readonly<Record<string, string>>;
-}
-
 export interface Config {
   readonly stateDirectory: string;
   readonly host: string;
   readonly port: number;
   readonly token: string;
   readonly dockerPath: string;
-  readonly projects: readonly Project[];
+  /** CoderFleet workspace root holding accounts.conf and projects.conf. */
+  readonly workspace: string;
 }
 
 export function readConfig(path: string): Config {
@@ -61,30 +50,11 @@ export function readConfig(path: string): Config {
   if (token.length < 24) throw new Error('Configure an API token of at least 24 characters');
   const port = Number(raw.port ?? 8877);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
-  if (!Array.isArray(raw.projects) || raw.projects.length === 0) throw new Error('Configure at least one project');
-  const dockerPath = text(raw.dockerPath) || 'docker';
-  const projects = entries(raw.projects).map((project): Project => {
-    const id = identifier(project.id);
-    const image = text(project.image);
-    const workspace = text(project.workspace);
-    const accountDirectory = text(project.accountDirectory);
-    const network = text(project.network);
-    const dns = Array.isArray(project.dns) ? project.dns.map(text).filter(Boolean) : [];
-    if (!image || image.startsWith('-') || !workspace || !accountDirectory || !network) throw new Error('Missing image, network or project directories for ' + id);
-    const environment = Object.fromEntries(Object.entries(record(project.environment)).map(([key, value]) => {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string') throw new Error('Invalid container environment variable');
-      return [key, value];
-    }));
-    return {
-      id, name: text(project.name) || id, image, workspace: resolve(base, workspace),
-      dockerPath,
-      containerUser: text(project.containerUser) || (process.platform === 'linux' && process.getuid?.() ? process.getuid() + ':' + process.getgid?.() : ''),
-      accountDirectory: resolve(base, accountDirectory), network, dns, environment,
-    };
-  });
-  if (new Set(projects.map(project => project.id)).size !== projects.length) throw new Error('Duplicate project ID');
+  const workspace = text(raw.workspace);
+  if (!workspace) throw new Error('Configure the CoderFleet workspace directory');
   return {
-    host: text(raw.host) || '127.0.0.1', port, token, projects, dockerPath,
+    host: text(raw.host) || '127.0.0.1', port, token, dockerPath: text(raw.dockerPath) || 'docker',
+    workspace: resolve(base, workspace.replace(/^~(?=$|\/)/, homedir())),
     stateDirectory: resolve(base, text(raw.stateDirectory) || '.coderfleet-node'),
   };
 }
@@ -110,7 +80,7 @@ export interface Permission {
 }
 
 export type Decision = 'allow' | 'deny';
-export type Status = 'starting' | 'running' | 'done' | 'failed' | 'cancelled' | 'blocked';
+export type Status = 'starting' | 'running' | 'done' | 'failed' | 'cancelled';
 export interface Turn {
   readonly id: string;
   readonly conversationId: string;
@@ -120,65 +90,61 @@ export interface Turn {
   readonly createdAt: string;
   readonly resumeId: string;
   status: Status;
-  workerPid?: number;
   sessionId?: string;
   model?: string;
   answer: string;
   tools: Tool[];
   permission?: Permission;
   error?: string;
+  interrupted?: boolean;
+  finishedAt?: string;
+  /** Capability for this run's control mailbox; never returned by the API. */
+  controlToken?: string;
+  controlReady?: boolean;
+  /** Bytes of the worker's event log already applied to this record. */
+  logOffset?: number;
+  launchedAt?: string;
+  cancelRequested?: boolean;
 }
 
-type Control = { readonly type: 'cancel' } | { readonly type: 'permission'; readonly decision: Decision };
-
 export class Store {
+  private readonly conversationIndex = new Map<string, Conversation>();
+  private readonly turnIndex = new Map<string, Turn>();
+
+  // This service is the only writer of its state directory, so records are
+  // read once at start-up and every save writes through.
   public constructor(private readonly root: string) {
-    for (const directory of ['conversations', 'turns', 'control']) {
-      mkdirSync(join(root, directory), { recursive: true, mode: 0o700 });
-    }
+    for (const directory of ['conversations', 'turns']) mkdirSync(join(root, directory), { recursive: true, mode: 0o700 });
+    for (const value of this.load<Conversation>('conversations')) this.conversationIndex.set(value.id, value);
+    for (const value of this.load<Turn>('turns')) this.turnIndex.set(value.id, value);
   }
 
-  public conversation(id: string): Conversation | undefined { return this.read('conversations', id); }
-  public turn(id: string): Turn | undefined { return this.read('turns', id); }
-  public saveConversation(value: Conversation): void { atomicJSON(this.file('conversations', value.id), value); }
-  public saveTurn(value: Turn): void { atomicJSON(this.file('turns', value.id), value); }
-  public conversations(): Conversation[] { return this.list('conversations'); }
-  public turns(): Turn[] { return this.list('turns'); }
+  public conversation(id: string): Conversation | undefined { return this.conversationIndex.get(id); }
+  public turn(id: string): Turn | undefined { return this.turnIndex.get(id); }
+  public conversations(): Conversation[] { return [...this.conversationIndex.values()]; }
+  public turns(): Turn[] { return [...this.turnIndex.values()]; }
 
-  public putControl(turnId: string, key: string, control: Control): void {
-    const id = identifier(turnId) + '-' + identifier(key);
-    try { atomicJSON(this.file('control', id), control, true); }
-    catch (error) {
-      if (record(error).code !== 'EEXIST') throw error;
-      const existing = this.read<Control>('control', id);
-      if (JSON.stringify(existing) !== JSON.stringify(control)) throw new Error('A different decision was already sent');
-    }
+  public saveConversation(value: Conversation): void {
+    atomicJSON(this.file('conversations', value.id), value);
+    this.conversationIndex.set(value.id, value);
   }
 
-  public control(turnId: string, key: string): Control | undefined {
-    return this.read('control', identifier(turnId) + '-' + identifier(key));
+  public saveTurn(value: Turn): void {
+    atomicJSON(this.file('turns', value.id), value);
+    this.turnIndex.set(value.id, value);
   }
 
   private file(directory: string, id: string): string {
     return join(this.root, directory, identifier(id) + '.json');
   }
 
-  private read<T>(directory: string, id: string): T | undefined {
-    try { return JSON.parse(readFileSync(this.file(directory, id), 'utf8')) as T; }
-    catch (error) {
-      if (record(error).code === 'ENOENT') return undefined;
-      throw error;
-    }
-  }
-
-  private list<T>(directory: string): T[] {
+  private load<T>(directory: string): T[] {
     return readdirSync(join(this.root, directory), { withFileTypes: true })
       .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
-      .map(entry => this.read<T>(directory, entry.name.slice(0, -5)))
-      .filter((value): value is T => value !== undefined);
+      .map(entry => JSON.parse(readFileSync(join(this.root, directory, entry.name), 'utf8')) as T);
   }
 }
 
 export function active(turn: Turn): boolean {
-  return turn.status === 'starting' || turn.status === 'running' || turn.status === 'blocked';
+  return turn.status === 'starting' || turn.status === 'running';
 }

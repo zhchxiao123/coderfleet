@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { fileURLToPath } from 'node:url';
-import { cleanContainer, models } from './docker.js';
+import { readWorkspace, type WorkspaceProject } from './conf.js';
+import { assertContainer, models } from './docker.js';
 import { active, identifier, message, readConfig, record, Store, text, type Turn } from './state.js';
+import { TaskRunner } from './tasks.js';
 
 class HttpError extends Error {
   public constructor(public readonly status: number, message: string) { super(message); }
@@ -27,53 +27,17 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
   catch { throw new HttpError(400, 'Expected a JSON request body'); }
 }
 
-function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return record(error).code === 'EPERM'; }
+/** Antigravity projects from projects.conf. Other account types are served by the Python service for now. */
+export function antigravityProjects(workspace: string): WorkspaceProject[] {
+  return readWorkspace(workspace).projects.filter(project => project.account.type === 'antigravity' && project.account.runtime === 'container');
 }
 
 export async function serve(configPath: string): Promise<Server> {
   const config = readConfig(configPath);
   const store = new Store(config.stateDirectory);
   const token = Buffer.from('Bearer ' + config.token);
-  const seen = new Set<string>();
-  const recovering = new Set<string>();
-  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
-
-  async function recover(turn: Turn): Promise<void> {
-    if (recovering.has(turn.id)) return;
-    recovering.add(turn.id);
-    try {
-      if (!turn.workerPid && Date.now() - Date.parse(turn.createdAt) < 30_000) return;
-      if (turn.workerPid && alive(turn.workerPid)) return;
-      await cleanContainer(config.dockerPath, turn.id);
-      const current = store.turn(turn.id);
-      if (!current || !active(current) || (current.workerPid && alive(current.workerPid))) return;
-      current.status = 'failed';
-      current.error = 'The worker exited. Its Docker container was cleaned up. The original prompt was not replayed.';
-      delete current.permission;
-      store.saveTurn(current);
-    } catch {
-      // A Docker outage leaves the task active so another turn cannot overlap it.
-    } finally { recovering.delete(turn.id); }
-  }
-
-  function startTurn(turn: Turn): void {
-    store.saveTurn(turn);
-    const child = spawn(process.execPath, [cli, 'worker', configPath, turn.id], {
-      detached: true, stdio: 'ignore', windowsHide: true,
-    });
-    seen.add(turn.id);
-    child.once('error', error => {
-      const current = store.turn(turn.id);
-      if (current?.status !== 'starting' || current.workerPid) return;
-      current.status = 'failed';
-      current.error = message(error);
-      store.saveTurn(current);
-    });
-    child.once('exit', () => seen.delete(turn.id));
-    child.unref();
-  }
+  const project = (id: string): WorkspaceProject | undefined => antigravityProjects(config.workspace).find(item => item.name === id);
+  const runner = new TaskRunner(store, config.dockerPath, project);
 
   const server = createServer(async (request, response) => {
     try {
@@ -87,63 +51,66 @@ export async function serve(configPath: string): Promise<Server> {
       if (method === 'GET' && route === 'health' && !id) {
         reply(response, 200, { service: 'coderfleet-node', version: 1 });
       } else if (method === 'GET' && route === 'projects' && !id) {
-        reply(response, 200, config.projects.map(project => ({ id: project.id, name: project.name })));
+        reply(response, 200, antigravityProjects(config.workspace).map(item => ({ id: item.name, name: item.name })));
       } else if (method === 'GET' && route === 'projects' && id && sub === 'models') {
-        const project = config.projects.find(item => item.id === id);
-        if (!project) throw new HttpError(404, 'Project not found');
-        try { reply(response, 200, await models(project)); }
-        catch { throw new HttpError(502, 'Could not list Antigravity models. Verify the project login and Docker connection.'); }
+        const target = project(id);
+        if (!target) throw new HttpError(404, 'Project not found');
+        try { reply(response, 200, await models(config.dockerPath, target)); }
+        catch (error) { throw new HttpError(502, 'Could not list Antigravity models: ' + message(error)); }
       } else if (method === 'GET' && route === 'conversations' && !id) {
         reply(response, 200, store.conversations().sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
       } else if (method === 'POST' && route === 'conversations' && !id) {
         const input = await body(request);
-        const project = config.projects.find(item => item.id === input.projectId);
-        if (!project) throw new HttpError(404, 'Project not found');
-        const conversation = { id: randomUUID(), projectId: project.id, name: text(input.name).trim().slice(0, 100) || 'New conversation', createdAt: new Date().toISOString() };
+        const target = project(text(input.projectId));
+        if (!target) throw new HttpError(404, 'Project not found');
+        const conversation = { id: randomUUID(), projectId: target.name, name: text(input.name).trim().slice(0, 100) || 'New conversation', createdAt: new Date().toISOString() };
         store.saveConversation(conversation);
         reply(response, 201, conversation);
       } else if (route === 'conversations' && id && sub === 'turns') {
         const conversation = store.conversation(identifier(id));
         if (!conversation) throw new HttpError(404, 'Conversation not found');
-        const input = method === 'POST' ? await body(request) : undefined;
         const turns = store.turns().filter(turn => turn.conversationId === id)
           .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
         if (method === 'GET') {
           reply(response, 200, turns.map(publicTurn));
-        } else if (input) {
-          if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
+        } else if (method === 'POST') {
+          const input = await body(request);
           const prompt = text(input.prompt).trim();
           const model = text(input.model).trim();
           if (!prompt || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
+          const target = project(conversation.projectId);
+          if (!target) throw new HttpError(404, 'Project not found');
+          try { await assertContainer(config.dockerPath, target); }
+          catch (error) { throw new HttpError(409, message(error)); }
+          // Re-read after the await: the check and the save below run without yielding.
+          const current = store.turns().filter(turn => turn.conversationId === id);
+          if (current.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
           const previous = turns.findLast(turn => turn.sessionId);
           const turn: Turn = {
             id: randomUUID(), conversationId: id, projectId: conversation.projectId,
             prompt, requestedModel: model, createdAt: new Date().toISOString(), resumeId: previous?.sessionId ?? '',
             status: 'starting', answer: '', tools: [],
           };
-          startTurn(turn);
+          store.saveTurn(turn);
+          await runner.launch(turn);
           reply(response, 202, publicTurn(turn));
         } else throw new HttpError(405, 'Method not allowed');
       } else if (method === 'POST' && route === 'turns' && id && (sub === 'permission' || sub === 'cancel')) {
         const input = sub === 'permission' ? await body(request) : {};
         const turn = store.turn(identifier(id));
         if (!turn) throw new HttpError(404, 'Turn not found');
+        if (!active(turn)) throw new HttpError(409, 'The turn has already finished');
         if (sub === 'cancel') {
-          if (!active(turn) || turn.status === 'blocked') throw new HttpError(409, 'The turn can no longer be cancelled');
-          store.putControl(id, 'cancel', { type: 'cancel' });
+          await runner.cancel(turn);
         } else {
           const key = identifier(input.id);
           const decision = input.decision;
           if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'Invalid approval decision');
-          const previous = store.control(id, key);
-          if (previous?.type === 'permission' && previous.decision === decision) {
-            reply(response, 202, { accepted: true });
-            return;
-          }
-          if (turn.permission?.id !== key || (decision === 'allow' && !turn.permission.allow) || previous) {
+          if (turn.permission?.id !== key || (decision === 'allow' && !turn.permission.allow)) {
             throw new HttpError(409, 'This approval is no longer available');
           }
-          store.putControl(id, key, { type: 'permission', decision });
+          try { await runner.decide(turn, key, decision); }
+          catch (error) { throw new HttpError(409, message(error)); }
         }
         reply(response, 202, { accepted: true });
       } else throw new HttpError(404, 'Unknown API endpoint');
@@ -156,11 +123,10 @@ export async function serve(configPath: string): Promise<Server> {
       }
     }
   });
+  // Follows every active turn; after a restart this resumes from the saved log offsets.
   const timer = setInterval(() => {
-    for (const turn of store.turns()) {
-      if (active(turn) && !seen.has(turn.id)) void recover(turn);
-    }
-  }, 2_000);
+    for (const turn of store.turns()) if (active(turn)) void runner.tick(turn);
+  }, 250);
   timer.unref();
   server.once('close', () => clearInterval(timer));
   await new Promise<void>((resolve, reject) => {
@@ -173,7 +139,7 @@ export async function serve(configPath: string): Promise<Server> {
   return server;
 }
 
-function publicTurn(turn: Turn): Omit<Turn, 'workerPid' | 'resumeId'> {
-  const { workerPid: _workerPid, resumeId: _resumeId, ...visible } = turn;
+function publicTurn(turn: Turn): Omit<Turn, 'resumeId' | 'controlToken' | 'logOffset' | 'launchedAt' | 'cancelRequested'> {
+  const { resumeId: _resume, controlToken: _token, logOffset: _offset, launchedAt: _launched, cancelRequested: _cancel, ...visible } = turn;
   return visible;
 }
