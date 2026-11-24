@@ -126,17 +126,19 @@
         ]) } }, CF.icon('more', 15));
         const authText = account.auth === 'env'
           ? (account.envKeys.length ? '环境变量 · ' + account.envKeys.join('、') : '环境变量 · 未设置')
-          : (account.hasLogin ? '登录账号' : '登录账号 · 还没登录');
+          : '登录账号';
+        const needsSetup = account.auth === 'env' ? !account.envKeys.length : !account.hasLogin;
         return h('li.row',
           h('div.row-lead',
             h('span.row-avatar.' + account.type, account.typeLabel.slice(0, 1)),
             h('div.row-main',
-              h('div.row-title', h('span.name', account.name), CF.typeBadge(account.type, account.typeLabel)),
+              h('div.row-title', h('span.name', account.name), CF.typeBadge(account.type, account.typeLabel),
+                needsSetup ? h('span.badge.amber', account.auth === 'env' ? '未配置' : '未登录') : null),
               h('div.row-sub', h('span', authText), h('span.sep'), h('span', account.proxy === 'off' ? '直连' : '经 relay'),
                 h('span.sep'), h('span', account.projects.length ? '项目：' + account.projects.join('、') : '没有项目')))),
           h('div.row-actions',
             account.auth === 'login'
-              ? h('button.btn.small' + (account.hasLogin ? '' : '.primary'), { on: { click: () => CF.accounts.login(account.name) } }, CF.icon('user', 13), account.hasLogin ? '登录' : '去登录')
+              ? h('button.btn.small' + (account.hasLogin ? '' : '.soft'), { on: { click: () => CF.accounts.login(account.name) } }, CF.icon('user', 13), account.hasLogin ? '重新登录' : '登录')
               : h('button.btn.small', { on: { click: () => CF.accounts.editEnv(account) } }, CF.icon('key', 13), '变量'),
             menuButton));
       };

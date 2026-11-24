@@ -18,8 +18,13 @@ const configPath = resolve(rawPath || join(home, 'config.json'));
 
 try {
   if (mode === 'serve') {
-    const server = await serve(configPath);
-    console.log('CoderFleet backend ' + VERSION + ' listening on ' + JSON.stringify(server.address()));
+    // Turns run in containers, so stopping the service never stops their work.
+    const stop = (): void => {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 3_000).unref();
+    };
+    const server = await serve(configPath, { onShutdown: stop });
+    console.log(new Date().toISOString() + ' CoderFleet backend ' + VERSION + ' (pid ' + process.pid + ') listening on ' + JSON.stringify(server.address()));
     const close = () => server.close();
     process.once('SIGTERM', close);
     process.once('SIGINT', close);

@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, type IpcMainInvokeEvent } from 'electron';
 import { findBundle, freePort, install, probe, Tunnel, validateTarget, type SshTarget } from './remote.js';
 import { atomicJSON, message, readConfig, record, text } from './state.js';
+import { VERSION } from './version.js';
+import { ensureLocal } from './local-backend.js';
 
 interface Profile {
   readonly id: string;
@@ -103,49 +105,40 @@ async function api(profile: Profile, method: string, path: string, data?: unknow
   return result;
 }
 
-async function connect(profile: Profile): Promise<unknown> {
+async function connect(profile: Profile, restart = false): Promise<unknown> {
+  if (profile.kind === 'local' && profile.configPath) {
+    if (requests.has(profile.id)) throw new Error('本机后端正在启动，请稍候');
+    requests.add(profile.id);
+    try {
+      return await ensureLocal({
+        configPath: profile.configPath, managed: profile.configPath === join(app.getPath('userData'), 'local-backend.json'),
+        logPath: join(app.getPath('userData'), 'backend.log'), pidPath: join(app.getPath('userData'), 'backend.pid'),
+        command: [process.execPath, cliPath], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, version: VERSION, restart,
+      });
+    } finally { requests.delete(profile.id); }
+  }
   try {
     const health = await api(profile, 'GET', '/v1/health');
-    if (record(health).service !== 'coderfleet-node' || record(health).version !== 1) throw new Error('Incompatible CoderFleet service');
+    if (record(health).service !== 'coderfleet-node' || record(health).version !== 1) throw new Error('这不是 CoderFleet 后端，或版本不兼容');
     return health;
   } catch (error) {
     if (profile.kind === 'ssh' && error instanceof TypeError) throw new Error('SSH 隧道已连通，但远端后端没有响应。可以在设置里重新安装。');
-    if (profile.kind !== 'local' || !profile.configPath || !(error instanceof TypeError)) throw error;
+    if (message(error) === 'Invalid backend token') throw new Error('服务令牌不对。请在设置里移除这个连接后重新添加。');
+    if (error instanceof TypeError) throw new Error('连不上 ' + profile.url + '：服务没有运行，或网络不通。');
+    throw error;
   }
-  if (requests.has(profile.id)) throw new Error('The local backend is already starting');
-  requests.add(profile.id);
-  try {
-    const child = spawn(process.execPath, [cliPath, 'serve', profile.configPath], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-      detached: true, windowsHide: true, stdio: 'ignore',
-    });
-    let spawnError: Error | undefined;
-    child.once('error', error => { spawnError = error; });
-    child.unref();
-    for (let attempt = 0; attempt < 24; attempt += 1) {
-      try {
-        const health = await api(profile, 'GET', '/v1/health');
-        if (record(health).service !== 'coderfleet-node' || record(health).version !== 1) throw new Error('Incompatible CoderFleet service');
-        return health;
-      } catch (error) {
-        if (!(error instanceof TypeError)) throw error;
-        if (spawnError) throw spawnError;
-        await sleep(250);
-      }
-    }
-    throw new Error('Could not start the local backend. Run the backend CLI to see its startup error.');
-  } finally { requests.delete(profile.id); }
 }
 
 /**
  * Creates (once) the App-managed local backend: a configuration in the App's
  * data directory with a random token, serving the default CoderFleet workspace.
  */
-function setupLocal(): string {
+async function setupLocal(): Promise<string> {
   const configPath = join(app.getPath('userData'), 'local-backend.json');
   if (!existsSync(configPath)) {
     atomicJSON(configPath, {
-      port: 8877, token: randomBytes(32).toString('base64url'), workspace: join(homedir(), '.coderfleet'),
+      // A free port of its own: a fixed port collides with other backends (another build of the App, a manual one).
+      port: await freePort(), token: randomBytes(32).toString('base64url'), workspace: join(homedir(), '.coderfleet'),
       stateDirectory: join(app.getPath('userData'), 'node-state'), dockerPath: dockerExecutable(),
     });
   }
@@ -264,6 +257,12 @@ function register(): void {
   ipcMain.handle('backends:connect', (event, id: unknown) => {
     guard(event);
     return connect(findProfile(id));
+  });
+  ipcMain.handle('backends:restartLocal', (event, id: unknown) => {
+    guard(event);
+    const profile = findProfile(id);
+    if (profile.kind !== 'local' || !profile.configPath) throw new Error('只能重启本机后端');
+    return connect(profile, true);
   });
   ipcMain.handle('backends:request', (event, input: unknown) => {
     guard(event);

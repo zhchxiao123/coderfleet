@@ -50,7 +50,12 @@ const CLAUDE_MODELS = [
 
 type Handler = (request: IncomingMessage, params: string[], url: URL) => Promise<unknown>;
 
-export async function serve(configPath: string): Promise<Server> {
+export interface ServeOptions {
+  /** Called after an authenticated POST /v1/shutdown; only the standalone service passes it. */
+  readonly onShutdown?: () => void;
+}
+
+export async function serve(configPath: string, options: ServeOptions = {}): Promise<Server> {
   const config = readConfig(configPath);
   const workspace = config.workspace;
   let projectPaths = { at: 0, map: new Map<string, string>() };
@@ -81,7 +86,12 @@ export async function serve(configPath: string): Promise<Server> {
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
 
   const routes: [string, RegExp, Handler][] = [
-    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION })],
+    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION, pid: process.pid })],
+    ['POST', /^shutdown$/, async () => {
+      if (!options.onShutdown) throw new HttpError(404, 'Unknown API endpoint');
+      setTimeout(options.onShutdown, 100).unref();
+      return { stopping: true };
+    }],
 
     // Workspace, image and settings
     ['GET', /^overview$/, async () => {

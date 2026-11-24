@@ -490,3 +490,82 @@ button.flow-row:hover { background: var(--hover); color: var(--text-2); }
 .welcome-actions { display: grid; gap: 10px; }
 .welcome-actions .btn { height: 42px; font-size: 14px; border-radius: 12px; }
 .welcome-remote { text-align: left; margin-top: 20px; }
+
+/* ── Polish pass ────────────────────────────────────── */
+
+/* Keyboard focus is always visible; pointer focus is not outlined. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
+
+/* Sidebar header: brand on the left, new conversation on the right. */
+.workspace-head .new-chat {
+  width: 32px; height: 32px; border-radius: 9px; border: 0; display: grid; place-items: center;
+  background: var(--fill); color: var(--text-2); transition: background 0.12s, color 0.12s;
+}
+.workspace-head .new-chat:hover { background: var(--active); color: var(--text); }
+
+/* One compact attention row instead of a tall card. */
+.attention-row {
+  display: flex; align-items: center; gap: 9px; width: calc(100% - 20px); margin: 0 10px 8px; padding: 9px 11px;
+  border: 0; border-radius: 10px; background: var(--amber-soft); color: var(--text); text-align: left; font-size: 13px;
+}
+.attention-row:hover { filter: brightness(0.98); }
+.attention-row strong { font-weight: 620; }
+.attention-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+
+/* Top bar gains a hairline once the transcript scrolls under it. */
+.topbar { transition: box-shadow 0.15s, background 0.15s; position: relative; z-index: 2; }
+.topbar.scrolled { box-shadow: 0 1px 0 var(--line); background: color-mix(in srgb, var(--canvas) 86%, transparent); backdrop-filter: blur(10px); }
+.topbar .container-warn { color: var(--amber); display: inline-flex; align-items: center; gap: 5px; font-weight: 560; }
+
+/* Running status: readable accent text with a gentle highlight sweep. */
+.shimmer {
+  color: transparent; background-clip: text; -webkit-background-clip: text;
+  background-image: linear-gradient(100deg, var(--accent) 0%, var(--accent) 40%, color-mix(in srgb, var(--accent) 35%, white) 50%, var(--accent) 60%, var(--accent) 100%);
+  background-size: 250% 100%; animation: sweep 1.8s linear infinite; font-weight: 560;
+}
+.shimmer::after { content: none; }
+@keyframes sweep { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+@media (prefers-reduced-motion: reduce) { .shimmer { animation: none; color: var(--accent); background: none; } }
+
+/* Composer: lighter chrome, a model chip, a clear stop button. */
+.composer-bar select {
+  appearance: none; -webkit-appearance: none; background-color: var(--fill); border-radius: 999px; height: 28px; padding: 0 26px 0 12px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+  background-position: right 13px center, right 9px center; background-size: 4px 4px; background-repeat: no-repeat; color: var(--text-2);
+}
+.composer-bar .hint { margin-left: auto; }
+.composer-bar .send { margin-left: 0; }
+.send.stop { background: var(--ink); color: var(--ink-text); box-shadow: none; }
+
+/* Approval details: command line, diff, file preview. */
+.approval .detail { margin: 8px 16px 0; }
+.approval .detail .file { display: flex; align-items: center; gap: 6px; font: 12px var(--mono); color: var(--text-2); margin-bottom: 6px; }
+.approval .command { margin: 0; padding: 10px 12px; border-radius: 10px; background: #0f1115; color: #e3e7ef; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+.approval .command::before { content: '$ '; color: #7d8596; }
+.diff { border-radius: 10px; overflow: auto; max-height: 260px; font: 12px/1.55 var(--mono); box-shadow: inset 0 0 0 1px var(--line); }
+.diff div { padding: 0 12px; white-space: pre-wrap; word-break: break-word; }
+.diff .del { background: var(--red-soft); color: var(--red); }
+.diff .add { background: var(--green-soft); color: var(--green); }
+.diff .del::before { content: '− '; opacity: 0.7; }
+.diff .add::before { content: '+ '; opacity: 0.7; }
+.approval details.raw { margin: 6px 16px 0; font-size: 12px; color: var(--text-3); }
+.approval details.raw summary { cursor: default; }
+.approval details.raw pre { margin: 6px 0 0; }
+
+/* Rows: never wrap names; status sits on the avatar. */
+.row-title .name, .row-sub span { white-space: nowrap; }
+.row-sub { flex-wrap: nowrap; overflow: hidden; }
+.row-avatar { position: relative; }
+.row-avatar .status { position: absolute; right: -3px; bottom: -3px; width: 12px; height: 12px; border-radius: 50%; border: 2.5px solid var(--surface); background: var(--text-3); }
+.row-avatar .status.running { background: var(--green); }
+.row-avatar .status.busy { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.badge.amber { background: var(--amber-soft); color: var(--amber); }
+.btn.soft { background: var(--accent-soft); color: var(--accent); box-shadow: none; }
+.btn.soft:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+@media (max-width: 1100px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-inner { padding-left: 28px; padding-right: 28px; }
+}

@@ -80,11 +80,21 @@
       const [overview, projects, accounts, conversations] = await Promise.all(['overview', 'projects', 'accounts', 'conversations'].map(path => CF.get(path)));
       Object.assign(CF.state, { overview, projects, accounts, conversations, connected: true });
     } catch (error) {
+      const profile = CF.state.profiles.find(item => item.id === id);
+      const [summary, ...details] = CF.errorText(error).split('\n\n');
+      const retry = h('button.btn.primary', { on: { click: () => connect(id) } }, '重试');
+      const restart = profile?.kind === 'local' && CF.transport.restartLocal ? h('button.btn', { on: { click: () => CF.busy(restart, async () => {
+        await CF.transport.restartLocal(id);
+        await connect(id);
+      }) } }, CF.icon('restart', 14), '重启本机后端') : null;
       main.replaceChildren(h('div.welcome', h('div.welcome-card',
-        h('div.brand-mark', '!'), h('h1', '连不上后端'), h('p', CF.errorText(error)),
-        h('div.welcome-actions',
-          h('button.btn.primary', { on: { click: () => connect(id) } }, '重试'),
-          h('button.btn', { on: { click: () => CF.app.go({ name: 'settings' }) } }, '管理连接')))));
+        h('div.brand-mark', { style: 'background:var(--amber-soft);color:var(--amber)' }, '!'),
+        h('h1', '连不上「' + (profile?.name || '后端') + '」'),
+        h('p', summary),
+        details.length ? h('pre.log', { style: 'height:auto;max-height:180px;text-align:left;margin:-10px 0 20px' }, details.join('\n\n')) : null,
+        h('div.welcome-actions', retry, restart,
+          h('button.btn.ghost', { on: { click: () => CF.app.go({ name: 'settings' }) } }, '管理连接')),
+        profile?.kind === 'local' ? h('p', { style: 'margin:16px 0 0;font-size:12px;color:var(--text-3)' }, '本机后端的日志在 App 数据目录的 backend.log。') : null)));
       renderSidebar();
       return;
     }
@@ -185,10 +195,22 @@
     const nav = (name, icon, label, count) => h('button.nav-item' + (view.name === name ? '.selected' : ''), { on: { click: () => CF.app.go({ name }) } },
       CF.icon(icon, 16), h('span.label', label), count === undefined ? null : h('span.count', String(count)));
     const waiting = conversations.filter(item => item.attention);
-    const attention = waiting.length ? h('div.attention',
-      h('div.attention-head', h('span.attention-icon', CF.icon('shield', 15)), h('div', h('strong', waiting.length + ' 个等你确认'), h('small', '对话暂停，等你允许或回答'))),
-      waiting.slice(0, 3).map(item => h('button', { on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) } },
-        h('span.dot.waiting'), h('span', item.name)))) : null;
+    const attention = waiting.length ? h('button.attention-row', {
+      title: waiting.map(item => item.name).join('\n'),
+      on: { click: () => {
+        // Cycle through waiting conversations.
+        const index = waiting.findIndex(item => item.id === view.conversationId);
+        const next = waiting[(index + 1) % waiting.length];
+        CF.app.go({ name: 'chat', conversationId: next.id, projectId: next.projectId });
+      } },
+    }, h('span.dot.waiting'), h('strong', waiting.length + ' 个等你确认'), h('span.name', waiting[0].name), CF.icon('chevron', 12)) : null;
+    const newChat = h('button.new-chat', { title: '新对话', 'aria-label': '新对话', on: { click: () => {
+      const chatProjects = projects.filter(item => item.chat && item.active);
+      const current = chatProjects.find(item => item.id === view.projectId);
+      if (current || chatProjects.length === 1) { CF.app.go({ name: 'chat', projectId: (current ?? chatProjects[0]).id }); return; }
+      if (!chatProjects.length) { CF.app.go({ name: 'projects' }); CF.toast('先新建一个项目'); return; }
+      CF.menu(newChat, chatProjects.map(item => ({ label: item.name + ' · ' + item.typeLabel, icon: 'folder', run: () => CF.app.go({ name: 'chat', projectId: item.id }) })));
+    } } }, CF.icon('compose', 16));
     const backendButton = h('button.backend-row', { title: '切换后端', on: { click: () => CF.menu(backendButton, [
       ...profiles.map(profile => ({ label: (profile.id === backendId ? '✓ ' : '　') + profile.name, run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
       '-',
@@ -201,15 +223,14 @@
     const typing = document.activeElement === search ? [search.selectionStart, search.selectionEnd] : null;
     sidebar.replaceChildren(
       h('div.sidebar-top',
-        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet'),
-          h('small', h('span.dot' + (connected ? '.running' : '')), connected ? '已连接 · ' + (CF.state.overview?.workspace || '').split(/[\\/]/).filter(Boolean).pop() : '未连接'))),
+        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet')), newChat),
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),
+      attention,
       h('div.sidebar-scroll',
         h('div.sidebar-label', '工作台'),
-        nav('projects', 'folder', '项目', projects.length), nav('accounts', 'user', '账号', accounts.length), nav('settings', 'gear', '设置'),
+        nav('projects', 'folder', '项目', connected ? projects.length : undefined), nav('accounts', 'user', '账号', connected ? accounts.length : undefined), nav('settings', 'gear', '设置'),
         h('div.sidebar-label', '对话'),
         conversationsHost),
-      attention,
       h('div.sidebar-foot', backendButton),
     );
     if (typing) { search.focus(); search.setSelectionRange(typing[0], typing[1]); }

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('coderFleet', {
   addRemote: input => ipcRenderer.invoke('backends:addRemote', input),
   remove: id => ipcRenderer.invoke('backends:remove', id),
   connect: id => ipcRenderer.invoke('backends:connect', id),
+  restartLocal: id => ipcRenderer.invoke('backends:restartLocal', id),
   request: (id, method, path, body) => ipcRenderer.invoke('backends:request', { id, method, path, body }),
   setupLocal: () => ipcRenderer.invoke('backends:setupLocal'),
   pickDirectory: () => ipcRenderer.invoke('dialog:directory'),

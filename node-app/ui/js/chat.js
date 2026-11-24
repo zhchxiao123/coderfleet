@@ -32,9 +32,10 @@
 
   function toolRow(tool) {
     const state = TOOL_STATES[tool.status] || TOOL_STATES.running;
+    const detail = CF.projectPath(tool.detail);
     return h('div.flow-row.tool-' + state.className, { title: tool.detail ? tool.title + ' · ' + tool.detail : tool.title },
       toolGlyph(tool.status), h('span.label', tool.title),
-      tool.detail ? h('span.detail', tool.detail) : null,
+      detail ? h('span.detail', detail) : null,
       tool.status === 'completed' ? null : h('span.tool-state', state.label));
   }
 
@@ -57,6 +58,30 @@
     flow.append(summary);
     if (open) flow.append(h('div.flow-children', tools.map(toolRow)));
     return flow;
+  }
+
+  /** Reads a tool input the way a person checks it: the command, the edit as a diff, or the file written. */
+  function describeApproval(permission) {
+    let input = {};
+    try { input = JSON.parse(permission.details || '{}'); } catch { /* not JSON */ }
+    const raw = input.rawInput && typeof input.rawInput === 'object' ? input.rawInput : input;
+    const file = raw.file_path || raw.filePath || raw.path || raw.notebook_path;
+    const fileLine = file ? h('div.file', CF.icon('folder', 12), CF.projectPath(file)) : null;
+    const rawDetails = permission.details && permission.details !== '{}'
+      ? h('details.raw', h('summary', '查看原始参数'), h('pre', permission.details)) : null;
+    const command = Array.isArray(raw.command) ? raw.command.join(' ') : raw.command || raw.cmd;
+    if (typeof command === 'string' && command) {
+      return { summary: '要运行一条命令', body: [h('div.detail', h('pre.command', command)), raw.description ? h('div.detail', h('small', { style: 'color:var(--text-3)' }, raw.description)) : null] };
+    }
+    if (typeof raw.old_string === 'string' || typeof raw.new_string === 'string') {
+      const lines = (text, kind) => String(text || '').split('\n').map(line => h('div.' + kind, line || ' '));
+      return { summary: '要修改文件', body: [h('div.detail', fileLine, h('div.diff', lines(raw.old_string, 'del'), lines(raw.new_string, 'add')))] };
+    }
+    if (typeof raw.content === 'string' && file) {
+      const preview = raw.content.split('\n').slice(0, 14).join('\n') + (raw.content.split('\n').length > 14 ? '\n…' : '');
+      return { summary: '要写入文件', body: [h('div.detail', fileLine, h('div.diff', preview.split('\n').map(line => h('div.add', line || ' '))))] };
+    }
+    return { summary: file ? CF.projectPath(file) : '需要你确认这一步操作', body: [rawDetails] };
   }
 
   function approvalCard(turn) {
@@ -96,9 +121,10 @@
     }
     const allow = h('button.btn.primary.small', { disabled: !permission.allow, on: { click: () => decide(allow, { decision: 'allow' }) } }, CF.icon('check', 13), '允许');
     const deny = h('button.btn.small', { on: { click: () => decide(deny, { decision: 'deny' }) } }, '拒绝');
+    const { summary, body } = describeApproval(permission);
     return h('div.approval',
-      h('div.approval-head', h('span.glyph', CF.icon('shield', 15)), h('div', h('strong', permission.title), h('small', '需要你确认这一步操作'))),
-      permission.details && permission.details !== '{}' ? h('pre', permission.details) : null,
+      h('div.approval-head', h('span.glyph', CF.icon('shield', 15)), h('div', h('strong', permission.title), h('small', summary))),
+      body,
       h('div.approval-actions', deny, allow));
   }
 
@@ -167,7 +193,7 @@
       const inner = h('div.transcript-inner');
       const transcript = h('div.transcript', inner);
       const notice = h('div.chat-notice');
-      const textarea = h('textarea', { rows: 1, placeholder: '描述你想做的事，Enter 发送，Shift+Enter 换行', 'aria-label': '消息' });
+      const textarea = h('textarea', { rows: 1, placeholder: '描述你想做的事', 'aria-label': '消息' });
       const modelSelect = h('select', { 'aria-label': '模型', hidden: true });
       const sendButton = h('button.send', { title: '发送' }, CF.icon('send', 16));
       const title = h('div.title');
@@ -196,8 +222,10 @@
         meta.replaceChildren(
           info ? h('span', info.name) : null,
           info ? CF.typeBadge(info.type, info.typeLabel) : null,
-          info ? h('span', { style: 'display:inline-flex;align-items:center;gap:5px' }, CF.stateDot(info.state), CF.stateText(info.state)) : null,
+          // The container only needs mentioning when it is not running.
+          info && info.state !== 'running' ? h('span.container-warn', h('span.dot.waiting'), '容器' + CF.stateText(info.state)) : null,
         );
+        textarea.placeholder = info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
         const record = CF.state.conversations.find(item => item.id === current.conversationId);
@@ -300,11 +328,13 @@
         { label: '查看项目', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
       ].filter(Boolean)) } }, CF.icon('more', 16));
 
+      const topbar = h('div.topbar', title, meta, h('div.spacer'), more);
+      transcript.addEventListener('scroll', () => topbar.classList.toggle('scrolled', transcript.scrollTop > 4), { passive: true });
       container.replaceChildren(
-        h('div.topbar', title, meta, h('div.spacer'), more),
+        topbar,
         h('div.chat', current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, h('div.composer', textarea,
-            h('div.composer-bar', modelSelect, h('span.hint', ''), sendButton)))),
+            h('div.composer-bar', modelSelect, h('span.hint', 'Enter 发送 · Shift+Enter 换行'), sendButton)))),
       );
       renderHeader();
       autosize();

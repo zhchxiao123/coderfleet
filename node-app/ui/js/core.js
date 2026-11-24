@@ -3,6 +3,11 @@
 // and sheets. Everything hangs off window.CF; the scripts load in order.
 (() => {
   const CF = window.CF = {};
+  // replaceChildren/append turn null into the text "null"; views pass optional parts, so skip them.
+  for (const method of ['replaceChildren', 'append']) {
+    const original = Element.prototype[method];
+    Element.prototype[method] = function (...nodes) { return original.apply(this, nodes.filter(node => node !== null && node !== undefined && node !== false)); };
+  }
   const transport = window.coderFleet;
   CF.transport = transport;
   CF.state = {
@@ -62,6 +67,7 @@
     question: '<circle cx="8" cy="8" r="5.5"/><path d="M6.4 6.3a1.7 1.7 0 1 1 2.3 1.6c-.5.2-.7.6-.7 1.1M8 11h0"/>',
     block: '<circle cx="8" cy="8" r="5"/><path d="m4.5 11.5 7-7"/>',
     dash: '<path d="M4.5 8h7"/>',
+    compose: '<path d="M8.5 3H4.5A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13h7a1.5 1.5 0 0 0 1.5-1.5V7.5"/><path d="m7 9 .5-2L12 2.5a1.4 1.4 0 0 1 2 2L9.5 9 7.5 9.5z"/>',
     search: '<circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/>',
     spark: '<path d="M8 2.5v3M8 10.5v3M2.5 8h3M10.5 8h3M4.2 4.2l1.6 1.6M10.2 10.2l1.6 1.6M11.8 4.2l-1.6 1.6M5.8 10.2l-1.6 1.6"/>',
     link: '<path d="M6.5 9.5 9.5 6.5M7 4.5 8.2 3.3a2.5 2.5 0 0 1 3.5 3.5L10.5 8M9 11.5l-1.2 1.2a2.5 2.5 0 0 1-3.5-3.5L5.5 8"/>',
@@ -193,6 +199,14 @@
       return current;
     }
   };
+
+  /** A path short enough for a row: the last segments, with the full path as tooltip text. */
+  CF.shortPath = path => {
+    const parts = String(path || '').split('/').filter(Boolean);
+    return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : String(path || '');
+  };
+  /** Container paths read relative to the project. */
+  CF.projectPath = path => String(path || '').replace(/^\/workspace\//, '');
 
   CF.typeBadge = (type, label) => h('span.badge.type-' + type, label || type);
   CF.stateDot = state => h('span.dot' + (state === 'running' ? '.running' : state === 'restarting' ? '.busy' : ''));

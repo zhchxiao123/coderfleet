@@ -75,7 +75,9 @@
           if (operation) void track(project.id, label, operation);
         };
         const menuButton = h('button.btn.ghost.icon.small', { title: '更多', on: { click: () => CF.menu(menuButton, [
-          { label: '重启容器', icon: 'restart', run: () => act('restart', '重启')({ currentTarget: menuButton }) },
+          running ? { label: '停止容器', icon: 'stop', run: () => act('stop', '停止')({ currentTarget: menuButton }) } : null,
+          running ? { label: '重启容器', icon: 'restart', run: () => act('restart', '重启')({ currentTarget: menuButton }) } : null,
+          running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
           { label: project.active ? '停用项目' : '启用项目', run: () => CF.busy(null, async () => {
             await CF.api('POST', 'projects/' + project.id + '/' + (project.active ? 'disable' : 'enable'));
             await CF.app.refreshProjects();
@@ -86,21 +88,23 @@
             const operation = await CF.busy(null, () => CF.api('DELETE', 'projects/' + project.id));
             if (operation) void track(project.id, '删除', operation);
           } },
-        ]) } }, CF.icon('more', 15));
+        ].filter(Boolean)) } }, CF.icon('more', 15));
+        // One contextual action: talk when the container runs, otherwise start it.
+        const primary = busy ? h('button.btn.small', { disabled: true }, h('span.spinner'), busy + '中')
+          : running && project.chat ? h('button.btn.small', { on: { click: () => CF.app.go({ name: 'chat', projectId: project.id }) } }, CF.icon('chat', 13), '对话')
+            : running ? null
+              : h('button.btn.small.soft', { disabled: !project.active, on: { click: act('start', '启动') } }, CF.icon('play', 11), '启动');
         return h('li.row',
           h('div.row-lead',
-            h('span.row-avatar.' + project.type, project.name.slice(0, 1).toUpperCase()),
+            h('span.row-avatar.' + project.type, project.name.slice(0, 1).toUpperCase(),
+              h('span.status' + (busy ? '.busy' : running ? '.running' : ''), { title: CF.stateText(project.state) })),
             h('div.row-main',
               h('div.row-title', h('span.name', project.name), CF.typeBadge(project.type, project.typeLabel), project.active ? null : h('span.badge', '已停用')),
-              h('div.row-sub', h('span', project.account), h('span.sep'), h('span.path', { title: project.path }, project.path)))),
+              h('div.row-sub', h('span', busy ? busy + '中…' : CF.stateText(project.state)), h('span.sep'), h('span', project.account),
+                h('span.sep'), h('span.path', { title: project.path }, CF.shortPath(project.path))))),
           h('div.row-actions',
-            h('span.state-pill' + (running && !busy ? '.running' : ''), busy ? h('span.spinner') : CF.stateDot(project.state), busy ? busy + '中' : CF.stateText(project.state)),
-            project.chat ? h('button.btn.small', { on: { click: () => CF.app.go({ name: 'chat', projectId: project.id }) } }, CF.icon('chat', 13), '对话') : null,
-            running ? h('button.btn.small.icon', { title: '终端', on: { click: () => CF.projects.terminal(project.id) } }, CF.icon('terminal', 14)) : null,
-            running
-              ? h('button.btn.small', { disabled: Boolean(busy), on: { click: act('stop', '停止') } }, CF.icon('stop', 12), '停止')
-              : h('button.btn.small', { disabled: Boolean(busy) || !project.active, on: { click: act('start', '启动') } }, CF.icon('play', 12), '启动'),
-            menuButton));
+            running ? h('button.btn.small.icon', { title: '终端', 'aria-label': '终端', on: { click: () => CF.projects.terminal(project.id) } }, CF.icon('terminal', 14)) : null,
+            primary, menuButton));
       };
 
       const running = projects.filter(item => item.state === 'running').length;
@@ -116,7 +120,7 @@
         banners,
         h('div.stats',
           stat('box', 'green', '运行中', running, projects.length, '个项目容器'),
-          stat('user', '', '账号', CF.state.accounts.length, undefined, CF.state.accounts.filter(item => item.auth === 'env' || item.hasLogin).length + ' 个可用'),
+          stat('user', '', '账号', CF.state.accounts.length, undefined, CF.state.accounts.filter(item => item.auth === 'env' || item.hasLogin).length + ' 个已登录或已配置密钥'),
           stat('chat', 'neutral', '进行中', active, undefined, '个对话'),
           stat('shield', 'amber', '等你确认', waiting, undefined, waiting ? '去对话里处理' : '没有待办')),
         projects.length
