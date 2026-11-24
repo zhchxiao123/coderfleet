@@ -40,20 +40,26 @@ enum ToolStatus { running, waiting, completed, failed, denied, interrupted, unkn
 ToolStatus _toolStatus(String value) => ToolStatus.values.firstWhere((item) => item.name == value, orElse: () => ToolStatus.running);
 
 class Tool {
-  Tool({required this.id, required this.title, required this.status, required this.detail, required this.hasDetail});
+  Tool({required this.id, required this.title, required this.status, required this.detail, required this.hasDetail, this.parent = ''});
   factory Tool.fromJson(Map<String, dynamic> json) => Tool(
-        id: _text(json['id']), title: _text(json['title']), status: _toolStatus(_text(json['status'])), detail: _text(json['detail']), hasDetail: json['hasDetail'] == true);
-  final String id, title, detail;
+        id: _text(json['id']), title: _text(json['title']), status: _toolStatus(_text(json['status'])), detail: _text(json['detail']), hasDetail: json['hasDetail'] == true,
+        parent: _text(json['parent']));
+  /// `parent`: the Agent call this step ran inside (empty for the turn's own steps).
+  final String id, title, detail, parent;
   final ToolStatus status;
   final bool hasDetail;
   bool get settled => status != ToolStatus.running && status != ToolStatus.waiting;
 }
 
 class ToolDetail {
-  ToolDetail({required this.input, required this.output});
-  factory ToolDetail.fromJson(Map<String, dynamic> json) => ToolDetail(input: _map(json['input']), output: json['output'] is String ? json['output'] as String : (json['output'] == null ? '' : json['output'].toString()));
+  ToolDetail({required this.input, required this.output, this.images = const []});
+  factory ToolDetail.fromJson(Map<String, dynamic> json) => ToolDetail(
+        input: _map(json['input']), output: json['output'] is String ? json['output'] as String : (json['output'] == null ? '' : json['output'].toString()),
+        images: _maps(json['images']).map((item) => _text(item['data'])).where((data) => data.isNotEmpty).toList());
   final Map<String, dynamic> input;
   final String output;
+  /// Images the tool returned (e.g. Read of a picture), base64.
+  final List<String> images;
 }
 
 class QuestionOption {
@@ -104,7 +110,7 @@ class Turn {
   Turn({
     required this.id, required this.prompt, required this.images, required this.status, required this.answer, required this.tools,
     required this.blocks, required this.permission, required this.error, required this.capabilities, required this.controlReady,
-    required this.inherited, required this.auto,
+    required this.inherited, required this.auto, this.type = '', this.sessionId = '', this.conversationId = '', this.stopping = false, this.createdAt, this.finishedAt,
   });
   factory Turn.fromJson(Map<String, dynamic> json) {
     final tools = _maps(json['tools']).map(Tool.fromJson).toList();
@@ -117,24 +123,35 @@ class Turn {
               'user' => UserBlock(_text(item['text']), _strings(item['images'])),
               _ => null,
             }).whereType<Block>().toList()
-        : <Block>[...tools.map((tool) => ToolBlock(tool.id)), if (answer.isNotEmpty) TextBlock(answer)];
+        : <Block>[...tools.where((tool) => tool.parent.isEmpty).map((tool) => ToolBlock(tool.id)), if (answer.isNotEmpty) TextBlock(answer)];
     return Turn(
       id: _text(json['id']), prompt: _text(json['prompt']), images: _strings(json['images']), status: _text(json['status']), answer: answer,
       tools: tools, blocks: blocks, permission: json['permission'] is Map ? Permission.fromJson(_map(json['permission'])) : null,
       error: _text(json['error']), capabilities: _strings(json['capabilities']), controlReady: json['controlReady'] == true,
-      inherited: json['inherited'] == true, auto: json['auto'] == true,
+      inherited: json['inherited'] == true, auto: json['auto'] == true, type: _text(json['type']), sessionId: _text(json['sessionId']),
+      conversationId: _text(json['conversationId']), stopping: json['stopping'] == true, createdAt: DateTime.tryParse(_text(json['createdAt'])), finishedAt: DateTime.tryParse(_text(json['finishedAt'])),
     );
   }
-  final String id, prompt, status, answer, error;
+  final String id, prompt, status, answer, error, type, sessionId, conversationId;
+  final DateTime? createdAt, finishedAt;
   final List<String> images, capabilities;
   final List<Tool> tools;
   final List<Block> blocks;
   final Permission? permission;
   final bool controlReady, inherited, auto;
+  /// Cancel was asked for and the agent has not stopped yet.
+  final bool stopping;
   bool get active => status == 'starting' || status == 'running';
   bool get takesMessages => controlReady && capabilities.contains('message');
   Tool? tool(String id) => tools.where((tool) => tool.id == id).firstOrNull;
+  List<Tool> children(String id) => tools.where((tool) => tool.parent == id).toList();
+  /// A Claude answer that finished can be forked from (the session continues in a new conversation).
+  bool get forkable => type == 'claude' && status == 'done' && !inherited && sessionId.isNotEmpty;
 }
+
+/// Project uploads: images get a preview, other files show as a chip.
+bool isImageUpload(String path) => RegExp(r'\.(png|jpe?g|webp|gif)$', caseSensitive: false).hasMatch(path);
+String uploadName(String path) => path.split('/').last.replaceFirst(RegExp(r'^[a-f0-9]{16}[-.]'), '');
 
 class FollowUp {
   FollowUp({required this.id, required this.text, required this.images});

@@ -5,6 +5,9 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+/// A 1×1 PNG, for a tool that returned an image.
+const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
 class FakeBackend {
   FakeBackend({this.token = 'cfd_test', this.reachable = const {'http://192.168.1.20:8877'}});
   final String token;
@@ -21,6 +24,8 @@ class FakeBackend {
   final turns = <String, List<Map<String, dynamic>>>{};
   final followUps = <String, List<Map<String, dynamic>>>{};
   final uploads = <String, String>{};
+  /// Whether a translation model is configured (GET system-llm).
+  bool translation = true;
   /// Turn ID → remaining polls before it finishes.
   final pending = <String, int>{};
 
@@ -143,7 +148,7 @@ class FakeBackend {
         _touch();
         return _json({'removed': true});
       case ('POST', ['projects', _, 'uploads']):
-        final path = '/workspace/.coderfleet-uploads/${_id()}a1b2c3d4.png';
+        final path = '/workspace/.coderfleet-uploads/${_id()}a1b2-${body['name']}';
         uploads[path] = body['data'] as String;
         return _json({'path': path});
       case ('GET', ['projects', _, 'uploads', final file]):
@@ -152,7 +157,18 @@ class FakeBackend {
       case ('GET', ['turns', final turnId, 'tools', final toolId]):
         final turn = turns.values.expand((list) => list).firstWhere((item) => item['id'] == turnId);
         final tool = (turn['tools'] as List).cast<Map<String, dynamic>>().firstWhere((item) => item['id'] == Uri.decodeComponent(toolId));
-        return _json({'id': tool['id'], 'title': tool['title'], 'status': tool['status'], 'input': tool['input'] ?? {}, 'output': tool['output'] ?? ''});
+        return _json({'id': tool['id'], 'title': tool['title'], 'status': tool['status'], 'input': tool['input'] ?? {}, 'output': tool['output'] ?? '', 'images': tool['images'] ?? []});
+      case ('GET', ['system-llm']):
+        return _json({'configured': translation, 'provider': 'openai', 'model': 'demo'});
+      case ('POST', ['translate']):
+        return _json({'translated': '译：${body['text']}', 'cached': false});
+      case ('POST', ['conversations', final id, 'fork']):
+        final source = conversations.firstWhere((item) => item['id'] == id);
+        final child = conversation(source['projectId'] as String, '${source['name']}（分叉）');
+        final list = turns[id]!;
+        final upTo = list.indexWhere((turn) => turn['id'] == body['turnId']);
+        turns[child['id'] as String] = [for (final turn in list.take(upTo + 1)) {...turn, 'inherited': true}];
+        return _json(child);
       case ('POST', ['turns', final turnId, 'permission']):
         final turn = turns.values.expand((list) => list).firstWhere((item) => item['id'] == turnId);
         final allowed = body['decision'] == 'allow' || body['answers'] != null;
@@ -180,13 +196,19 @@ class FakeBackend {
     final now = DateTime.now();
     final fix = conversation('coderfleet', '请帮我梳理一下服务启动流程', attention: true, updatedAt: now.subtract(const Duration(minutes: 3)));
     addTurn(fix['id'] as String, {
-      'prompt': '请帮我梳理一下服务启动流程',
+      'prompt': '请帮我梳理一下服务启动流程', 'type': 'claude', 'sessionId': 'session-1', 'conversationId': fix['id'],
+      'images': ['/workspace/.coderfleet-uploads/0123456789abcdef-启动日志.txt'],
+      'createdAt': now.subtract(const Duration(minutes: 5)).toUtc().toIso8601String(), 'finishedAt': now.subtract(const Duration(minutes: 4)).toUtc().toIso8601String(),
       'tools': [
-        {'id': 'r1', 'title': 'Read', 'status': 'completed', 'detail': 'src/server.ts', 'hasDetail': true, 'input': {'file_path': '/workspace/src/server.ts'}, 'output': 'export async function serve(configPath: string) {\n  const config = readConfig(configPath);\n  …'},
+        {'id': 'r1', 'title': 'Read', 'status': 'completed', 'detail': 'docs/arch.png', 'hasDetail': true, 'input': {'file_path': '/workspace/docs/arch.png'}, 'output': '',
+          'images': [{'mime': 'image/png', 'data': tinyPng}]},
         {'id': 'r2', 'title': 'Grep', 'status': 'completed', 'detail': 'listen', 'hasDetail': true, 'input': {'pattern': 'listen'}, 'output': 'src/server.ts:602: server.listen(config.port, config.host)'},
+        {'id': 'a1', 'title': 'Agent', 'status': 'completed', 'detail': '查找配置读取的位置', 'hasDetail': true},
+        {'id': 'a1-1', 'title': 'Glob', 'status': 'completed', 'detail': 'src/**/*.ts', 'parent': 'a1'},
+        {'id': 'a1-2', 'title': 'Read', 'status': 'completed', 'detail': 'src/conf.ts', 'parent': 'a1'},
       ],
       'blocks': [
-        {'kind': 'tool', 'id': 'r1'}, {'kind': 'tool', 'id': 'r2'},
+        {'kind': 'tool', 'id': 'r1'}, {'kind': 'tool', 'id': 'r2'}, {'kind': 'tool', 'id': 'a1'},
         {'kind': 'text', 'text': '## 服务启动流程\n\n入口在 `src/server.ts`，启动时依次做三件事：\n\n1. 读取 `config.json`，校验端口和令牌；\n2. 载入会话和任务记录；\n3. 监听 **127.0.0.1**，所有请求都要带令牌。\n\n```ts\nconst server = await serve(configPath);\n```'},
       ],
       'answer': '## 服务启动流程',

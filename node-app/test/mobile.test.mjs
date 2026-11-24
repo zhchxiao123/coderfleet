@@ -104,6 +104,9 @@ test('phone addresses: https anywhere, http only to private and mesh hosts', () 
   assert.equal(privateHost('100.128.0.1'), false);
   assert.equal(new URL(pairingLink('本机', 'cfd_x', [{ url: 'https://a.com', kind: 'public', label: '' }])).searchParams.get('name'), '本机');
   assert.equal(deviceAllowed('GET', 'conversations/abc/changes'), true);
+  assert.equal(deviceAllowed('POST', 'translate'), true);
+  assert.equal(deviceAllowed('GET', 'system-llm'), true);
+  assert.equal(deviceAllowed('PUT', 'settings'), false);
   assert.equal(deviceAllowed('POST', 'projects/app/start'), false);
   assert.equal(deviceAllowed('GET', 'terminals/abc'), false);
 });

@@ -1,11 +1,12 @@
-// One turn of a conversation: the user's message (and images), the answer as
-// Markdown interleaved with tool calls, approvals and questions, and status.
+// One turn of a conversation: the user's message (and attachments), the answer
+// as Markdown interleaved with tool calls (an Agent's own steps under it),
+// approvals and questions, status, and time/copy/translate/fork once finished.
 import 'dart:convert';
-import 'dart:typed_data';
 
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../backend.dart';
@@ -22,45 +23,93 @@ class UploadCache {
   void seed(String path, Uint8List bytes) => _cache[path] = Future.value(bytes);
 }
 
-class TurnView extends StatelessWidget {
-  const TurnView({super.key, required this.turn, required this.client, required this.images, required this.onChanged});
+class TurnView extends StatefulWidget {
+  const TurnView({super.key, required this.turn, required this.client, required this.images, required this.onChanged, this.canTranslate = false, this.onFork});
   final Turn turn;
   final BackendClient client;
   final UploadCache images;
   final VoidCallback onChanged;
+  final bool canTranslate;
+  /// Opens the conversation a fork created.
+  final void Function(Conversation created)? onFork;
+  @override
+  State<TurnView> createState() => _TurnViewState();
+}
+
+class _TurnViewState extends State<TurnView> {
+  /// Translated text per answer block (by its text), and whether the translation is showing.
+  final Map<String, String> translations = {};
+  bool showing = false, forking = false;
+  ({int done, int total})? progress;
+  String? translateFailure;
+
+  Turn get turn => widget.turn;
+  List<String> get texts => [for (final block in turn.blocks) if (block is TextBlock && block.text.trim().isNotEmpty) block.text];
+
+  Future<void> _translate() async {
+    if (showing) { setState(() => showing = false); return; }
+    final missing = texts.where((text) => !translations.containsKey(text)).toList();
+    if (missing.isEmpty) { setState(() => showing = true); return; }
+    setState(() { progress = (done: texts.length - missing.length, total: texts.length); translateFailure = null; });
+    try {
+      await Future.wait(missing.map((text) async {
+        final translated = await widget.client.translate(text);
+        translations[text] = translated;
+        if (mounted) setState(() => progress = (done: progress!.done + 1, total: progress!.total));
+      }));
+      if (mounted) setState(() { showing = true; progress = null; });
+    } on BackendError catch (error) {
+      if (mounted) setState(() { progress = null; translateFailure = translateError(error.message); });
+    }
+  }
+
+  Future<void> _fork() async {
+    setState(() => forking = true);
+    try {
+      final created = await widget.client.fork(turn.conversationId, turn.id);
+      if (!mounted) return;
+      showMessage(context, '已从这里分叉：新对话接着这轮回答继续，项目文件是共享的');
+      widget.onFork?.call(created);
+    } on BackendError catch (error) {
+      if (mounted) showMessage(context, error.message);
+    } finally {
+      if (mounted) setState(() => forking = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
-    final children = <Widget>[UserMessage(text: turn.prompt, images: turn.images, cache: images)];
+    final children = <Widget>[UserMessage(text: turn.prompt, images: turn.images, cache: widget.images)];
     final group = <Tool>[];
     void flush() {
       if (group.isEmpty) return;
-      children.add(ToolGroup(tools: [...group], turn: turn, client: client));
+      children.add(ToolGroup(tools: [...group], turn: turn, client: widget.client));
       group.clear();
     }
 
+    if (progress != null || translateFailure != null) children.add(_translationStatus(palette));
     for (final block in turn.blocks) {
       switch (block) {
         case ToolBlock(:final id):
           final tool = turn.tool(id);
-          if (tool != null) group.add(tool);
+          if (tool != null && tool.parent.isEmpty) group.add(tool);
         case TextBlock(:final text):
           flush();
-          if (text.trim().isNotEmpty) children.add(Answer(text: text));
+          if (text.trim().isNotEmpty) children.add(Answer(text: showing ? translations[text] ?? text : text));
         case UserBlock(:final text, images: final paths):
           flush();
-          children.add(UserMessage(text: text, images: paths, cache: images, label: '插话'));
+          children.add(UserMessage(text: text, images: paths, cache: widget.images, label: '插话'));
       }
     }
     flush();
     final permission = turn.permission;
     if (permission != null && turn.active) {
       children.add(permission.questions != null
-          ? QuestionCard(turn: turn, permission: permission, client: client, onDone: onChanged)
-          : ApprovalCard(turn: turn, permission: permission, client: client, onDone: onChanged));
+          ? QuestionCard(turn: turn, permission: permission, client: widget.client, onDone: widget.onChanged)
+          : ApprovalCard(turn: turn, permission: permission, client: widget.client, onDone: widget.onChanged));
     }
-    if (turn.active && permission == null) children.add(const RunningStatus());
+    if (turn.active && permission == null) children.add(RunningStatus(stopping: turn.stopping));
     if (turn.status == 'cancelled') children.add(_Note(icon: Icons.stop_circle_outlined, text: '已中断', color: palette.text3));
     if (turn.status == 'queued') children.add(_Note(icon: Icons.schedule, text: '在原服务里排队，还没有运行', color: palette.text3));
     if (turn.status == 'failed') {
@@ -70,12 +119,95 @@ class TurnView extends StatelessWidget {
         child: Text(turn.error.isEmpty ? '执行失败' : turn.error, style: TextStyle(color: palette.red, fontSize: 13.5)),
       ));
     }
+    if (!turn.active && turn.status != 'queued') children.add(_actions(palette));
     return Opacity(
       opacity: turn.inherited ? 0.6 : 1,
       child: Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 18), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children)),
     );
   }
+
+  Widget _translationStatus(Palette palette) {
+    final failure = translateFailure;
+    final style = TextStyle(color: failure != null ? palette.red : palette.text3, fontSize: 12.5);
+    return Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [
+      if (failure == null) SizedBox(width: 11, height: 11, child: CircularProgressIndicator(strokeWidth: 1.5, color: palette.text3))
+      else Icon(Icons.error_outline, size: 14, color: palette.red),
+      const SizedBox(width: 7),
+      Expanded(child: Text(failure == null
+          ? '正在翻译成中文…${progress!.total > 1 ? ' ${progress!.done}/${progress!.total} 段' : ''}'
+          : '翻译失败：$failure', style: style)),
+      if (failure != null) GestureDetector(onTap: _translate, child: Text('重试', style: style.copyWith(color: palette.accent, fontWeight: FontWeight.w600))),
+    ]));
+  }
+
+  /// Time and actions under a finished answer: copy, translate, fork (Claude).
+  Widget _actions(Palette palette) {
+    final text = texts.join('\n\n');
+    final time = turn.finishedAt ?? turn.createdAt;
+    Widget action(IconData icon, String label, VoidCallback? onTap, {bool on = false}) => IconButton(
+          icon: Icon(icon, size: 17, color: on ? palette.accent : palette.text3), tooltip: label, onPressed: onTap,
+          visualDensity: VisualDensity.compact, constraints: const BoxConstraints(minWidth: 34, minHeight: 34), padding: EdgeInsets.zero);
+    return Padding(padding: const EdgeInsets.only(top: 2), child: Row(children: [
+      if (time != null) Padding(padding: const EdgeInsets.only(right: 4), child: Text(shortTime(time), style: TextStyle(color: palette.text3, fontSize: 12))),
+      if (text.isNotEmpty) action(Icons.copy_rounded, '复制', () async {
+        await Clipboard.setData(ClipboardData(text: showing ? texts.map((item) => translations[item] ?? item).join('\n\n') : text));
+        if (mounted) showMessage(context, '已复制');
+      }),
+      if (text.isNotEmpty && widget.canTranslate) action(Icons.translate, showing ? '显示原文' : '翻译成中文', progress == null ? _translate : null, on: showing),
+      if (turn.forkable && widget.onFork != null) action(Icons.call_split, '从这里分叉', forking ? null : _fork),
+    ]));
+  }
 }
+
+/// A translation failure in plain words; the provider's text only when nothing better fits.
+String translateError(String raw) {
+  final status = int.tryParse(RegExp(r'上游返回 (\d{3})').firstMatch(raw)?.group(1) ?? '') ?? 0;
+  if (status == 401 || status == 403) return 'API Key 无效或没有权限，请在电脑上检查 设置 → 翻译与命名';
+  if (status == 404) return '找不到这个模型或接口地址，请在电脑上检查 设置 → 翻译与命名';
+  if (status == 429) return '模型的调用次数或额度用完了，稍后再试';
+  if (status >= 500) return '模型服务暂时出错（$status），稍后再试';
+  if (raw.contains('超时')) return '连接模型超时，检查网络或出站代理';
+  return raw.length > 160 ? '${raw.substring(0, 160)}…' : raw;
+}
+
+/// Today: 14:05; this year: 11月3日 14:05; older: 2025年11月3日.
+String shortTime(DateTime time, {DateTime? now}) {
+  final local = time.toLocal(), today = (now ?? DateTime.now()).toLocal();
+  String two(int value) => value.toString().padLeft(2, '0');
+  final clock = '${two(local.hour)}:${two(local.minute)}';
+  if (local.year == today.year && local.month == today.month && local.day == today.day) return clock;
+  if (local.year == today.year) return '${local.month}月${local.day}日 $clock';
+  return '${local.year}年${local.month}月${local.day}日';
+}
+
+/// A non-image attachment: an icon with the extension, the name and the size.
+class FileChip extends StatelessWidget {
+  const FileChip({super.key, required this.name, this.size, this.height = 52, this.maxWidth = 240});
+  final String name;
+  final int? size;
+  final double height, maxWidth;
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final extension = RegExp(r'\.([A-Za-z0-9]{1,6})$').firstMatch(name)?.group(1)?.toUpperCase() ?? '';
+    return Container(
+      height: height, constraints: BoxConstraints(maxWidth: maxWidth), padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(color: palette.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: palette.line)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(width: 30, height: 34, alignment: Alignment.center,
+            decoration: BoxDecoration(color: palette.accent.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)),
+            child: Text(extension.isEmpty ? '文件' : extension, maxLines: 1, style: TextStyle(color: palette.accent, fontSize: 9.5, fontWeight: FontWeight.w700))),
+        const SizedBox(width: 8),
+        Flexible(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text, fontSize: 13, fontWeight: FontWeight.w500)),
+          if (size != null) Text(humanSize(size!), style: TextStyle(color: palette.text3, fontSize: 11.5)),
+        ])),
+      ]),
+    );
+  }
+}
+
+String humanSize(int size) => size < 1024 ? '$size B' : size < 1048576 ? '${(size / 1024).toStringAsFixed(size < 10240 ? 1 : 0)} KB' : '${(size / 1048576).toStringAsFixed(1)} MB';
 
 class UserMessage extends StatelessWidget {
   const UserMessage({super.key, required this.text, required this.images, required this.cache, this.label});
@@ -93,7 +225,8 @@ class UserMessage extends StatelessWidget {
         if (label != null) Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(label!, style: TextStyle(color: palette.text3, fontSize: 11.5))),
         if (images.isNotEmpty)
           Padding(padding: const EdgeInsets.only(bottom: 6), child: Wrap(alignment: WrapAlignment.end, spacing: 6, runSpacing: 6, children: [
-            for (final path in images) Thumb(path: path, cache: cache, size: images.length == 1 ? 180 : 96),
+            for (final path in images)
+              isImageUpload(path) ? Thumb(path: path, cache: cache, size: images.where(isImageUpload).length == 1 ? 180 : 96) : FileChip(name: uploadName(path)),
           ])),
         if (text.isNotEmpty)
           ConstrainedBox(
@@ -264,14 +397,21 @@ class _Pill extends StatelessWidget {
       );
 }
 
-class ToolRow extends StatelessWidget {
+class ToolRow extends StatefulWidget {
   const ToolRow({super.key, required this.tool, required this.turn, required this.client});
   final Tool tool;
   final Turn turn;
   final BackendClient client;
   @override
+  State<ToolRow> createState() => _ToolRowState();
+}
+
+class _ToolRowState extends State<ToolRow> {
+  bool unfolded = false;
+  @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final tool = widget.tool;
     final struck = tool.status == ToolStatus.denied || tool.status == ToolStatus.interrupted;
     final pillColor = switch (tool.status) {
       ToolStatus.running => palette.accent,
@@ -279,9 +419,9 @@ class ToolRow extends StatelessWidget {
       ToolStatus.failed => palette.red,
       _ => palette.text3,
     };
-    return InkWell(
+    final row = InkWell(
       borderRadius: BorderRadius.circular(8),
-      onTap: () => showModalBottomSheet<void>(context: context, isScrollControlled: true, builder: (_) => ToolSheet(tool: tool, turn: turn, client: client)),
+      onTap: () => showModalBottomSheet<void>(context: context, isScrollControlled: true, builder: (_) => ToolSheet(tool: tool, turn: widget.turn, client: widget.client)),
       child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(children: [
         ToolGlyph(status: tool.status),
         const SizedBox(width: 8),
@@ -291,6 +431,33 @@ class ToolRow extends StatelessWidget {
         if (tool.status != ToolStatus.completed) Padding(padding: const EdgeInsets.only(left: 6), child: _Pill(text: _toolLabels[tool.status]!, color: pillColor)),
       ])),
     );
+    // An Agent call's own steps, indented under it: the latest few while it runs, folded once it is done.
+    final children = widget.turn.children(tool.id);
+    if (children.isEmpty) return row;
+    final running = !tool.settled;
+    final failed = children.where((item) => item.status == ToolStatus.failed).length;
+    final shown = unfolded ? children : running ? children.sublist(children.length > 5 ? children.length - 5 : 0) : <Tool>[];
+    final label = unfolded ? '收起子步骤'
+        : running ? (children.length > shown.length ? '前面还有 ${children.length - shown.length} 步' : '')
+            : '${children.length} 个子步骤${failed > 0 ? ' · $failed 个失败' : ''}';
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      row,
+      Container(
+        margin: const EdgeInsets.only(left: 7), padding: const EdgeInsets.only(left: 12),
+        decoration: BoxDecoration(border: Border(left: BorderSide(color: palette.line, width: 1.5))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if (label.isNotEmpty) InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () => setState(() => unfolded = !unfolded),
+            child: Padding(padding: const EdgeInsets.symmetric(vertical: 5), child: Row(children: [
+              Text(label, style: TextStyle(color: palette.text3, fontSize: 13)),
+              Icon(unfolded ? Icons.expand_less : Icons.expand_more, size: 16, color: palette.text3),
+            ])),
+          ),
+          for (final item in shown) ToolRow(key: ValueKey(item.id), tool: item, turn: widget.turn, client: widget.client),
+        ]),
+      ),
+    ]);
   }
 }
 
@@ -323,9 +490,10 @@ class ToolSheet extends StatelessWidget {
             if (detail != null) ...[
               if (detail.input.isNotEmpty) ...[_label(palette, '输入'), InputView(input: detail.input), const SizedBox(height: 18)],
               _label(palette, tool.status == ToolStatus.failed ? '错误' : '输出'),
-              detail.output.isEmpty
-                  ? Text(empty, style: TextStyle(color: palette.text3))
-                  : _Box(child: SelectableText(detail.output, style: mono.copyWith(color: tool.status == ToolStatus.failed ? palette.red : palette.text2))),
+              // Images the tool returned (e.g. Read of a picture); tapping opens one full size.
+              for (final data in detail.images) Padding(padding: const EdgeInsets.only(bottom: 8), child: _ToolImage(bytes: base64Decode(data))),
+              if (detail.output.isEmpty && detail.images.isEmpty) Text(empty, style: TextStyle(color: palette.text3)),
+              if (detail.output.isNotEmpty) _Box(child: SelectableText(detail.output, style: mono.copyWith(color: tool.status == ToolStatus.failed ? palette.red : palette.text2))),
             ],
           ]);
         },
@@ -335,6 +503,19 @@ class ToolSheet extends StatelessWidget {
 
   Widget _label(Palette palette, String text) =>
       Padding(padding: const EdgeInsets.only(bottom: 6), child: Text(text, style: TextStyle(color: palette.text3, fontSize: 12, fontWeight: FontWeight.w600, letterSpacing: 0.5)));
+}
+
+class _ToolImage extends StatelessWidget {
+  const _ToolImage({required this.bytes});
+  final Uint8List bytes;
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+        onTap: () => Navigator.of(context).push(MaterialPageRoute(fullscreenDialog: true, builder: (_) => Scaffold(
+              backgroundColor: Colors.black, appBar: AppBar(backgroundColor: Colors.black, foregroundColor: Colors.white),
+              body: Center(child: InteractiveViewer(child: Image.memory(bytes)))))),
+        child: Align(alignment: Alignment.centerLeft, child: ClipRRect(borderRadius: BorderRadius.circular(10),
+            child: ConstrainedBox(constraints: const BoxConstraints(maxHeight: 260), child: Image.memory(bytes, fit: BoxFit.contain)))),
+      );
 }
 
 class _Box extends StatelessWidget {
@@ -547,14 +728,15 @@ class _Card extends StatelessWidget {
 }
 
 class RunningStatus extends StatelessWidget {
-  const RunningStatus({super.key});
+  const RunningStatus({super.key, this.stopping = false});
+  final bool stopping;
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     return Padding(padding: const EdgeInsets.only(top: 4), child: Row(children: [
       SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: palette.accent)),
       const SizedBox(width: 8),
-      Text('正在处理', style: TextStyle(color: palette.accent, fontWeight: FontWeight.w500)),
+      Text(stopping ? '正在停止…' : '正在处理', style: TextStyle(color: palette.accent, fontWeight: FontWeight.w500)),
     ]));
   }
 }

@@ -1,9 +1,10 @@
 // One conversation: turns (newest at the bottom), queued messages, and the
-// composer with images, auto mode, model, send and stop. Sending while a turn
+// composer with attachments (any file), auto mode, model and one send/stop button. Sending while a turn
 // runs goes into it (Claude) or waits as the next turn (other agents).
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
@@ -32,35 +33,45 @@ class AutoModeStore {
   }
 }
 
-/// Picks images; tests replace it.
-typedef ImageSource2 = Future<List<({String name, Uint8List bytes})>> Function(BuildContext context, {required bool camera});
+enum AttachFrom { camera, photos, files }
 
-Future<List<({String name, Uint8List bytes})>> pickImages(BuildContext context, {required bool camera}) async {
+/// Picks attachments; tests replace it.
+typedef AttachmentSource = Future<List<({String name, Uint8List bytes})>> Function(BuildContext context, AttachFrom from);
+
+Future<List<({String name, Uint8List bytes})>> pickAttachments(BuildContext context, AttachFrom from) async {
+  if (from == AttachFrom.files) {
+    final files = await FilePicker.pickFiles();
+    return [for (final file in files) (name: file.name, bytes: await file.readAsBytes())];
+  }
   final picker = ImagePicker();
-  final files = camera
+  final files = from == AttachFrom.camera
       ? [?await picker.pickImage(source: ImageSource.camera, maxWidth: 2048, maxHeight: 2048, imageQuality: 85)]
       : await picker.pickMultiImage(maxWidth: 2048, maxHeight: 2048, imageQuality: 85, limit: 10);
   return [for (final file in files) (name: file.name, bytes: await file.readAsBytes())];
 }
+
+/// The backend's limit for one upload.
+const maxUpload = 20 * 1024 * 1024;
 
 class _Attachment {
   _Attachment(this.name, this.bytes);
   final String name;
   final Uint8List bytes;
   String? path;
+  bool get image => isImageUpload(name);
 }
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
     super.key, required this.client, required this.feed, required this.projectId, this.conversation,
-    this.autoStore, this.imageSource = pickImages, this.chatWait = const Duration(seconds: 25),
+    this.autoStore, this.attachmentSource = pickAttachments, this.chatWait = const Duration(seconds: 25),
   });
   final BackendClient client;
   final ConversationFeed feed;
   final Conversation? conversation;
   final String projectId;
   final AutoModeStore? autoStore;
-  final ImageSource2 imageSource;
+  final AttachmentSource attachmentSource;
   final Duration chatWait;
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -74,7 +85,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ChatFeed? chat;
   String? conversationId;
   String title = '新对话';
-  bool auto = false, sending = false;
+  bool auto = false, sending = false, translatable = false;
   List<ModelOption> models = [];
   String model = '';
 
@@ -90,6 +101,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (conversationId != null) _follow(conversationId!);
     input.addListener(() => setState(() {}));
     autos.get(autoKey).then((value) { if (mounted) setState(() => auto = value); });
+    widget.client.canTranslate().then((value) { if (mounted) setState(() => translatable = value); }).catchError((_) {});
     widget.client.models(widget.projectId).then((list) { if (mounted) setState(() => models = list); }).catchError((_) {});
   }
 
@@ -115,19 +127,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<void> _addImages({required bool camera}) async {
+  Future<void> _attach(AttachFrom from) async {
     List<({String name, Uint8List bytes})> picked;
-    try { picked = await widget.imageSource(context, camera: camera); } catch (error) { if (mounted) showMessage(context, '没能读取图片：$error'); return; }
+    try { picked = await widget.attachmentSource(context, from); } catch (error) { if (mounted) showMessage(context, '没能读取文件：$error'); return; }
     for (final file in picked.take(20 - attachments.length)) {
-      final item = _Attachment(file.name, file.bytes);
+      if (file.bytes.length > maxUpload) { if (mounted) showMessage(context, '${file.name} 超过 20 MB'); continue; }
+      final name = from == AttachFrom.files || file.name.contains('.') ? file.name : '${file.name}.jpg';
+      final item = _Attachment(name, file.bytes);
       setState(() => attachments.add(item));
-      widget.client.upload(widget.projectId, file.name.contains('.') ? file.name : '${file.name}.jpg', file.bytes).then((path) {
-        images.seed(path, file.bytes);
+      widget.client.upload(widget.projectId, name, file.bytes).then((path) {
+        if (item.image) images.seed(path, file.bytes);
         if (mounted) setState(() => item.path = path);
       }).catchError((Object error) {
         if (!mounted) return;
         setState(() => attachments.remove(item));
-        showMessage(context, '图片上传失败：$error');
+        showMessage(context, '上传失败：$error');
       });
     }
   }
@@ -148,7 +162,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       setState(() => attachments.clear());
       // Only a new conversation takes its title from the first message (like the backend, 40 characters).
       if (widget.conversation == null && title == '新对话') {
-        final first = text.isEmpty ? '图片' : text.replaceAll(RegExp(r'\s+'), ' ');
+        final first = text.isEmpty ? '附件' : text.replaceAll(RegExp(r'\s+'), ' ');
         title = first.length > 40 ? first.substring(0, 40) : first;
       }
       if (delivery == Delivery.queued && mounted) showMessage(context, '已排队，这一轮结束后自动发出');
@@ -164,6 +178,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final turn = chat?.activeTurn;
     if (turn == null) return;
     try { await widget.client.cancel(turn.id); chat?.poke(); } on BackendError catch (error) { if (mounted) showMessage(context, error.message); }
+  }
+
+  /// A fork is a new conversation: this page switches to it.
+  void _openFork(Conversation created) {
+    setState(() { conversationId = created.id; title = created.name.isEmpty ? title : created.name; });
+    _follow(created.id);
   }
 
   Future<void> _rename() async {
@@ -209,7 +229,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   Expanded(child: ListView.builder(
                     reverse: true, keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag, padding: const EdgeInsets.only(top: 8),
                     itemCount: turns.length,
-                    itemBuilder: (context, index) => TurnView(key: ValueKey(turns[index].id), turn: turns[index], client: widget.client, images: images, onChanged: () => feed.poke()),
+                    itemBuilder: (context, index) => TurnView(
+                      key: ValueKey(turns[index].id), turn: turns[index], client: widget.client, images: images, onChanged: () => feed.poke(),
+                      canTranslate: translatable, onFork: _openFork,
+                    ),
                   )),
                 ]);
               })),
@@ -234,7 +257,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           child: Row(children: [
             Text('排队中', style: TextStyle(color: palette.text3, fontSize: 12, fontWeight: FontWeight.w600)),
             const SizedBox(width: 8),
-            Expanded(child: Text(item.text.isEmpty ? '图片' : item.text, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text2, fontSize: 13.5))),
+            Expanded(child: Text(item.text.isEmpty ? '附件' : item.text, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text2, fontSize: 13.5))),
             IconButton(icon: const Icon(Icons.close, size: 16), tooltip: '不发了', onPressed: () async {
               try { await widget.client.withdraw(conversationId!, item.id); chat?.poke(); } on BackendError catch (error) { if (mounted) showMessage(context, error.message); }
             }),
@@ -249,8 +272,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             SizedBox(height: 68, child: ListView(scrollDirection: Axis.horizontal, children: [
               for (final item in attachments)
                 Padding(padding: const EdgeInsets.only(right: 8, bottom: 8), child: Stack(children: [
-                  ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.memory(item.bytes, width: 60, height: 60, fit: BoxFit.cover,
-                      opacity: AlwaysStoppedAnimation(item.path == null ? 0.45 : 1))),
+                  item.image
+                      ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.memory(item.bytes, width: 60, height: 60, fit: BoxFit.cover,
+                          opacity: AlwaysStoppedAnimation(item.path == null ? 0.45 : 1)))
+                      : Opacity(opacity: item.path == null ? 0.45 : 1, child: FileChip(name: item.name, size: item.bytes.length, height: 60, maxWidth: 200)),
                   if (item.path == null) const Positioned.fill(child: Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)))),
                   Positioned(top: 2, right: 2, child: GestureDetector(
                     onTap: () => setState(() => attachments.remove(item)),
@@ -267,9 +292,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
           ),
           Row(children: [
-            _iconButton(palette, Icons.add_photo_alternate_outlined, '添加图片', () => showModalBottomSheet<void>(context: context, builder: (sheet) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              ListTile(leading: const Icon(Icons.photo_camera_outlined), title: const Text('拍照'), onTap: () { Navigator.pop(sheet); _addImages(camera: true); }),
-              ListTile(leading: const Icon(Icons.photo_library_outlined), title: const Text('从相册选择'), onTap: () { Navigator.pop(sheet); _addImages(camera: false); }),
+            _iconButton(palette, Icons.attach_file, '添加附件', () => showModalBottomSheet<void>(context: context, builder: (sheet) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+              ListTile(leading: const Icon(Icons.photo_camera_outlined), title: const Text('拍照'), onTap: () { Navigator.pop(sheet); _attach(AttachFrom.camera); }),
+              ListTile(leading: const Icon(Icons.photo_library_outlined), title: const Text('从相册选择'), onTap: () { Navigator.pop(sheet); _attach(AttachFrom.photos); }),
+              ListTile(leading: const Icon(Icons.insert_drive_file_outlined), title: const Text('选择文件'), onTap: () { Navigator.pop(sheet); _attach(AttachFrom.files); }),
             ])))),
             const SizedBox(width: 4),
             _chip(palette, Icons.bolt, '自动', auto, () async {
@@ -294,8 +320,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               ),
             ],
             const Spacer(),
-            if (running != null) Padding(padding: const EdgeInsets.only(right: 6), child: _round(palette, Icons.stop_rounded, '中断', _stop, filled: false)),
-            _round(palette, Icons.arrow_upward_rounded, '发送', canSend ? _send : null),
+            // One button: with something typed it sends (into the running turn or queued), otherwise it stops the turn.
+            if (running != null && input.text.trim().isEmpty && attachments.isEmpty)
+              _stopButton(palette, running)
+            else
+              _round(palette, Icons.arrow_upward_rounded, '发送', canSend ? _send : null),
           ]),
         ]),
       ),
@@ -317,13 +346,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _chip(Palette palette, IconData icon, String label, bool on, VoidCallback onTap) =>
       Semantics(button: true, toggled: on, label: label, child: GestureDetector(onTap: onTap, child: _chipBody(palette, icon, label, on)));
 
-  Widget _round(Palette palette, IconData icon, String tooltip, VoidCallback? onTap, {bool filled = true}) => Tooltip(
+  Widget _round(Palette palette, IconData icon, String tooltip, VoidCallback? onTap) => Tooltip(
         message: tooltip,
         child: Material(
-          color: filled ? (onTap == null ? palette.fill : palette.ink) : palette.surface,
-          shape: CircleBorder(side: filled ? BorderSide.none : BorderSide(color: palette.line)),
+          color: onTap == null ? palette.fill : palette.ink, shape: const CircleBorder(),
           child: InkWell(customBorder: const CircleBorder(), onTap: onTap, child: SizedBox(width: 36, height: 36,
-              child: Icon(icon, size: 20, color: filled ? (onTap == null ? palette.text3 : palette.inkText) : palette.text))),
+              child: Icon(icon, size: 20, color: onTap == null ? palette.text3 : palette.inkText))),
+        ),
+      );
+
+  /// The stop button: a small rounded square on the filled circle, as on the desktop.
+  Widget _stopButton(Palette palette, Turn running) => Tooltip(
+        message: running.stopping ? '正在停止…' : '中断',
+        child: Material(
+          color: palette.ink.withValues(alpha: running.stopping ? 0.45 : 1), shape: const CircleBorder(),
+          child: InkWell(customBorder: const CircleBorder(), onTap: running.stopping ? null : _stop, child: SizedBox(width: 36, height: 36,
+              child: Center(child: Container(width: 11, height: 11, decoration: BoxDecoration(color: palette.inkText, borderRadius: BorderRadius.circular(2.5)))))),
         ),
       );
 }
@@ -336,8 +374,7 @@ class _Welcome extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.palette;
     return Center(child: Padding(padding: const EdgeInsets.all(32), child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Container(width: 52, height: 52, decoration: BoxDecoration(color: palette.ink, borderRadius: BorderRadius.circular(15)), alignment: Alignment.center,
-          child: Text('C', style: TextStyle(color: palette.inkText, fontSize: 24, fontWeight: FontWeight.w700))),
+      ClipRRect(borderRadius: BorderRadius.circular(15), child: Image.asset('assets/mark.png', width: 52, height: 52)),
       const SizedBox(height: 16),
       Text('在 ${project?.name ?? projectId} 里做点什么？', textAlign: TextAlign.center, style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: palette.text)),
       const SizedBox(height: 6),

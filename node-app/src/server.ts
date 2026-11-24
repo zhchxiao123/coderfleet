@@ -69,6 +69,7 @@ const DEVICE_ROUTES: readonly [string, RegExp][] = [
   ['DELETE', /^conversations\/[\w-]+\/follow-ups\/[\w-]+$/],
   ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[\w.]+$/],
   ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
+  ['GET', /^system-llm$/], ['POST', /^translate$/],
 ];
 export function deviceAllowed(method: string, path: string): boolean {
   return DEVICE_ROUTES.some(([allowed, pattern]) => allowed === method && pattern.test(path));

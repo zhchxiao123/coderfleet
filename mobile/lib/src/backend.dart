@@ -156,7 +156,7 @@ class BackendClient {
 
   Future<void> withdraw(String conversationId, String followUpId) => _call('DELETE', 'conversations/$conversationId/follow-ups/$followUpId');
 
-  /// Uploads an image into the project (.coderfleet-uploads); returns its container path.
+  /// Uploads a file (up to 20 MB) into the project (.coderfleet-uploads); returns its container path.
   Future<String> upload(String projectId, String name, List<int> bytes) async =>
       asMap(await _call('POST', 'projects/${Uri.encodeComponent(projectId)}/uploads', body: {'name': name, 'data': base64Encode(bytes)}, timeout: const Duration(seconds: 120)))['path'] as String? ?? '';
 
@@ -164,6 +164,16 @@ class BackendClient {
     final data = asMap(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/uploads/${path.split('/').last}', timeout: const Duration(seconds: 60)));
     return base64Decode(data['data'] as String? ?? '');
   }
+
+  /// Branches a new conversation off a finished Claude answer.
+  Future<Conversation> fork(String conversationId, String turnId) async =>
+      Conversation.fromJson(asMap(await _call('POST', 'conversations/$conversationId/fork', body: {'turnId': turnId})));
+
+  /// Whether the backend has a model for translation (SYSTEM_LLM_* on the computer).
+  Future<bool> canTranslate() async => asMap(await _call('GET', 'system-llm'))['configured'] == true;
+
+  Future<String> translate(String text, {String target = '简体中文'}) async =>
+      asMap(await _call('POST', 'translate', body: {'text': text, 'target': target}, timeout: const Duration(seconds: 180)))['translated'] as String? ?? '';
 
   Future<ToolDetail> toolDetail(String turnId, String toolId) async => ToolDetail.fromJson(asMap(await _call('GET', 'turns/$turnId/tools/${Uri.encodeComponent(toolId)}')));
 
