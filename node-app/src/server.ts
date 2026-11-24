@@ -10,7 +10,8 @@ import {
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
 import { Lifecycle } from './lifecycle.js';
-import { active, identifier, message, readConfig, record, Store, text, type Turn } from './state.js';
+import { active, identifier, message, readConfig, record, text, type Turn } from './state.js';
+import { WorkspaceStore } from './store.js';
 import { chatSupported, TaskRunner } from './tasks.js';
 import { Terminals } from './terminal.js';
 import { VERSION } from './version.js';
@@ -52,7 +53,14 @@ type Handler = (request: IncomingMessage, params: string[], url: URL) => Promise
 export async function serve(configPath: string): Promise<Server> {
   const config = readConfig(configPath);
   const workspace = config.workspace;
-  const store = new Store(config.stateDirectory);
+  let projectPaths = { at: 0, map: new Map<string, string>() };
+  const projectForPath = (path: string): string | undefined => {
+    if (Date.now() - projectPaths.at > 2_000) {
+      projectPaths = { at: Date.now(), map: new Map(readWorkspace(workspace).projects.map(item => [item.path.replace(/\/+$/, ''), item.name])) };
+    }
+    return projectPaths.map.get(path.replace(/\/+$/, ''));
+  };
+  const store = new WorkspaceStore(workspace, projectForPath);
   const token = Buffer.from('Bearer ' + config.token);
   const lifecycle = new Lifecycle(workspace, config.dockerPath);
   const terminals = new Terminals(workspace, config.dockerPath);
@@ -70,8 +78,7 @@ export async function serve(configPath: string): Promise<Server> {
     if (!found) throw new HttpError(404, '账号不存在');
     return found;
   };
-  const turnsOf = (conversationId: string): Turn[] => store.turns().filter(turn => turn.conversationId === conversationId)
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
 
   const routes: [string, RegExp, Handler][] = [
     ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION })],
@@ -153,7 +160,7 @@ export async function serve(configPath: string): Promise<Server> {
       return input.start === false ? { name } : { name, operation: lifecycle.startProject(name) };
     }],
     ['DELETE', /^projects\/([\w-]+)$/, async (_request, [name]) => {
-      if (store.turns().some(turn => turn.projectId === name && active(turn))) throw new HttpError(409, '项目里还有正在运行的对话');
+      if (store.liveTurns().some(turn => turn.projectId === name && active(turn))) throw new HttpError(409, '项目里还有正在运行的对话');
       return lifecycle.removeProject(name as string);
     }],
     ['POST', /^projects\/([\w-]+)\/(start|stop|restart)$/, async (_request, [name, action]) => {
@@ -193,16 +200,26 @@ export async function serve(configPath: string): Promise<Server> {
     ['DELETE', /^terminals\/([\w-]+)$/, async (_request, [id]) => { terminals.close(id as string); return { closed: true }; }],
 
     // Conversations
-    ['GET', /^conversations$/, async () => store.conversations().sort((left, right) => right.createdAt.localeCompare(left.createdAt)).map(item => {
-      const turns = turnsOf(item.id);
-      const last = turns.at(-1);
-      return { ...item, updatedAt: last?.createdAt ?? item.createdAt, status: last?.status ?? '', turns: turns.length, attention: Boolean(last?.permission) };
-    })],
+    ['GET', /^conversations$/, async () => {
+      const summaries = new Map<string, { updatedAt: string; status: string; turns: number; attention: boolean }>();
+      for (const item of store.turnIds()) {
+        const conversationId = store.turnConversation(item.id);
+        if (!conversationId) continue;
+        const current = summaries.get(conversationId) ?? { updatedAt: '', status: '', turns: 0, attention: false };
+        summaries.set(conversationId, { updatedAt: item.createdAt, status: item.status, turns: current.turns + 1, attention: item.attention });
+      }
+      return store.conversations().map(item => {
+        const summary = summaries.get(item.id);
+        return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
+          updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false };
+      }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    }],
     ['POST', /^conversations$/, async request => {
       const input = await body(request);
       const target = chatProject(text(input.projectId));
       if (!target) throw new HttpError(404, '项目不存在或不支持对话');
-      const conversation = { id: randomUUID(), projectId: target.name, name: text(input.name).trim().slice(0, 100) || '新对话', createdAt: new Date().toISOString() };
+      const conversation = { id: randomUUID().replaceAll('-', '').slice(0, 12), projectId: target.name, name: text(input.name).trim().slice(0, 100) || '新对话',
+        createdAt: new Date().toISOString(), account: target.account.name, type: target.account.type, project: target.path, nativeSessionId: '' };
       store.saveConversation(conversation);
       return conversation;
     }],
@@ -233,13 +250,16 @@ export async function serve(configPath: string): Promise<Server> {
       // Re-read after the await: the check and the save below run without yielding.
       const turns = turnsOf(id as string);
       if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
-      const previous = turns.findLast(turn => turn.sessionId);
+      if (turns.some(turn => turn.status === 'queued')) throw new HttpError(409, '这个对话还有原服务排队中的任务');
+      // Later turns resume the conversation's agent session (Python: native_session_id).
+      const resume = conversation.nativeSessionId || turns.findLast(turn => turn.sessionId)?.sessionId || '';
+      if (conversation.type && conversation.type !== target.account.type) throw new HttpError(409, '这个对话属于 ' + conversation.type + ' 账号，项目现在绑定的是 ' + target.account.type);
       const turn: Turn = {
-        id: randomUUID(), conversationId: id as string, projectId: conversation.projectId,
-        prompt, requestedModel: model, createdAt: new Date().toISOString(), resumeId: previous?.sessionId ?? '',
-        status: 'starting', answer: '', tools: [],
+        id: randomUUID().replaceAll('-', '').slice(0, 12), origin: 'node', conversationId: id as string, projectId: conversation.projectId,
+        account: target.account.name, type: target.account.type, prompt, requestedModel: model, createdAt: new Date().toISOString(),
+        resumeId: resume, status: 'starting', answer: '', tools: [], blocks: [],
       };
-      store.saveTurn(turn);
+      store.createTurn(turn, target.path);
       if (turns.length === 0 && conversation.name === '新对话') store.saveConversation({ ...conversation, name: prompt.replace(/\s+/g, ' ').slice(0, 40) });
       await runner.launch(turn);
       return publicTurn(turn);
@@ -295,7 +315,7 @@ export async function serve(configPath: string): Promise<Server> {
   });
   // Follows every active turn; after a restart this resumes from the saved log offsets.
   const timer = setInterval(() => {
-    for (const turn of store.turns()) if (active(turn)) void runner.tick(turn);
+    for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
   }, 250);
   timer.unref();
   server.once('close', () => clearInterval(timer));

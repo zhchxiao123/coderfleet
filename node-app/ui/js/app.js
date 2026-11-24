@@ -141,6 +141,7 @@
 
   function conversationMeta(item) {
     if (item.attention) return h('span.dot.waiting', { title: '等你确认' });
+    if (item.status === 'queued') return h('span.dot', { title: '在原服务里排队' });
     if (['starting', 'running'].includes(item.status)) return h('span.dot.busy', { title: '进行中' });
     if (item.status === 'failed') return h('span.dot.failed', { title: '失败' });
     return h('span.meta', CF.relative(item.updatedAt));

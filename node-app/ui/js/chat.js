@@ -129,6 +129,7 @@
       turn.permission ? approvalCard(turn) : null,
       isActive(turn) && !turn.permission ? h('div.running-status', h('span.orb'), h('span.shimmer', { dataset: { text: STATUS[turn.status] } }, STATUS[turn.status])) : null,
       turn.status === 'cancelled' ? h('div.turn-note', CF.icon('square', 12), '已中断') : null,
+      turn.status === 'queued' ? h('div.turn-note', CF.icon('dash', 12), '在原服务里排队，还没有运行') : null,
       turn.status === 'failed' ? h('div.turn-error', turn.error || '执行失败') : null,
     );
     return node;
@@ -185,7 +186,7 @@
         sendButton.replaceChildren(CF.icon(running ? 'square' : 'send', 16));
         sendButton.classList.toggle('stop', Boolean(running));
         sendButton.title = running ? '中断' : '发送';
-        sendButton.disabled = current.sending || (!running && (!textarea.value.trim() || !containerReady));
+        sendButton.disabled = current.sending || (!running && (current.readOnly || !textarea.value.trim() || !containerReady));
         modelSelect.disabled = Boolean(running);
       };
       const renderHeader = () => {
@@ -199,6 +200,15 @@
         );
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
+        const record = CF.state.conversations.find(item => item.id === current.conversationId);
+        current.readOnly = Boolean(record?.type && info && record.type !== info.type);
+        textarea.disabled = current.readOnly;
+        if (current.readOnly) {
+          notice.replaceChildren(h('div.banner', h('span.banner-icon', CF.icon('chat', 16)),
+            h('div.text', h('strong', '这是 ' + record.type + ' 账号的历史对话'), h('span', '项目现在绑定的是 ' + info.typeLabel + '，这段对话只能查看。'))));
+          updateComposer();
+          return;
+        }
         notice.replaceChildren(ready || !info ? '' : h('div.banner',
           h('span.banner-icon', CF.icon('box', 16)), h('div.text', h('strong', '项目容器没有运行'), h('span', '启动后才能对话。')),
           h('button.btn.primary.small', { on: { click: event => CF.projects.start(info.id, event.currentTarget) } }, CF.icon('play', 12), '启动')));

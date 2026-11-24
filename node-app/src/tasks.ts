@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { type WorkspaceProject } from './conf.js';
 import { ControlMailbox, type CommandKind } from './control.js';
 import { containerPath, execDetached, quote, signalGroup, workerAlive } from './docker.js';
-import { entries, message, record, text, type RecordValue, type Store, type ToolStatus, type Turn } from './state.js';
+import { entries, message, record, text, type RecordValue, type ToolStatus, type Turn } from './state.js';
+import type { WorkspaceStore } from './store.js';
 
 export const PERMISSION_TIMEOUT_SECONDS = 600;
 const START_GRACE = 60_000;
@@ -110,7 +111,8 @@ function setTool(turn: Turn, id: string, status: ToolStatus): boolean {
 export function applyEvent(turn: Turn, event: RecordValue): boolean {
   const type = event.type;
   if (type === 'system') {
-    if (event.task_id !== turn.id) return false;
+    // Converted history events (Python logs) carry no task ID.
+    if (event.task_id !== turn.id && event.history !== true) return false;
     switch (event.subtype) {
       case 'coderfleet_session':
       case 'coderfleet_acp_session': turn.sessionId = text(event.session_id) || turn.sessionId; return true;
@@ -196,7 +198,7 @@ export class TaskRunner {
   private readonly busy = new Set<string>();
 
   public constructor(
-    private readonly store: Store,
+    private readonly store: WorkspaceStore,
     private readonly dockerPath: string,
     private readonly project: (id: string) => WorkspaceProject | undefined,
   ) {}
@@ -277,13 +279,17 @@ export class TaskRunner {
       const length = readSync(descriptor, buffer, 0, buffer.length, offset);
       const end = buffer.subarray(0, length).lastIndexOf(10);
       if (end < 0) return false;
+      const session = turn.sessionId;
       for (const line of buffer.subarray(0, end).toString('utf8').split('\n')) {
         if (!line.trim()) continue;
         try { applyEvent(turn, record(JSON.parse(line))); }
         catch { /* a non-JSON line in the log is diagnostic output */ }
       }
+      // Mirror into the workspace's tasks/<id>.log, as the Python service does for SDK workers.
+      this.store.appendLog(turn.id, buffer.subarray(0, end + 1));
       // The offset moved, so the record is saved even when no event changed it.
       turn.logOffset = offset + end + 1;
+      if (turn.sessionId && turn.sessionId !== session) this.store.setNativeSession(turn.conversationId, turn.sessionId, turn.id);
       return true;
     } finally { closeSync(descriptor); }
   }

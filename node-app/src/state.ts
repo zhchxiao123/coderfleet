@@ -64,6 +64,12 @@ export interface Conversation {
   readonly projectId: string;
   readonly name: string;
   readonly createdAt: string;
+  readonly updatedAt?: string;
+  /** The agent session that later turns resume (Python: native_session_id). */
+  readonly nativeSessionId?: string;
+  readonly account?: string;
+  readonly type?: string;
+  readonly project?: string;
 }
 
 /**
@@ -97,9 +103,14 @@ export interface Permission {
 }
 
 export type Decision = 'allow' | 'deny';
-export type Status = 'starting' | 'running' | 'done' | 'failed' | 'cancelled';
+/** `queued`: a Python task waiting in the Python scheduler; this service does not run it. */
+export type Status = 'queued' | 'starting' | 'running' | 'done' | 'failed' | 'cancelled';
 export interface Turn {
   readonly id: string;
+  /** `node`: launched by this service; `python`: a Python task, shown read-only. */
+  origin?: 'node' | 'python';
+  readonly account?: string;
+  readonly type?: string;
   readonly conversationId: string;
   readonly projectId: string;
   readonly prompt: string;
@@ -124,44 +135,6 @@ export interface Turn {
   logOffset?: number;
   launchedAt?: string;
   cancelRequested?: boolean;
-}
-
-export class Store {
-  private readonly conversationIndex = new Map<string, Conversation>();
-  private readonly turnIndex = new Map<string, Turn>();
-
-  // This service is the only writer of its state directory, so records are
-  // read once at start-up and every save writes through.
-  public constructor(private readonly root: string) {
-    for (const directory of ['conversations', 'turns']) mkdirSync(join(root, directory), { recursive: true, mode: 0o700 });
-    for (const value of this.load<Conversation>('conversations')) this.conversationIndex.set(value.id, value);
-    for (const value of this.load<Turn>('turns')) this.turnIndex.set(value.id, value);
-  }
-
-  public conversation(id: string): Conversation | undefined { return this.conversationIndex.get(id); }
-  public turn(id: string): Turn | undefined { return this.turnIndex.get(id); }
-  public conversations(): Conversation[] { return [...this.conversationIndex.values()]; }
-  public turns(): Turn[] { return [...this.turnIndex.values()]; }
-
-  public saveConversation(value: Conversation): void {
-    atomicJSON(this.file('conversations', value.id), value);
-    this.conversationIndex.set(value.id, value);
-  }
-
-  public saveTurn(value: Turn): void {
-    atomicJSON(this.file('turns', value.id), value);
-    this.turnIndex.set(value.id, value);
-  }
-
-  private file(directory: string, id: string): string {
-    return join(this.root, directory, identifier(id) + '.json');
-  }
-
-  private load<T>(directory: string): T[] {
-    return readdirSync(join(this.root, directory), { withFileTypes: true })
-      .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
-      .map(entry => JSON.parse(readFileSync(join(this.root, directory, entry.name), 'utf8')) as T);
-  }
 }
 
 export function active(turn: Turn): boolean {

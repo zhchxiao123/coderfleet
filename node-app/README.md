@@ -61,4 +61,6 @@ A backend you deploy yourself behind HTTPS can still be added with its address a
 
 ## Status
 
-This is the MVP: accounts, projects, containers, image, settings, terminals and conversations. Python and this backend keep separate conversation records; don't run turns for the same project from both at once. Not migrated yet: workflows, boards, schedules, Telegram, MCP bridge and the platform assistant.
+This is the MVP: accounts, projects, containers, image, settings, terminals and conversations.
+
+Conversations and turns are stored the Python way, in the workspace: `conversations/<id>.json`, `tasks/<id>.json` and `tasks/<id>.log` (`src/store.ts`). Existing history therefore appears in the App as is. Logs from the Python service's CLI backends are converted from each tool's native format (`src/history.ts`, ported from the Python parsers). Turns started in the App are Task records the Python models load: worker output is mirrored into `tasks/<id>.log` as the Python service does for SDK workers, and the App's own fields live under the Task's `node` key. A later turn resumes the conversation's `native_session_id`. Tasks still queued or running in the Python service are shown read-only. Don't run the two services' schedulers on the same conversation at the same time. Not migrated yet: workflows, boards, schedules, Telegram, MCP bridge and the platform assistant.
