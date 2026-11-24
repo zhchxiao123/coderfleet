@@ -54,6 +54,8 @@ const ask = (tool, input) => new Promise(resolve => {
   send({ type: 'control_request', request_id: id, request: { subtype: 'can_use_tool', tool_name: tool, input, tool_use_id: 'tool-' + sequence } });
 });
 const say = text => {
+  // Like the SDK: every assistant message starts with message_start.
+  send({ type: 'stream_event', session_id: sessionId, event: { type: 'message_start', message: { role: 'assistant' } } });
   send({ type: 'stream_event', session_id: sessionId, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } } });
   send({ type: 'assistant', session_id: sessionId, uuid: text === 'fork-source' ? 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' : crypto.randomUUID(),
     message: { role: 'assistant', content: [{ type: 'text', text }] } });

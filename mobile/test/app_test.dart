@@ -97,4 +97,18 @@ void main() {
     expect(find.text('已中断'), findsOneWidget);
     await teardown(tester);
   });
+
+  testWidgets('sending in an existing conversation keeps its title', (tester) async {
+    final backend = FakeBackend()..seedDemo();
+    await pumpApp(tester, backend);
+    await tester.tap(find.text('修一下登录页的样式'));
+    await settle(tester);
+    await tester.enterText(find.byType(TextField), '再改一下按钮颜色');
+    await tester.pump();
+    await tester.tap(find.byTooltip('发送'));
+    await settle(tester, 3);
+    expect(find.descendant(of: find.byType(AppBar), matching: find.text('修一下登录页的样式')), findsOneWidget);
+    expect(find.descendant(of: find.byType(AppBar), matching: find.text('再改一下按钮颜色')), findsNothing);
+    await teardown(tester);
+  });
 }

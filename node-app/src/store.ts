@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { join } from 'node:path';
 import { normalizeLog } from './history.js';
 import { record, text, type Conversation, type ConversationFork, type RecordValue, type Status, type Turn } from './state.js';
-import { applyEvent } from './tasks.js';
+import { applyEvent, releaseHeld } from './tasks.js';
 
 type Raw = RecordValue;
 
@@ -177,6 +177,7 @@ export class WorkspaceStore {
     // Python CLI backends log each tool's native format; SDK/ACP workers and this service log normalized events.
     const native = origin === 'python' && raw.execution_backend !== 'sdk' && raw.execution_backend !== 'acp';
     for (const event of normalizeLog(text(raw.type), native, content)) applyEvent(turn, event);
+    if (turn.status !== 'running' && turn.status !== 'starting') releaseHeld(turn);
     if (node.error) turn.error = node.error;
     if (turn.status !== 'running' && turn.status !== 'starting') delete turn.permission;
     return turn;

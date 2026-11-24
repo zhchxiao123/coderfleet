@@ -123,6 +123,13 @@ function setTool(turn: Turn, id: string, status: ToolStatus): boolean {
   return true;
 }
 
+/** Moves messages sent mid-turn into the turn, where the agent's next message begins (or at its end). */
+export function releaseHeld(turn: Turn): void {
+  if (!turn.heldMessages?.length) return;
+  (turn.blocks ??= []).push(...turn.heldMessages);
+  delete turn.heldMessages;
+}
+
 /** Applies one worker event to the turn record. Returns true when the record changed. */
 export function applyEvent(turn: Turn, event: RecordValue): boolean {
   const type = event.type;
@@ -149,7 +156,8 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       case 'coderfleet_message_accepted': {
         // A message sent while the turn ran; the agent takes it into this run.
         const images = Array.isArray(event.images) ? event.images.filter((item): item is string => typeof item === 'string') : [];
-        (turn.blocks ??= []).push({ kind: 'user', text: text(event.text), ...(images.length ? { images } : {}) });
+        // The model reads it when its next message starts; until then the current one may still stream.
+        (turn.heldMessages ??= []).push({ kind: 'user', text: text(event.text), ...(images.length ? { images } : {}) });
         return true;
       }
       case 'coderfleet_permission_pending': {
@@ -186,14 +194,22 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
     }
   }
   if (type === 'stream_event') {
+    if (record(event.event).type === 'message_start') {
+      releaseHeld(turn);
+      turn.messageStarted = true;
+      return true;
+    }
     const delta = record(record(event.event).delta);
     if (record(event.event).type !== 'content_block_delta' || delta.type !== 'text_delta') return false;
     const chunk = text(delta.text);
     if (turn.answer.length >= MAX_ANSWER) return false;
-    turn.answer = (turn.answer + chunk).slice(0, MAX_ANSWER);
     const blocks = turn.blocks ??= [];
     const last = blocks.at(-1);
-    if (last?.kind === 'text') last.text += chunk; else blocks.push({ kind: 'text', text: chunk });
+    // A new assistant message is a new paragraph, never glued to the previous one.
+    const fresh = turn.messageStarted === true;
+    turn.messageStarted = false;
+    turn.answer = (turn.answer + (fresh && turn.answer ? '\n\n' : '') + chunk).slice(0, MAX_ANSWER);
+    if (last?.kind === 'text' && !fresh) last.text += chunk; else blocks.push({ kind: 'text', text: chunk });
     return true;
   }
   if (type === 'assistant' || type === 'user') {
@@ -287,6 +303,7 @@ export class TaskRunner {
 
   private finish(turn: Turn, status: 'done' | 'failed' | 'cancelled', error?: string): void {
     turn.status = status;
+    releaseHeld(turn);
     // Calls still open when the turn ends never reported a result.
     turn.tools = turn.tools.map(tool => tool.status === 'running' || tool.status === 'waiting'
       ? { ...tool, status: status === 'done' ? 'unknown' : 'interrupted' } : tool);

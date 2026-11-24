@@ -612,9 +612,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
 
 /** A turn for the client: no control fields, and tool input/output only as a flag (fetched per tool). */
 function publicTurn(turn: Turn): Record<string, unknown> {
-  const { resumeId: _resume, controlToken: _token, logOffset: _offset, launchedAt: _launched, cancelRequested: _cancel, ...visible } = turn;
+  const { resumeId: _resume, controlToken: _token, logOffset: _offset, launchedAt: _launched, cancelRequested: _cancel,
+    heldMessages, messageStarted: _started, ...visible } = turn;
   return {
     ...visible,
+    // A message sent mid-turn shows at the end until the agent's next message starts.
+    blocks: [...(turn.blocks ?? []), ...(heldMessages ?? [])],
     tools: turn.tools.map(({ input, output, ...tool }) => ({ ...tool, hasDetail: Boolean(output) || Object.keys(record(input)).length > 0 })),
   };
 }

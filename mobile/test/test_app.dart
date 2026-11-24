@@ -22,16 +22,19 @@ Future<void> loadFonts() async {
   _fontsLoaded = true;
   final flutter = Platform.environment['FLUTTER_ROOT'] ?? '${Platform.environment['HOME']}/flutter';
   final material = '$flutter/bin/cache/artifacts/material_fonts';
-  Future<void> load(String family, List<String> files) async {
+  /// Loads the first set of files that exists (Linux paths, then macOS ones).
+  Future<void> load(String family, List<String> files, [List<String> macos = const []]) async {
     final loader = FontLoader(family);
-    for (final file in files.where((path) => File(path).existsSync())) {
+    final present = files.where((path) => File(path).existsSync()).toList();
+    for (final file in present.isNotEmpty ? present : macos.where((path) => File(path).existsSync())) {
       loader.addFont(Future.value(ByteData.view(File(file).readAsBytesSync().buffer)));
     }
     await loader.load();
   }
   await load('Roboto', ['$material/Roboto-Regular.ttf', '$material/Roboto-Medium.ttf', '$material/Roboto-Bold.ttf']);
-  await load('NotoCJK', ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc']);
-  await load('monospace', ['/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf']);
+  await load('NotoCJK', ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc'],
+      ['/System/Library/Fonts/Hiragino Sans GB.ttc', '/System/Library/Fonts/STHeiti Light.ttc', '/System/Library/Fonts/STHeiti Medium.ttc']);
+  await load('monospace', ['/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'], ['/System/Library/Fonts/Menlo.ttc', '/System/Library/Fonts/SFNSMono.ttf']);
   await load('MaterialIcons', ['$material/MaterialIcons-Regular.otf']);
 }
 

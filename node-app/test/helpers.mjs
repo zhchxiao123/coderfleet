@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
@@ -100,7 +101,11 @@ export async function environment({ accounts = '', projects = (project) => '', b
   await writeFile(join(workspace, 'accounts.conf'), accounts);
   await writeFile(join(workspace, 'projects.conf'), projects(project));
   await writeFile(join(root, 'containers.json'), JSON.stringify(containers));
-  for (const [name, source] of Object.entries({ docker: fakeDocker, ...bins })) {
+  // Workers start through `setsid -w` (util-linux). macOS has none: a stand-in that starts
+  // a new session the same way, so the tests run there too.
+  const setsid = ['/usr/bin/setsid', '/bin/setsid'].some(path => existsSync(path))
+    ? {} : { setsid: "#!/bin/sh\n[ \"$1\" = \"-w\" ] && shift\nexec perl -MPOSIX -e 'if (POSIX::setsid() < 0) { my $pid = fork; die \"fork: $!\" unless defined $pid; if ($pid) { waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8) } POSIX::setsid() } exec @ARGV or die \"exec: $!\"' \"$@\"\n" };
+  for (const [name, source] of Object.entries({ docker: fakeDocker, ...setsid, ...bins })) {
     await writeFile(join(bin, name), source);
     await chmod(join(bin, name), 0o755);
   }

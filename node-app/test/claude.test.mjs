@@ -79,6 +79,11 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.match(turn.answer, /echo:also this/);
     assert.match(turn.answer, /long-done/);
     assert.deepEqual(turn.blocks.filter(block => block.kind === 'user'), [{ kind: 'user', text: 'also this' }]);
+    // The interjection sits where the agent's next message begins; messages never run together.
+    const kinds = turn.blocks.map(block => block.kind === 'text' ? 'text:' + block.text.trim() : block.kind);
+    assert.ok(kinds.indexOf('user') < kinds.findIndex(kind => kind.startsWith('text:echo:also this')), kinds.join(' | '));
+    assert.ok(turn.blocks.every(block => block.kind !== 'text' || !(block.text.includes('long-done') && block.text.includes('echo'))), kinds.join(' | '));
+    assert.match(turn.answer, /\n\necho:also this/, 'each message is its own paragraph');
     assert.deepEqual((await env.get('conversations/' + conversation + '/follow-ups')).body, []);
 
     // Fork at a finished turn: a new conversation resumes it under a new session ID.

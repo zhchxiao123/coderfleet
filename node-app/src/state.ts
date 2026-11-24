@@ -158,6 +158,12 @@ export interface Turn {
   controlReady?: boolean;
   /** What the running worker's control channel accepts (`message`: mid-turn messages). */
   capabilities?: string[];
+  /**
+   * Rebuilt from the log, never saved: messages sent mid-turn wait here until the agent's
+   * next message starts (when the model reads them), and whether the next text starts a block.
+   */
+  heldMessages?: Block[];
+  messageStarted?: boolean;
   /** Bytes of the worker's event log already applied to this record. */
   logOffset?: number;
   launchedAt?: string;

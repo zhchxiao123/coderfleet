@@ -146,7 +146,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final delivery = await widget.client.send(id, prompt: text, images: [for (final item in attachments) item.path!], model: model, auto: auto);
       input.clear();
       setState(() => attachments.clear());
-      if (conversationId == widget.conversation?.id || title == '新对话') title = text.isEmpty ? '图片' : text.replaceAll(RegExp(r'\s+'), ' ');
+      // Only a new conversation takes its title from the first message (like the backend, 40 characters).
+      if (widget.conversation == null && title == '新对话') {
+        final first = text.isEmpty ? '图片' : text.replaceAll(RegExp(r'\s+'), ' ');
+        title = first.length > 40 ? first.substring(0, 40) : first;
+      }
       if (delivery == Delivery.queued && mounted) showMessage(context, '已排队，这一轮结束后自动发出');
       chat?.poke();
     } on BackendError catch (error) {
