@@ -381,7 +381,7 @@
     if (delta < 3600) return Math.floor(delta / 60) + ' 分钟前';
     if (delta < 86400) return Math.floor(delta / 3600) + ' 小时前';
     if (delta < 86400 * 7) return Math.floor(delta / 86400) + ' 天前';
-    return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+    return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', timeZone: CF.timeZone.current() });
   };
 
   /**
@@ -413,24 +413,58 @@
     CF.toast(pinned ? '已置顶' : '已取消置顶');
   };
 
+  /**
+   * The time zone times are shown in: this App's setting, or the system's.
+   * Kept on this computer (like the window layout); the containers' own zone is
+   * CONTAINER_TIMEZONE in the workspace settings.
+   */
+  CF.timeZone = {
+    system: () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    chosen: () => { try { return localStorage.getItem('cf.timeZone') || ''; } catch { return ''; } },
+    current: () => CF.timeZone.chosen() || CF.timeZone.system(),
+    set(zone) {
+      if (zone) new Intl.DateTimeFormat('en', { timeZone: zone }); // throws on an unknown zone
+      try { zone ? localStorage.setItem('cf.timeZone', zone) : localStorage.removeItem('cf.timeZone'); } catch { /* storage unavailable */ }
+    },
+    all: () => { try { return Intl.supportedValuesOf('timeZone'); } catch { return ['UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York', 'Europe/London']; } },
+    /** "UTC+8" for a zone at the current moment. */
+    offset(zone) {
+      const part = new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'shortOffset' }).formatToParts(new Date()).find(item => item.type === 'timeZoneName');
+      return (part?.value || 'GMT').replace('GMT', 'UTC');
+    },
+  };
+  /** Calendar parts of a moment in the chosen time zone. */
+  const zoned = date => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+      timeZone: CF.timeZone.current(), year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short',
+    }).formatToParts(date).map(part => [part.type, part.value]));
+    return {
+      year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday),
+      time: String(Number(parts.hour) % 24).padStart(2, '0') + ':' + parts.minute,
+    };
+  };
   /** Compact time for lists, like mainstream chat apps: 14:32 · 昨天 · 周一 · 11月3日 · 2025/11/3. */
   CF.shortTime = iso => {
     const date = new Date(iso);
     if (!Number.isFinite(date.getTime())) return '';
-    const now = new Date();
-    const day = value => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
-    const days = Math.round((day(now) - day(date)) / 86400000);
-    if (days <= 0) return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const then = zoned(date);
+    const now = zoned(new Date());
+    const days = Math.round((Date.UTC(now.year, now.month - 1, now.day) - Date.UTC(then.year, then.month - 1, then.day)) / 86400000);
+    if (days <= 0) return then.time;
     if (days === 1) return '昨天';
-    if (days < 7) return '周' + '日一二三四五六'[date.getDay()];
-    if (date.getFullYear() === now.getFullYear()) return (date.getMonth() + 1) + '月' + date.getDate() + '日';
-    return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate();
+    if (days < 7) return '周' + '日一二三四五六'[then.weekday];
+    if (then.year === now.year) return then.month + '月' + then.day + '日';
+    return then.year + '/' + then.month + '/' + then.day;
   };
   /** Full time for tooltips and message stamps. */
   CF.fullTime = iso => {
     const date = new Date(iso);
-    return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+    if (!Number.isFinite(date.getTime())) return '';
+    const parts = zoned(date);
+    return parts.year + '/' + parts.month + '/' + parts.day + ' ' + parts.time;
   };
+  /** Today's date line (projects page). */
+  CF.today = () => new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long', timeZone: CF.timeZone.current() });
 
   /** Interactive terminal sheet bound to a backend terminal session. */
   CF.openTerminal = async (title, subtitle, start) => {

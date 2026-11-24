@@ -107,6 +107,26 @@
           h('div', { style: 'display:grid;grid-template-columns:1fr 1.6fr 1fr auto;gap:8px;margin-top:8px' }, name, url, token, addRemote),
           h('p', { style: 'color:var(--text-3);font-size:12px;margin:8px 0 0' }, '用于已经自行部署、通过 HTTPS 提供的后端。令牌保存在系统钥匙串里。'))));
 
+      // Display: the time zone times are shown in (this computer only).
+      const zoneLabel = () => (CF.timeZone.chosen() ? CF.timeZone.chosen() : '跟随系统（' + CF.timeZone.system() + '）') + ' · ' + CF.timeZone.offset(CF.timeZone.current());
+      const zoneButton = h('button.btn.small.zone-button', { on: { click: () => {
+        const chosen = CF.timeZone.chosen();
+        const items = [
+          { id: '', label: '跟随系统', hint: CF.timeZone.system() + ' · ' + CF.timeZone.offset(CF.timeZone.system()), selected: !chosen },
+          ...CF.timeZone.all().map(zone => ({ id: zone, label: zone, hint: CF.timeZone.offset(zone), selected: zone === chosen })),
+        ];
+        CF.picker(zoneButton, { items, placeholder: '搜索时区，例如 Shanghai、New_York', empty: '没有这个时区', onPick: item => {
+          CF.timeZone.set(item.id);
+          zoneButton.replaceChildren(zoneLabel());
+          CF.app.rerender();
+          CF.chat.redraw();
+          CF.toast('时间按 ' + (item.id || '系统时区') + ' 显示');
+        } });
+      } } }, zoneLabel());
+      page.append(h('div.card',
+        h('div.card-head', h('div', h('h2', '显示'), h('p', '只影响这台电脑上 App 里显示的时间；容器里的时区在下面「代理与容器」里设置。'))),
+        h('div.card-body', h('dl.kv', h('dt', '时区'), h('dd', zoneButton)))));
+
       if (!current || !overview) return;
 
       // Workspace & image

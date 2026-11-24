@@ -26,6 +26,8 @@
   const translations = new Map();
   // Whether the backend has a system LLM for translation, per backend.
   const translateReady = new Map();
+  // Turns being translated: turnId → { done, total } or { error }.
+  const translating = new Map();
 
   function toolGlyph(status) {
     if (status === 'running') return h('span.spinner.tool-spinner');
@@ -238,10 +240,23 @@
       session?.rerender(turn.id);
       return;
     }
-    await CF.busy(button, async () => {
-      const results = await Promise.all(parts.map(([, text]) => CF.api('POST', 'translate', { text, target: '简体中文' })));
-      parts.forEach(([index], position) => translations.set(turn.id + ':' + index, { showing: true, text: results[position].translated }));
-    });
+    if (translating.get(turn.id)?.total) return;
+    const missing = parts.filter(([index]) => translations.get(turn.id + ':' + index)?.text === undefined);
+    const progress = { done: parts.length - missing.length, total: parts.length };
+    translating.set(turn.id, progress);
+    session?.rerender(turn.id);
+    try {
+      await Promise.all(missing.map(async ([index, text]) => {
+        const result = await CF.api('POST', 'translate', { text, target: '简体中文' });
+        translations.set(turn.id + ':' + index, { showing: false, text: result.translated });
+        progress.done += 1;
+        session?.rerender(turn.id);
+      }));
+      for (const [index] of parts) translations.get(turn.id + ':' + index).showing = true;
+      translating.delete(turn.id);
+    } catch (error) {
+      translating.set(turn.id, { error: translateError(CF.errorText(error)) });
+    }
     session?.rerender(turn.id);
   }
 
@@ -270,14 +285,44 @@
         button.replaceChildren(CF.icon('check', 13));
         setTimeout(() => button.replaceChildren(CF.icon('copy', 13)), 1200);
       }) : null,
-      text && translateReady.get(CF.state.backendId) ? action('translate', translated ? '显示原文' : '翻译成中文', button => toggleTranslation(turn, button), translated ? '.on' : '') : null,
+      text && translateReady.get(CF.state.backendId)
+        ? (translating.get(turn.id)?.total
+          ? h('span.turn-action.busy', { title: '正在翻译' }, h('span.spinner'), '翻译中…')
+          : action('translate', translated ? '显示原文' : '翻译成中文', button => toggleTranslation(turn, button), translated ? '.on' : ''))
+        : null,
       turn.type === 'claude' && turn.status === 'done' && !turn.inherited && turn.sessionId
         ? action('fork', '从这里分叉', button => forkAt(turn, button)) : null);
+  }
+
+  /** A translation failure in plain words; the provider's text only when nothing better fits. */
+  function translateError(raw) {
+    const status = Number(/上游返回 (\d{3})/.exec(raw)?.[1] || 0);
+    if (status === 401 || status === 403) return 'API Key 无效或没有权限，请到 设置 → 翻译与命名 检查';
+    if (status === 404) return '找不到这个模型或接口地址，请到 设置 → 翻译与命名 检查模型和 Base URL';
+    if (status === 429) return '模型的调用次数或额度用完了，稍后再试';
+    if (status >= 500) return '模型服务暂时出错（' + status + '），稍后再试';
+    if (/超时/.test(raw)) return '连接模型超时，检查网络或出站代理';
+    if (/请求上游失败|ECONNREFUSED|ENOTFOUND|代理/.test(raw)) return '连不上模型服务，检查 Base URL 或出站代理';
+    return raw.length > 160 ? raw.slice(0, 160) + '…' : raw;
+  }
+
+  /** While a turn is translated (or after it failed): one line above the answer. */
+  function translationStatus(turn) {
+    const state = translating.get(turn.id);
+    if (!state) return null;
+    if (state.error) {
+      return h('div.translate-status.failed', CF.icon('x', 12), h('span', '翻译失败：' + state.error),
+        h('button.btn.ghost.small', { on: { click: () => { translating.delete(turn.id); void toggleTranslation(turn); } } }, '重试'),
+        h('button.icon-btn', { title: '关闭', on: { click: () => { translating.delete(turn.id); session?.rerender(turn.id); } } }, CF.icon('x', 12)));
+    }
+    return h('div.translate-status', h('span.spinner'),
+      h('span.shimmer', '正在翻译成中文' + (state.total > 1 ? '（' + state.done + '/' + state.total + ' 段）' : '') + '…'));
   }
 
   function turnNode(turn) {
     const node = h('div.turn' + (turn.inherited ? '.inherited' : ''),
       userBubble(turn.projectId, turn.prompt, turn.images),
+      translationStatus(turn),
       body(turn),
       turnActions(turn),
       turn.permission ? approvalCard(turn) : null,
@@ -291,6 +336,7 @@
 
   const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
     textBlocks(turn).map(([index]) => translations.get(turn.id + ':' + index)?.showing ? 1 : 0).join(''), translateReady.get(CF.state.backendId) ? 1 : 0,
+    JSON.stringify(translating.get(turn.id) ?? null),
     turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
 
   function project() {
@@ -328,6 +374,9 @@
   }
 
   CF.chat = {
+    /** Draws every turn again (after a display setting such as the time zone changed). */
+    redraw() { if (session) for (const turn of session.turns) session.rerender?.(turn.id); },
+
     /** After the translation model changes in Settings. */
     translationChanged() { translateReady.clear(); },
 
@@ -355,7 +404,6 @@
       const textarea = h('textarea', { rows: 1, placeholder: '描述你想做的事', 'aria-label': '消息' });
       const modelSelect = h('select', { 'aria-label': '模型', hidden: true });
       const sendButton = h('button.send', { title: '发送' }, CF.icon('send', 16));
-      const stopButton = h('button.stop-turn', { title: '中断（Esc）', hidden: true }, CF.icon('square', 13));
       const hint = h('span.hint');
       // Images: picked, pasted or dropped; uploaded into the project right away.
       const attachRow = h('div.attach-row', { hidden: true });
@@ -396,11 +444,16 @@
         const containerReady = info?.state === 'running';
         const uploading = current.attachments.some(item => !item.path);
         const content = Boolean(textarea.value.trim()) || current.attachments.length > 0;
-        sendButton.disabled = current.sending || current.readOnly || !content || uploading || !containerReady;
-        sendButton.title = running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
-        stopButton.hidden = !running;
-        stopButton.disabled = Boolean(running?.stopping);
-        hint.textContent = running?.stopping ? '正在停止 · 现在发送会排在这轮之后' : running ? (canInject(running) ? '正在回答 · 现在发送会插入这一轮' : '正在回答 · 现在发送会排在这轮之后')
+        // One button: with something typed it sends (into the running answer, or queued after it);
+        // with an empty box while an answer runs it stops.
+        const stopping = Boolean(running) && !content;
+        sendButton.classList.toggle('stop', stopping);
+        sendButton.replaceChildren(stopping ? h('span.stop-mark') : CF.icon('send', 16));
+        sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || !content || uploading || !containerReady;
+        sendButton.title = stopping ? (running.stopping ? '正在停止…' : '中断（Esc）') : running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
+        sendButton.setAttribute('aria-label', sendButton.title);
+        hint.textContent = running?.stopping ? '正在停止…' : running && !content ? '正在回答 · Esc 停止，也可以继续输入'
+          : running ? (canInject(running) ? '发送会插入这一轮回答' : '发送会排在这轮回答之后')
           : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
       };
@@ -548,7 +601,7 @@
       const stop = async () => {
         const running = activeTurn();
         if (!running) return;
-        await CF.busy(stopButton, () => CF.api('POST', 'turns/' + running.id + '/cancel'));
+        await CF.busy(sendButton, () => CF.api('POST', 'turns/' + running.id + '/cancel'));
         await current.refresh();
       };
       // Sends while idle (a new turn) or while a turn runs: Claude takes it into the
@@ -584,14 +637,13 @@
         } catch (error) { CF.fail(error); }
         finally { current.sending = false; updateComposer(); }
       };
-      stopButton.addEventListener('click', () => void stop());
 
       textarea.addEventListener('input', () => { autosize(); updateComposer(); });
       textarea.addEventListener('keydown', event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
         else if (event.key === 'Escape' && activeTurn() && !textarea.value) { event.preventDefault(); void stop(); }
       });
-      sendButton.addEventListener('click', () => void send());
+      sendButton.addEventListener('click', () => void (sendButton.classList.contains('stop') ? stop() : send()));
 
       const rename = async () => {
         const target = CF.state.conversations.find(item => item.id === current.conversationId);
@@ -629,7 +681,7 @@
               drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); addFiles([...event.dataTransfer.files]); },
             },
           }, attachRow, textarea, fileInput,
-            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, stopButton, sendButton)))),
+            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, sendButton)))),
       );
       renderHeader();
       autosize();

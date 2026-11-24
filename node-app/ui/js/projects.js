@@ -170,7 +170,7 @@
         h('div.stat-head', h('span.stat-icon' + (tone ? '.' + tone : ''), CF.icon(icon, 13)), label),
         h('div.stat-value', String(value), total === undefined ? null : h('small', '/ ' + total)), h('div.stat-sub', sub));
       container.replaceChildren(h('div.page', h('div.page-inner',
-        h('div.page-head', h('div', h('div.eyebrow', new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) + ' · ' + running + ' 个容器运行中'),
+        h('div.page-head', h('div', h('div.eyebrow', CF.today() + ' · ' + running + ' 个容器运行中'),
           h('h1', '项目')),
           h('button.btn.primary', { on: { click: () => CF.projects.create() } }, CF.icon('plus', 14), '新建项目')),
         CF.pythonNotice(CF.state.overview), banners,
