@@ -317,9 +317,9 @@
     const info = CF.state.projects.find(item => item.id === projectId);
     const chip = h('button.project-chip', { title: '选择项目', on: { click: () => {
       const order = item => (item.state === 'running' ? 0 : 1);
-      const items = chatProjects().slice().sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, undefined, { numeric: true })).map(item => ({
+      const items = CF.pins.sort(chatProjects().slice().sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, undefined, { numeric: true }))).map(item => ({
         id: item.id, label: item.name, selected: item.id === projectId, muted: item.state !== 'running',
-        hint: item.typeLabel + (item.state === 'running' ? '' : ' · ' + CF.stateText(item.state)),
+        hint: (CF.pins.has(item.id) ? '置顶 · ' : '') + item.typeLabel + (item.state === 'running' ? '' : ' · ' + CF.stateText(item.state)),
         dot: item.state === 'running' ? 'running' : '',
       }));
       CF.picker(chip, { items, placeholder: '搜索项目', empty: '没有匹配的项目', onPick: item => CF.app.go({ name: 'chat', projectId: item.id }) });

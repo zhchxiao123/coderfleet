@@ -44,6 +44,8 @@
 
   const ICONS = {
     plus: '<path d="M8 3v10M3 8h10"/>',
+    sidebar: '<rect x="2.5" y="3" width="11" height="10" rx="2"/><path d="M6.5 3v10"/>',
+    pin: '<path d="M6 2.5h4M7 2.5v4L4.5 9h7L9 6.5v-4M8 9v4.5"/>',
     copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5V9A1.5 1.5 0 0 0 4 10.5h1.5"/>',
     translate: '<path d="M2.5 4h6M5.5 2.5V4M7.5 4c0 3-2.5 5.5-5 6.5M4 6.5c1 1.5 2.5 3 4.5 3.5M9 13.5l2.5-6 2.5 6M9.8 11.5h3.4"/>',
     fork: '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/><path d="M4.5 5v1.5a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2V5M8 8.5V11"/>',
@@ -113,19 +115,31 @@
   };
 
   let openMenu;
-  CF.menu = (anchor, items) => {
+  /**
+   * A popup menu next to `anchor`, never covering it: below when it fits, else above.
+   * Items: { label, icon?, hint?, checked?, danger?, run } or '-'.
+   * options.matchWidth: as wide as the anchor and aligned to it (account-style menus).
+   */
+  CF.menu = (anchor, items, options = {}) => {
     openMenu?.remove();
-    const menu = h('div.menu', { role: 'menu' });
+    const menu = h('div.menu' + (options.matchWidth ? '.wide' : ''), { role: 'menu' });
     for (const item of items) {
+      if (!item) continue;
       if (item === '-') { menu.append(h('hr')); continue; }
-      menu.append(h('button' + (item.danger ? '.danger' : ''), { role: 'menuitem', on: { click: () => { menu.remove(); item.run(); } } },
-        item.icon ? CF.icon(item.icon, 14) : null, item.label));
+      menu.append(h('button' + (item.danger ? '.danger' : '') + (item.checked ? '.checked' : ''), { role: 'menuitem', on: { click: () => { menu.remove(); item.run(); } } },
+        item.avatar ? h('span.menu-avatar', item.avatar) : item.icon ? CF.icon(item.icon, 14) : null,
+        item.hint ? h('span.menu-text', h('span', item.label), h('small', item.hint)) : h('span.menu-text', item.label),
+        item.checked ? h('span.menu-check', CF.icon('check', 14)) : null));
     }
     document.body.append(menu);
     const rect = anchor.getBoundingClientRect();
+    if (options.matchWidth) menu.style.width = rect.width + 'px';
     const width = menu.offsetWidth;
-    menu.style.top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8)) + 'px';
-    menu.style.left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) + 'px';
+    const height = menu.offsetHeight;
+    const below = window.innerHeight - rect.bottom - 8;
+    const above = rect.top - 8;
+    menu.style.top = (height + 6 <= below || below >= above ? Math.min(rect.bottom + 6, window.innerHeight - height - 8) : Math.max(8, rect.top - 6 - height)) + 'px';
+    menu.style.left = Math.max(8, Math.min(options.matchWidth ? rect.left : rect.right - width, window.innerWidth - width - 8)) + 'px';
     openMenu = menu;
     setTimeout(() => document.addEventListener('click', function close(event) {
       if (!menu.contains(event.target)) { menu.remove(); document.removeEventListener('click', close); }
@@ -321,6 +335,35 @@
     if (delta < 86400) return Math.floor(delta / 3600) + ' 小时前';
     if (delta < 86400 * 7) return Math.floor(delta / 86400) + ' 天前';
     return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  };
+
+  /**
+   * Pinned projects, kept in this App per backend (the old Web UI also keeps
+   * them in the browser). Pinned projects come first everywhere projects are
+   * listed, in the order they were pinned.
+   */
+  CF.pins = {
+    key: () => 'cf.pinnedProjects:' + CF.state.backendId,
+    list() { try { const value = JSON.parse(localStorage.getItem(CF.pins.key()) || '[]'); return Array.isArray(value) ? value : []; } catch { return []; } },
+    has: id => CF.pins.list().includes(id),
+    toggle(id) {
+      const list = CF.pins.list();
+      const next = list.includes(id) ? list.filter(item => item !== id) : [...list, id];
+      try { localStorage.setItem(CF.pins.key(), JSON.stringify(next)); } catch { /* storage unavailable */ }
+      return next.includes(id);
+    },
+    /** Pinned first (pin order), the rest keep their order. */
+    sort(projects) {
+      const list = CF.pins.list();
+      const rank = item => { const index = list.indexOf(item.id); return index < 0 ? Infinity : index; };
+      return projects.map((item, index) => [item, index]).sort(([a, ai], [b, bi]) => (rank(a) - rank(b)) || (ai - bi)).map(([item]) => item);
+    },
+  };
+  /** Pins or unpins a project and redraws everything that lists projects. */
+  CF.togglePin = id => {
+    const pinned = CF.pins.toggle(id);
+    CF.app.rerender?.();
+    CF.toast(pinned ? '已置顶' : '已取消置顶');
   };
 
   /** Compact time for lists, like mainstream chat apps: 14:32 · 昨天 · 周一 · 11月3日 · 2025/11/3. */

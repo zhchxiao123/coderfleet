@@ -56,7 +56,7 @@ try {
   await page.evaluate(() => { document.querySelector('.transcript').scrollTop = 0; });
   await shot('chat-markdown');
   await page.hover('.project-group-head >> nth=0');
-  await page.click('.project-group-head .add >> nth=0');
+  await page.click('.project-group-head .add:not(.group-more) >> nth=0');
   await shot('chat-new');
   await page.fill('.composer textarea', 'slow');
   await page.keyboard.press('Enter');

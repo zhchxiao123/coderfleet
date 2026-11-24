@@ -16,6 +16,8 @@
   };
 
   CF.app = {
+    /** Redraws the sidebar and the current page (after a local change such as a pin). */
+    rerender() { renderSidebar(); if (['projects'].includes(CF.state.view.name)) renderMain(); },
     isLocal: () => CF.state.profiles.find(item => item.id === CF.state.backendId)?.kind === 'local',
 
     go(view) {
@@ -145,8 +147,27 @@
   const collapsed = new Set();
   const search = h('input', { placeholder: '搜索对话…', spellcheck: false, 'aria-label': '搜索对话', on: { input: () => { filter = search.value.trim().toLowerCase(); renderConversations(); } } });
   const conversationsHost = h('div');
+  // The sidebar can be hidden (⌘\ / Ctrl+\), remembered across launches.
+  const appNode = document.getElementById('app');
+  const setSidebar = open => {
+    appNode.classList.toggle('sidebar-hidden', !open);
+    try { localStorage.setItem('cf.sidebarHidden', open ? '' : '1'); } catch { /* storage unavailable */ }
+  };
+  const sidebarOpen = () => !appNode.classList.contains('sidebar-hidden');
+  try { if (localStorage.getItem('cf.sidebarHidden') === '1') appNode.classList.add('sidebar-hidden'); } catch { /* storage unavailable */ }
+  // Shown at the top left while the sidebar is hidden: reopen it, or start a new chat.
+  const reveal = h('div.sidebar-reveal',
+    h('button.icon-btn', { title: '显示侧边栏（' + (CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+') + '\\）', on: { click: () => setSidebar(true) } }, CF.icon('sidebar', 16)),
+    h('button.icon-btn', { title: '新对话', on: { click: () => sidebar.querySelector('.new-chat')?.click() } }, CF.icon('compose', 16)));
+  appNode.append(reveal);
+  CF.app.toggleSidebar = () => setSidebar(!sidebarOpen());
   document.addEventListener('keydown', event => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); search.focus(); search.select(); }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      if (!sidebarOpen()) setSidebar(true);
+      search.focus(); search.select();
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === '\\') { event.preventDefault(); CF.app.toggleSidebar(); }
   });
 
   function conversationMeta(item) {
@@ -159,7 +180,7 @@
 
   function renderConversations() {
     const { view, projects, conversations, connected } = CF.state;
-    const chatProjects = projects.filter(item => item.chat && item.active);
+    const chatProjects = CF.pins.sort(projects.filter(item => item.chat && item.active));
     const groups = chatProjects.flatMap(project => {
       const all = conversations.filter(item => item.projectId === project.id);
       const items = filter ? all.filter(item => item.name.toLowerCase().includes(filter)) : all;
@@ -168,11 +189,22 @@
       const showAll = expanded.has(project.id) || Boolean(filter);
       const shown = showAll ? items : items.slice(0, 6);
       const add = h('button.icon-btn.add', { title: '在 ' + project.name + ' 新建对话', on: { click: event => { event.stopPropagation(); CF.app.go({ name: 'chat', projectId: project.id }); } } }, CF.icon('plus', 14));
-      const head = h('div.project-group-head', {
-        role: 'button', tabIndex: 0, title: project.name + ' · ' + project.typeLabel + ' · ' + CF.stateText(project.state),
-        on: { click: () => { folded ? collapsed.delete(project.id) : collapsed.add(project.id); renderConversations(); } },
+      const pinned = CF.pins.has(project.id);
+      const menuItems = () => [
+        { label: pinned ? '取消置顶' : '置顶项目', icon: 'pin', run: () => CF.togglePin(project.id) },
+        { label: '新对话', icon: 'compose', run: () => CF.app.go({ name: 'chat', projectId: project.id }) },
+        { label: '查看项目', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
+      ];
+      const more = h('button.icon-btn.add.group-more', { title: '更多', on: { click: event => { event.stopPropagation(); CF.menu(more, menuItems()); } } }, CF.icon('more', 14));
+      const head = h('div.project-group-head' + (pinned ? '.pinned' : ''), {
+        role: 'button', tabIndex: 0, title: project.name + ' · ' + project.typeLabel + ' · ' + CF.stateText(project.state) + (pinned ? ' · 已置顶' : ''),
+        on: {
+          click: () => { folded ? collapsed.delete(project.id) : collapsed.add(project.id); renderConversations(); },
+          contextmenu: event => { event.preventDefault(); CF.menu(head, menuItems()); },
+        },
       }, h('span.chev', CF.icon('down', 12)), h('span.name', project.name),
-        project.state === 'running' ? null : h('span.dot', { title: CF.stateText(project.state) }), add);
+        pinned ? h('span.pin-mark', { title: '已置顶' }, CF.icon('pin', 11)) : null,
+        project.state === 'running' ? null : h('span.dot', { title: CF.stateText(project.state) }), more, add);
       const newItem = view.name === 'chat' && !view.conversationId && view.projectId === project.id
         ? h('button.conv-item.selected', h('span.title', '新对话')) : null;
       return [h('div.project-group' + (folded ? '.collapsed' : ''), head, folded ? null : h('div.conv-list',
@@ -224,11 +256,14 @@
       if (!target) { CF.app.go({ name: 'projects' }); CF.toast('先新建一个项目'); return; }
       CF.app.go({ name: 'chat', projectId: target.id });
     } } }, CF.icon('compose', 15), h('span.label', '新对话'));
+    const kindText = profile => profile.kind === 'local' ? '这台电脑' : profile.kind === 'ssh' ? 'SSH · ' + profile.host : '远端';
     const backendButton = h('button.backend-row', { title: '切换后端', on: { click: () => CF.menu(backendButton, [
-      ...profiles.map(profile => ({ label: (profile.id === backendId ? '✓ ' : '　') + profile.name, run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
+      ...profiles.map(profile => ({ label: profile.name, hint: kindText(profile), avatar: (profile.name || '?').slice(0, 1), checked: profile.id === backendId,
+        run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
       '-',
-      { label: '设置与连接…', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
-    ]) } }, h('span.backend-avatar', (current?.name || '?').slice(0, 1)),
+      { label: '通过 SSH 添加后端…', icon: 'plus', run: async () => { const result = await CF.addSshBackend(); if (result?.id) await CF.app.loadProfiles(result.id); } },
+      { label: '设置', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
+    ], { matchWidth: true }) } }, h('span.backend-avatar', (current?.name || '?').slice(0, 1)),
       h('span.names', h('strong', current?.name || '未连接'), h('small', connected ? (current?.kind === 'local' ? '这台电脑' : current?.kind === 'ssh' ? '远程 · ' + current.host : '远端') + ' · ' + running + ' 个容器运行中' : '未连接')),
       CF.icon('down', 13));
     renderConversations();
@@ -236,7 +271,8 @@
     const typing = document.activeElement === search ? [search.selectionStart, search.selectionEnd] : null;
     sidebar.replaceChildren(
       h('div.sidebar-top',
-        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet'))),
+        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet')),
+          h('button.icon-btn.sidebar-toggle', { title: '隐藏侧边栏（' + (CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+') + '\\）', on: { click: () => CF.app.toggleSidebar() } }, CF.icon('sidebar', 16))),
         newChat,
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),
       attention,

@@ -75,6 +75,7 @@
           if (operation) void track(project.id, label, operation);
         };
         const menuButton = h('button.btn.ghost.icon.small', { title: '更多', on: { click: () => CF.menu(menuButton, [
+          project.chat ? { label: CF.pins.has(project.id) ? '取消置顶' : '置顶项目', icon: 'pin', run: () => CF.togglePin(project.id) } : null,
           running ? { label: '停止容器', icon: 'stop', run: () => act('stop', '停止')({ currentTarget: menuButton }) } : null,
           running ? { label: '重启容器', icon: 'restart', run: () => act('restart', '重启')({ currentTarget: menuButton }) } : null,
           running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
@@ -99,7 +100,7 @@
             h('span.row-avatar.' + project.type, project.name.slice(0, 1).toUpperCase(),
               h('span.status' + (busy ? '.busy' : running ? '.running' : ''), { title: CF.stateText(project.state) })),
             h('div.row-main',
-              h('div.row-title', h('span.name', project.name), CF.typeBadge(project.type, project.typeLabel), project.active ? null : h('span.badge', '已停用')),
+              h('div.row-title', h('span.name', project.name), CF.pins.has(project.id) ? h('span.pin-mark', { title: '已置顶' }, CF.icon('pin', 12)) : null, CF.typeBadge(project.type, project.typeLabel), project.active ? null : h('span.badge', '已停用')),
               h('div.row-sub', h('span', busy ? busy + '中…' : CF.stateText(project.state)), h('span.sep'), h('span', project.account),
                 h('span.sep'), h('span.path', { title: project.path }, CF.shortPath(project.path))))),
           h('div.row-actions',
@@ -124,7 +125,7 @@
           stat('chat', 'neutral', '进行中', active, undefined, '个对话'),
           stat('shield', 'amber', '等你确认', waiting, undefined, waiting ? '去对话里处理' : '没有待办')),
         projects.length
-          ? h('div.card', h('div.card-head', h('div', h('h2', '全部项目'), h('p', '每个项目在自己账号的容器里运行，网络只经 relay 出去。'))), h('ul.list', projects.map(row)))
+          ? h('div.card', h('div.card-head', h('div', h('h2', '全部项目'), h('p', '每个项目在自己账号的容器里运行，网络只经 relay 出去。'))), h('ul.list', CF.pins.sort(projects).map(row)))
           : h('div.card', h('div.empty', h('div.glyph', CF.icon('folder', 22)), h('h3', '还没有项目'),
             h('p', '选一个本地目录作为项目，用某个账号在容器里打开它。'),
             h('button.btn.primary', { on: { click: () => CF.projects.create() } }, CF.icon('plus', 14), '新建项目'))),
