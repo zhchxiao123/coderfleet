@@ -132,6 +132,28 @@
       let values;
       try { values = await CF.get('settings'); } catch (error) { CF.fail(error); return; }
       const inputs = {};
+      const LLM = {
+        SYSTEM_LLM_PROVIDER: ['接口类型', 'anthropic 或 openai（OpenAI 兼容接口也选 openai）'],
+        SYSTEM_LLM_MODEL: ['模型', '例如 claude-haiku-4-5'],
+        SYSTEM_LLM_API_KEY: ['API Key', '只保存在工作区的 config.conf，不会再显示'],
+        SYSTEM_LLM_BASE_URL: ['Base URL（可选）', '私有网关或兼容接口的地址'],
+        SYSTEM_LLM_PROXY: ['出站代理（可选）', '例如 http://127.0.0.1:10808'],
+      };
+      const llmInputs = {};
+      const llmFields = Object.entries(LLM).map(([key, [label, hint]]) => {
+        llmInputs[key] = key === 'SYSTEM_LLM_PROVIDER'
+          ? h('select', ['anthropic', 'openai'].map(value => h('option', { value, selected: values[key] === value }, value)))
+          : h('input', { value: values[key] ?? '', spellcheck: false, type: key === 'SYSTEM_LLM_API_KEY' ? 'password' : 'text', autocomplete: 'off' });
+        return h('label.field', h('span', label, hint ? h('span.hint', ' ' + hint) : null), llmInputs[key]);
+      });
+      const saveLlm = h('button.btn.primary.small', { on: { click: () => CF.busy(saveLlm, async () => {
+        await CF.api('PUT', 'settings', Object.fromEntries(Object.entries(llmInputs).map(([key, input]) => [key, input.value.trim()])));
+        CF.chat.translationChanged();
+        CF.toast('已保存，回答下面会出现「翻译」');
+      }) } }, '保存');
+      page.append(h('div.card',
+        h('div.card-head', h('div', h('h2', '翻译'), h('p', '把回答翻译成中文。用这里配置的模型，不占用项目账号的额度；和原服务共用设置与译文缓存。')), saveLlm),
+        h('div.card-body', h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:0 18px' }, llmFields))));
       const fields = Object.entries(LABELS).map(([key, [label, hint]]) => {
         inputs[key] = h('input', { value: values[key] ?? '', spellcheck: false });
         return h('label.field', h('span', label, hint ? h('span.hint', ' ' + hint) : null), inputs[key]);

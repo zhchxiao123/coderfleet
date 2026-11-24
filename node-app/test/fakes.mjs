@@ -42,7 +42,10 @@ if (argv[0] === '--version') { console.log('2.1.330 (Claude Code)'); process.exi
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 const resume = argv.find(value => value.startsWith('--resume='))?.slice(9) ?? (argv.includes('--resume') ? argv[argv.indexOf('--resume') + 1] : '');
 const model = argv.find(value => value.startsWith('--model='))?.slice(8) ?? '';
-const sessionId = resume || 'claude-session-1';
+// Forking (--fork-session) continues the resumed history under --session-id.
+const flag = name => argv.find(value => value.startsWith(name + '='))?.slice(name.length + 1) ?? (argv.includes(name) ? argv[argv.indexOf(name) + 1] : '');
+const forked = argv.includes('--fork-session') ? flag('--session-id') : '';
+let sessionId = forked || resume || 'claude-session-1';
 const waiting = new Map();
 let sequence = 0;
 const ask = (tool, input) => new Promise(resolve => {
@@ -52,7 +55,8 @@ const ask = (tool, input) => new Promise(resolve => {
 });
 const say = text => {
   send({ type: 'stream_event', session_id: sessionId, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } } });
-  send({ type: 'assistant', session_id: sessionId, message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  send({ type: 'assistant', session_id: sessionId, uuid: text === 'fork-source' ? 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' : crypto.randomUUID(),
+    message: { role: 'assistant', content: [{ type: 'text', text }] } });
 };
 const finish = (subtype = 'success', result = 'ok') => send({ type: 'result', subtype, is_error: subtype !== 'success', result, session_id: sessionId });
 let interrupt;
@@ -86,14 +90,18 @@ async function handle(message) {
   }
   if (message.type === 'control_response') { waiting.get(message.response.request_id)?.(message.response.response); return; }
   if (message.type !== 'user') return;
-  send({ type: 'system', subtype: 'init', session_id: sessionId, model });
   const prompt = message.message.content;
+  if (prompt === 'forkme' && !resume) sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  send({ type: 'system', subtype: 'init', session_id: sessionId, model });
   const mode = argv.find(value => value.startsWith('--permission-mode='))?.slice(18) ?? (argv.includes('--permission-mode') ? argv[argv.indexOf('--permission-mode') + 1] : '');
   if (Array.isArray(prompt)) {
     // Text plus base64 image blocks.
     const text = prompt.filter(block => block.type === 'text').map(block => block.text).join('');
     const images = prompt.filter(block => block.type === 'image').map(block => block.source.media_type + ':' + block.source.data.length);
     say('images:' + images.join(',') + ':' + text);
+    finish();
+  } else if (prompt === 'forkme') {
+    say('fork-source');
     finish();
   } else if (prompt === 'mode') {
     say('mode:' + mode);
@@ -145,7 +153,7 @@ async function handle(message) {
     await new Promise(resolve => { interrupt = resolve; });
     finish('error_during_execution', '');
   } else {
-    say('echo:' + prompt + ':' + model + (resume ? ':resumed=' + resume : ''));
+    say('echo:' + prompt + ':' + model + (resume ? ':resumed=' + resume : '') + (forked ? ':forked=' + forked + '@' + flag('--resume-session-at') : ''));
     finish();
   }
 }

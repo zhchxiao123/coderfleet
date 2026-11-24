@@ -265,6 +265,7 @@ export class TaskRunner {
       turn.logOffset = 0;
       writeShared(paths.spec, JSON.stringify({
         task_id: turn.id, cwd: containerPath('').replace(/\/$/, ''), prompt: turn.prompt, images: turn.images ?? [], auto: turn.auto === true, session_id: turn.resumeId,
+        ...(turn.forkAt ? { fork_session_id: turn.forkAt.sessionId, resume_session_at: turn.forkAt.messageId } : {}),
         model: turn.requestedModel, env_auth: project.account.auth === 'env',
         state_path: inside(turn.id + '.sdk-state.json'), control_module: inside(bundleName + '/control.js'),
         control_directory: inside(turn.id + '.control'), control_token: turn.controlToken,

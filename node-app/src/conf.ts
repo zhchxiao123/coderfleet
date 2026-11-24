@@ -218,15 +218,23 @@ export function setProjectActive(workspace: string, name: string, active: boolea
 export const SETTINGS: Readonly<Record<string, string>> = {
   PROXY_HOST: 'host.docker.internal', PROXY_HTTP_PORT: '7890', CONTAINER_TIMEZONE: 'Asia/Shanghai',
   BUILD_PLATFORM: 'linux/amd64', IMAGE_NAME: 'coderfleet', IMAGE_TAG: 'latest',
+  // The system LLM for translation (settings_schema.py), never a pooled account.
+  SYSTEM_LLM_PROVIDER: 'anthropic', SYSTEM_LLM_API_KEY: '', SYSTEM_LLM_MODEL: '', SYSTEM_LLM_BASE_URL: '', SYSTEM_LLM_PROXY: '',
 };
+/** Settings whose value is never sent back; the client sees this placeholder when one is set. */
+export const SECRET_SETTINGS: ReadonlySet<string> = new Set(['SYSTEM_LLM_API_KEY']);
+export const SECRET_PLACEHOLDER = '••••••••';
 
 export function readSettings(workspace: string): Record<string, string> {
   const config = loadConfig(workspace);
-  return Object.fromEntries(Object.entries(SETTINGS).map(([key, fallback]) => [key, config[key] || fallback]));
+  return Object.fromEntries(Object.entries(SETTINGS).map(([key, fallback]) => [key,
+    SECRET_SETTINGS.has(key) ? (config[key] ? SECRET_PLACEHOLDER : '') : config[key] || fallback]));
 }
 
 /** Updates config.conf in place, keeping comments and other keys. */
 export function writeSettings(workspace: string, values: Record<string, string>): void {
+  // An unchanged secret comes back as its placeholder: keep the stored value.
+  values = Object.fromEntries(Object.entries(values).filter(([key, value]) => !(SECRET_SETTINGS.has(key) && value === SECRET_PLACEHOLDER)));
   for (const [key, value] of Object.entries(values)) {
     if (!(key in SETTINGS)) throw new WorkspaceError('不支持的设置 ' + key);
     if (!/^[^\s#]*$/.test(value)) throw new WorkspaceError(key + ' 不能包含空白或 #');

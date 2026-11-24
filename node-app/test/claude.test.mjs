@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { environment, lastTurn, until } from './helpers.mjs';
 import { fakeClaude } from './fakes.mjs';
@@ -78,6 +80,36 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.match(turn.answer, /long-done/);
     assert.deepEqual(turn.blocks.filter(block => block.kind === 'user'), [{ kind: 'user', text: 'also this' }]);
     assert.deepEqual((await env.get('conversations/' + conversation + '/follow-ups')).body, []);
+
+    // Fork at a finished turn: a new conversation resumes it under a new session ID.
+    const source = (await env.post('conversations', { projectId: 'app' })).body.id;
+    await env.post('conversations/' + source + '/turns', { prompt: 'forkme' });
+    const sourceTurn = await until(() => lastTurn(env, source), value => value.status === 'done', 'source turn');
+    const S = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; const U = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    assert.equal(sourceTurn.sessionId, S);
+    const refused = await env.post('conversations/' + source + '/fork', { turnId: sourceTurn.id });
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /找不到这个会话的 Claude 记录/);
+    // Claude's own transcript of the session, in the account directory.
+    mkdirSync(join(env.workspace, 'accounts', 'claude-a', 'projects', '-workspace'), { recursive: true });
+    writeFileSync(join(env.workspace, 'accounts', 'claude-a', 'projects', '-workspace', S + '.jsonl'), JSON.stringify({ type: 'assistant', uuid: U }) + '\n');
+    const fork = (await env.post('conversations/' + source + '/fork', { turnId: sourceTurn.id })).body;
+    assert.equal(fork.name, 'forkme · 分叉');
+    assert.deepEqual([fork.fork.source_session_id, fork.fork.message_uuid, fork.fork.inherited_task_ids], [S, U, [sourceTurn.id]]);
+    const listed = (await env.get('conversations')).body.find(item => item.id === fork.id);
+    assert.deepEqual(listed.forkedFrom, { conversationId: source, turnId: sourceTurn.id });
+    let forkTurns = (await env.get('conversations/' + fork.id + '/turns')).body;
+    assert.deepEqual(forkTurns.map(item => [item.id, item.inherited]), [[sourceTurn.id, true]]);
+    await env.post('conversations/' + fork.id + '/turns', { prompt: 'branch' });
+    turn = await until(() => lastTurn(env, fork.id), value => value.prompt === 'branch' && value.status === 'done', 'fork turn');
+    const T = fork.fork.target_session_id;
+    assert.equal(turn.answer, 'echo:branch::resumed=' + S + ':forked=' + T + '@' + U);
+    assert.equal(turn.sessionId, T);
+    await env.post('conversations/' + fork.id + '/turns', { prompt: 'more' });
+    turn = await until(() => lastTurn(env, fork.id), value => value.prompt === 'more' && value.status === 'done', 'second fork turn');
+    assert.equal(turn.answer, 'echo:more::resumed=' + T, 'later turns continue the fork, not the source');
+    // The source is unchanged.
+    assert.equal((await lastTurn(env, source)).id, sourceTurn.id);
 
     // Native interrupt.
     await env.post('conversations/' + conversation + '/turns', { prompt: 'slow' });

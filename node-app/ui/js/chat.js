@@ -22,6 +22,10 @@
   };
   const SETTLED = new Set(['completed', 'failed', 'denied', 'interrupted', 'unknown']);
   const openFlows = new Set();
+  // Translations shown in place of a text block: turnId:blockIndex → { showing, text?, pending? }.
+  const translations = new Map();
+  // Whether the backend has a system LLM for translation, per backend.
+  const translateReady = new Map();
 
   function toolGlyph(status) {
     if (status === 'running') return h('span.spinner.tool-spinner');
@@ -197,12 +201,16 @@
       if (group.length) nodes.push(toolFlow(turn, group, turn.id + ':' + nodes.length));
       group = [];
     };
-    for (const block of blocks) {
-      if (block.kind === 'tool') { const tool = byId.get(block.id); if (tool) group.push(tool); continue; }
+    blocks.forEach((block, index) => {
+      if (block.kind === 'tool') { const tool = byId.get(block.id); if (tool) group.push(tool); return; }
       flush();
-      if (block.kind === 'user') { nodes.push(userBubble(turn.projectId, block.text, block.images, '插话')); continue; }
-      if (block.text.trim()) nodes.push(h('div.assistant', CF.markdown(block.text)));
-    }
+      if (block.kind === 'user') { nodes.push(userBubble(turn.projectId, block.text, block.images, '插话')); return; }
+      if (!block.text.trim()) return;
+      const state = translations.get(turn.id + ':' + index);
+      nodes.push(state?.showing && state.text !== undefined
+        ? h('div.assistant.translated', CF.markdown(state.text))
+        : h('div.assistant', { dataset: { block: String(index) } }, CF.markdown(block.text)));
+    });
     flush();
     return nodes;
   }
@@ -215,10 +223,63 @@
       text ? h('div.bubble', text) : null);
   }
 
+  /** Text blocks of a turn as [index, text]; translation works block by block. */
+  const textBlocks = turn => (turn.blocks?.length ? turn.blocks : turn.answer ? [{ kind: 'text', text: turn.answer }] : [])
+    .map((block, index) => [index, block]).filter(([, block]) => block.kind === 'text' && block.text.trim()).map(([index, block]) => [index, block.text]);
+
+  /** Shows or hides the translation of every text block of a turn. */
+  async function toggleTranslation(turn, button) {
+    const parts = textBlocks(turn);
+    const keys = parts.map(([index]) => turn.id + ':' + index);
+    const showing = keys.some(key => translations.get(key)?.showing);
+    if (showing) { for (const key of keys) { const state = translations.get(key); if (state) state.showing = false; } session?.rerender(turn.id); return; }
+    if (keys.every(key => translations.get(key)?.text !== undefined)) {
+      for (const key of keys) translations.get(key).showing = true;
+      session?.rerender(turn.id);
+      return;
+    }
+    await CF.busy(button, async () => {
+      const results = await Promise.all(parts.map(([, text]) => CF.api('POST', 'translate', { text, target: '简体中文' })));
+      parts.forEach(([index], position) => translations.set(turn.id + ':' + index, { showing: true, text: results[position].translated }));
+    });
+    session?.rerender(turn.id);
+  }
+
+  async function forkAt(turn, button) {
+    const created = await CF.busy(button, () => CF.api('POST', 'conversations/' + turn.conversationId + '/fork', { turnId: turn.id }));
+    if (!created) return;
+    await CF.app.refreshConversations();
+    CF.app.go({ name: 'chat', conversationId: created.id, projectId: created.projectId });
+    CF.toast('已从这里分叉：新对话接着这轮回答继续，项目文件是共享的');
+  }
+
+  /** Time and actions under a finished answer: copy, translate, fork (Claude). */
+  function turnActions(turn) {
+    if (isActive(turn) || turn.status === 'queued') return null;
+    const text = textBlocks(turn).map(([, value]) => value).join('\n\n');
+    const translated = textBlocks(turn).some(([index]) => translations.get(turn.id + ':' + index)?.showing);
+    const time = turn.finishedAt || turn.createdAt;
+    const action = (icon, label, run, extra = '') => {
+      const button = h('button.turn-action' + extra, { title: label, 'aria-label': label, on: { click: event => void run(event.currentTarget) } }, CF.icon(icon, 13));
+      return button;
+    };
+    return h('div.turn-actions',
+      h('span.turn-time', { title: CF.fullTime(time) }, CF.shortTime(time)),
+      text ? action('copy', '复制', async button => {
+        await navigator.clipboard.writeText(text);
+        button.replaceChildren(CF.icon('check', 13));
+        setTimeout(() => button.replaceChildren(CF.icon('copy', 13)), 1200);
+      }) : null,
+      text && translateReady.get(CF.state.backendId) ? action('translate', translated ? '显示原文' : '翻译成中文', button => toggleTranslation(turn, button), translated ? '.on' : '') : null,
+      turn.type === 'claude' && turn.status === 'done' && !turn.inherited && turn.sessionId
+        ? action('fork', '从这里分叉', button => forkAt(turn, button)) : null);
+  }
+
   function turnNode(turn) {
-    const node = h('div.turn',
+    const node = h('div.turn' + (turn.inherited ? '.inherited' : ''),
       userBubble(turn.projectId, turn.prompt, turn.images),
       body(turn),
+      turnActions(turn),
       turn.permission ? approvalCard(turn) : null,
       isActive(turn) && !turn.permission ? h('div.running-status', h('span.orb'), h('span.shimmer', { dataset: { text: STATUS[turn.status] } }, STATUS[turn.status])) : null,
       turn.status === 'cancelled' ? h('div.turn-note', CF.icon('square', 12), '已中断') : null,
@@ -229,6 +290,7 @@
   }
 
   const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
+    textBlocks(turn).map(([index]) => translations.get(turn.id + ':' + index)?.showing ? 1 : 0).join(''), translateReady.get(CF.state.backendId) ? 1 : 0,
     turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
 
   function project() {
@@ -266,6 +328,9 @@
   }
 
   CF.chat = {
+    /** After the translation model changes in Settings. */
+    translationChanged() { translateReady.clear(); },
+
     /** The project a new conversation starts in: the given one, the last used, or the first running. */
     defaultProject(preferred) {
       const list = chatProjects();
@@ -365,9 +430,21 @@
           h('button.btn.primary.small', { on: { click: event => CF.projects.start(info.id, event.currentTarget) } }, CF.icon('play', 12), '启动')));
         updateComposer();
       };
+      // A fork starts with the source's history, read-only, under a banner that links back.
+      const forkBanner = () => {
+        const record = CF.state.conversations.find(item => item.id === current.conversationId);
+        if (!record?.forkedFrom) return null;
+        const source = CF.state.conversations.find(item => item.id === record.forkedFrom.conversationId);
+        return h('div.fork-banner', CF.icon('fork', 14),
+          h('span', '分叉的对话 · 下面先是分叉点之前的历史（只读）；项目文件是共享的，不会回滚代码。'),
+          source ? h('button.btn.ghost.small', { on: { click: () => CF.app.go({ name: 'chat', conversationId: source.id, projectId: source.projectId }) } }, '查看原对话') : null);
+      };
+      let bannerNode = null;
+      let dividerNode = null;
       const renderTurns = () => {
         if (!current.turns.length) { if (!welcome.isConnected) transcript.replaceWith(welcome); return; }
         if (welcome.isConnected) welcome.replaceWith(transcript);
+        if (!bannerNode) { bannerNode = forkBanner(); if (bannerNode) inner.prepend(bannerNode); }
         const atBottom = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 40;
         for (const turn of current.turns) {
           const existing = nodes.get(turn.id);
@@ -376,6 +453,9 @@
           const node = turnNode(turn);
           if (existing) existing.node.replaceWith(node); else inner.append(node);
           nodes.set(turn.id, { node, sig });
+          // Where the inherited history ends and the fork's own turns begin.
+          if (!existing && turn.inherited && !dividerNode) { dividerNode = h('div.fork-divider', h('span', '以上是分叉前的历史')); }
+          if (dividerNode && turn.inherited) node.after(dividerNode);
         }
         if (atBottom) transcript.scrollTop = transcript.scrollHeight;
         updateComposer();
@@ -436,6 +516,14 @@
           } } }, CF.icon('x', 12)))));
       };
 
+      current.rerender = turnId => {
+        const turn = current.turns.find(item => item.id === turnId);
+        const existing = nodes.get(turnId);
+        if (!turn || !existing) return;
+        const node = turnNode(turn);
+        existing.node.replaceWith(node);
+        nodes.set(turnId, { node, sig: signature(turn) });
+      };
       current.refresh = async () => {
         if (!current.conversationId || session !== current) return;
         clearTimeout(current.timer);
@@ -541,6 +629,14 @@
       renderHeader();
       autosize();
       void loadModels(projectId, modelSelect);
+      // Translation needs the backend's system LLM; ask once per backend.
+      if (!translateReady.has(CF.state.backendId)) {
+        const backend = CF.state.backendId;
+        CF.get('system-llm').then(status => {
+          translateReady.set(backend, Boolean(status.configured));
+          if (status.configured && session === current) for (const turn of current.turns) current.rerender(turn.id);
+        }).catch(() => undefined);
+      }
       void current.refresh();
       textarea.focus();
       current.renderHeader = renderHeader;

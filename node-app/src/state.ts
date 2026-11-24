@@ -59,6 +59,20 @@ export function readConfig(path: string): Config {
   };
 }
 
+/** Where a forked Claude conversation branched off (Python ConversationFork). */
+export interface ConversationFork {
+  readonly source_conversation_id: string;
+  readonly source_task_id: string;
+  readonly source_session_id: string;
+  /** The last assistant message of the source turn; the fork resumes there. */
+  readonly message_uuid: string;
+  /** Chosen up front so a fork interrupted before its first reply is resumed, not forked twice. */
+  readonly target_session_id: string;
+  /** Source turns shown read-only above the fork's own turns. */
+  readonly inherited_task_ids: readonly string[];
+  readonly model: string;
+}
+
 export interface Conversation {
   readonly id: string;
   readonly projectId: string;
@@ -70,6 +84,7 @@ export interface Conversation {
   readonly account?: string;
   readonly type?: string;
   readonly project?: string;
+  readonly fork?: ConversationFork;
 }
 
 /**
@@ -122,6 +137,8 @@ export interface Turn {
   readonly images?: readonly string[];
   /** Tools run without asking (Python `auto`: bypass permissions / --yolo / always approve). */
   readonly auto?: boolean;
+  /** The first turn of a fork: resume `resumeId` at this message under this new session ID. */
+  readonly forkAt?: { readonly sessionId: string; readonly messageId: string };
   readonly requestedModel: string;
   readonly createdAt: string;
   readonly resumeId: string;

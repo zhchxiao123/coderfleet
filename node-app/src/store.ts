@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeLog } from './history.js';
-import { record, text, type Conversation, type RecordValue, type Status, type Turn } from './state.js';
+import { record, text, type Conversation, type ConversationFork, type RecordValue, type Status, type Turn } from './state.js';
 import { applyEvent } from './tasks.js';
 
 type Raw = RecordValue;
@@ -38,6 +38,14 @@ interface NodeFields {
 }
 
 interface Entry { readonly mtime: number; readonly raw: Raw }
+
+function forkOf(raw: Raw): ConversationFork {
+  return {
+    source_conversation_id: text(raw.source_conversation_id), source_task_id: text(raw.source_task_id), source_session_id: text(raw.source_session_id),
+    message_uuid: text(raw.message_uuid), target_session_id: text(raw.target_session_id), model: text(raw.model),
+    inherited_task_ids: Array.isArray(raw.inherited_task_ids) ? raw.inherited_task_ids.filter((item): item is string => typeof item === 'string') : [],
+  };
+}
 
 export class WorkspaceStore {
   private readonly conversationsDir: string;
@@ -94,6 +102,7 @@ export class WorkspaceStore {
     return {
       id: text(raw.id), projectId, name: text(raw.name) || '对话', createdAt: text(raw.created), updatedAt: text(raw.updated) || text(raw.created),
       nativeSessionId: text(raw.native_session_id), account: text(raw.account), type: text(raw.type), project: text(raw.project),
+      ...(raw.fork && typeof raw.fork === 'object' ? { fork: forkOf(record(raw.fork)) } : {}),
     };
   }
 
@@ -125,6 +134,7 @@ export class WorkspaceStore {
       ...current, id: value.id, name: value.name, account: value.account ?? current.account, type: value.type ?? current.type,
       project: value.project ?? current.project, project_name: value.projectId, native_session_id: value.nativeSessionId ?? current.native_session_id ?? '',
       updated: now(),
+      ...(value.fork ? { fork: { ...value.fork, inherited_task_ids: [...value.fork.inherited_task_ids] } } : {}),
       // A manual rename wins over automatic titles, as in the Python service.
       ...(renamed ? { title: { ...title, source: 'manual', revision: Number(title.revision ?? 0) + 1 } } : {}),
     };
@@ -271,6 +281,9 @@ export class WorkspaceStore {
   public setNativeSession(conversationId: string, sessionId: string, taskId: string): void {
     this.touchConversation(conversationId, raw => {
       if (raw.native_session_id === sessionId) return;
+      // A fork only ever continues its own session, never the source's (Python guard).
+      const target = text(record(raw.fork).target_session_id);
+      if (target && sessionId !== target) { console.error('Fork reported a session other than its target; not recorded:', conversationId); return; }
       raw.native_session_id = sessionId;
       raw.last_task_id = taskId;
     });

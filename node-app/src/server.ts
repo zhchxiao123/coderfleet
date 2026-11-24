@@ -11,7 +11,9 @@ import {
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
+import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
+import { configured, SystemLLMError, systemLLM, TranslationCache, translateText } from './translate.js';
 import { findPythonService, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
 import { WorkspaceStore } from './store.js';
@@ -89,6 +91,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
   const followUps = new FollowUps(config.stateDirectory);
+  const translations = new TranslationCache(join(workspace, 'translations'));
 
   /** Starts a new turn in a conversation that has none running. */
   const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
@@ -102,11 +105,20 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
     if (turns.some(turn => turn.status === 'queued')) throw new HttpError(409, '这个对话还有原服务排队中的任务');
     // Later turns resume the conversation's agent session (Python: native_session_id).
-    const resume = conversation.nativeSessionId || turns.findLast(turn => turn.sessionId)?.sessionId || '';
+    let resume = conversation.nativeSessionId || turns.findLast(turn => turn.sessionId)?.sessionId || '';
+    // A fork's first turn resumes the source at the fork point under the chosen session ID;
+    // if that session already exists (the service stopped before recording it), resume it instead.
+    const fork = conversation.fork;
+    let forkAt: Turn['forkAt'];
+    if (fork && !resume) {
+      if (transcript(workspace, target.account.name, fork.target_session_id)) resume = fork.target_session_id;
+      else { resume = fork.source_session_id; forkAt = { sessionId: fork.target_session_id, messageId: fork.message_uuid }; }
+    }
     const turn: Turn = {
       id: randomUUID().replaceAll('-', '').slice(0, 12), origin: 'node', conversationId: conversation.id, projectId: conversation.projectId,
       account: target.account.name, type: target.account.type, prompt: input.text, images: input.images, auto: input.auto,
-      requestedModel: input.model, createdAt: new Date().toISOString(), resumeId: resume, status: 'starting', answer: '', tools: [], blocks: [],
+      requestedModel: input.model || (fork && !conversation.nativeSessionId ? fork.model : ''), createdAt: new Date().toISOString(), resumeId: resume,
+      status: 'starting', answer: '', tools: [], blocks: [], ...(forkAt ? { forkAt } : {}),
     };
     store.createTurn(turn, target.path);
     if (turns.length === 0 && conversation.name === '新对话') {
@@ -168,6 +180,27 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         accountTypes: Object.values(ACCOUNT_TYPES).map(({ id, label, envAuth, envHint, chat }) => ({ id, label, envAuth, envHint, chat })),
         operations: lifecycle.recent(),
       };
+    }],
+    // Translation through the system LLM (SYSTEM_LLM_* in config.conf), cached like the Python service.
+    ['GET', /^system-llm$/, async () => {
+      const llm = systemLLM(workspace);
+      return { configured: configured(llm), provider: llm.provider, model: llm.model };
+    }],
+    ['POST', /^translate$/, async request => {
+      const input = await body(request, 2_000_000);
+      const source = text(input.text);
+      const target = text(input.target).trim() || '简体中文';
+      if (source.length > 400_000 || target.length > 40) throw new HttpError(400, '内容太长');
+      if (!source.trim()) return { translated: '', cached: false };
+      const cached = translations.get(source, target);
+      if (cached !== undefined) return { translated: cached, cached: true };
+      const llm = systemLLM(workspace);
+      if (!configured(llm)) throw new HttpError(503, '还没有配置翻译用的模型：在 设置 → 翻译 里填写');
+      let translated: string;
+      try { translated = await translateText(llm, source, target); }
+      catch (error) { throw new HttpError(error instanceof SystemLLMError ? 502 : 500, message(error)); }
+      if (translated.trim()) translations.put(source, target, translated);
+      return { translated, cached: false };
     }],
     ['POST', /^workspace\/init$/, async () => ({ created: initWorkspace(workspace, template) })],
     ['GET', /^settings$/, async () => readSettings(workspace)],
@@ -287,6 +320,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return store.conversations().map(item => {
         const summary = summaries.get(item.id);
         return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
+          forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
           updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false };
       }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     }],
@@ -309,8 +343,32 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return renamed;
     }],
     ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id]) => {
-      if (!store.conversation(identifier(id))) throw new HttpError(404, 'Conversation not found');
-      return turnsOf(id as string).map(publicTurn);
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      // A fork shows the turns it branched from, read-only, before its own.
+      const inherited = (conversation.fork?.inherited_task_ids ?? []).flatMap(turnId => {
+        const turn = store.turn(turnId);
+        return turn ? [{ ...publicTurn(turn), inherited: true }] : [];
+      });
+      return [...inherited, ...turnsOf(id as string).map(publicTurn)];
+    }],
+    // Forks a Claude conversation at a finished turn into a new conversation.
+    ['POST', /^conversations\/([\w-]+)\/fork$/, async (request, [id]) => {
+      const source = store.conversation(identifier(id));
+      if (!source) throw new HttpError(404, 'Conversation not found');
+      const input = await body(request);
+      const turn = store.turn(identifier(input.turnId));
+      if (!turn) throw new HttpError(404, '找不到这轮回答');
+      let log = '';
+      try { log = readFileSync(store.logPath(turn.id), 'utf8'); } catch { /* checked below */ }
+      try {
+        const child = forkOf(workspace, source, turnsOf(source.id), turn, log, randomUUID().replaceAll('-', '').slice(0, 12), text(input.name));
+        store.saveConversation(child);
+        return child;
+      } catch (error) {
+        if (error instanceof ForkError) throw new HttpError(409, error.message);
+        throw error;
+      }
     }],
     // Sends a message: a new turn when nothing runs; into the running turn when its agent
     // takes messages mid-turn (Claude); otherwise queued as the next turn.

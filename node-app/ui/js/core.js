@@ -44,6 +44,9 @@
 
   const ICONS = {
     plus: '<path d="M8 3v10M3 8h10"/>',
+    copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5V9A1.5 1.5 0 0 0 4 10.5h1.5"/>',
+    translate: '<path d="M2.5 4h6M5.5 2.5V4M7.5 4c0 3-2.5 5.5-5 6.5M4 6.5c1 1.5 2.5 3 4.5 3.5M9 13.5l2.5-6 2.5 6M9.8 11.5h3.4"/>',
+    fork: '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/><path d="M4.5 5v1.5a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2V5M8 8.5V11"/>',
     image: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.1"/><path d="M13.5 10.5 10.5 7.5 4 13"/>',
     bolt: '<path d="M9 2 3.5 9H8l-1 5 5.5-7H8z"/>',
     chat: '<path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H7l-3 2.5V11h0A1.5 1.5 0 0 1 3 9.5z"/>',
@@ -318,6 +321,25 @@
     if (delta < 86400) return Math.floor(delta / 3600) + ' 小时前';
     if (delta < 86400 * 7) return Math.floor(delta / 86400) + ' 天前';
     return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  };
+
+  /** Compact time for lists, like mainstream chat apps: 14:32 · 昨天 · 周一 · 11月3日 · 2025/11/3. */
+  CF.shortTime = iso => {
+    const date = new Date(iso);
+    if (!Number.isFinite(date.getTime())) return '';
+    const now = new Date();
+    const day = value => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+    const days = Math.round((day(now) - day(date)) / 86400000);
+    if (days <= 0) return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    if (days === 1) return '昨天';
+    if (days < 7) return '周' + '日一二三四五六'[date.getDay()];
+    if (date.getFullYear() === now.getFullYear()) return (date.getMonth() + 1) + '月' + date.getDate() + '日';
+    return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate();
+  };
+  /** Full time for tooltips and message stamps. */
+  CF.fullTime = iso => {
+    const date = new Date(iso);
+    return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
   };
 
   /** Interactive terminal sheet bound to a backend terminal session. */

@@ -154,7 +154,7 @@
     if (item.status === 'queued') return h('span.dot', { title: '在原服务里排队' });
     if (['starting', 'running'].includes(item.status)) return h('span.dot.busy', { title: '进行中' });
     if (item.status === 'failed') return h('span.dot.failed', { title: '失败' });
-    return null;
+    return h('span.meta', { title: CF.fullTime(item.updatedAt) }, CF.shortTime(item.updatedAt));
   }
 
   function renderConversations() {
@@ -178,12 +178,25 @@
       return [h('div.project-group' + (folded ? '.collapsed' : ''), head, folded ? null : h('div.conv-list',
         newItem,
         shown.map(item => h('button.conv-item' + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
-          title: item.name, on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
+          title: item.name + ' · ' + CF.fullTime(item.updatedAt), on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
         }, h('span.title', item.name), conversationMeta(item))),
         !items.length && !newItem ? h('button.conv-more', { on: { click: () => CF.app.go({ name: 'chat', projectId: project.id }) } }, '开始第一个对话') : null,
         items.length > 6 && !filter ? h('button.conv-more', { on: { click: () => { showAll ? expanded.delete(project.id) : expanded.add(project.id); renderConversations(); } } }, showAll ? '收起' : '显示更多') : null))];
     });
-    conversationsHost.replaceChildren(groups.length ? h('div', groups)
+    // 最近: the latest conversations across all projects (the old Web UI's 最近访问).
+    const recentFolded = localStorage.getItem('cf.recentFolded') === '1';
+    const recent = filter ? [] : conversations.filter(item => chatProjects.some(project => project.id === item.projectId)).slice(0, 8);
+    const recentGroup = recent.length ? h('div.recent-group' + (recentFolded ? '.collapsed' : ''),
+      h('div.project-group-head.recent-head', {
+        role: 'button', tabIndex: 0,
+        on: { click: () => { localStorage.setItem('cf.recentFolded', recentFolded ? '' : '1'); renderConversations(); } },
+      }, h('span.chev', CF.icon('down', 12)), h('span.name', '最近')),
+      recentFolded ? null : h('div.conv-list', recent.map(item => h('button.conv-item.recent' + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
+        title: item.name + ' · ' + CF.fullTime(item.updatedAt),
+        on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
+      }, h('span.lines', h('span.title', item.name), h('span.sub', projects.find(project => project.id === item.projectId)?.name || item.projectId)),
+        conversationMeta(item))))) : null;
+    conversationsHost.replaceChildren(groups.length ? h('div', recentGroup, groups)
       : h('div.sidebar-empty', filter ? '没有匹配的对话。' : connected ? '添加 Claude、Codex 或 Antigravity 项目后，在这里开始对话。' : '连接后端后显示对话。'));
   }
 

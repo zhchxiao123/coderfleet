@@ -11,7 +11,11 @@ import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
 import { attachments, emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
-export interface ClaudeSpec extends BaseSpec { sdk_directory: string; permission_mode?: string }
+export interface ClaudeSpec extends BaseSpec {
+  sdk_directory: string; permission_mode?: string;
+  /** A fork's first turn: resume session_id at resume_session_at as the new session fork_session_id. */
+  fork_session_id?: string; resume_session_at?: string;
+}
 
 type Decision = { decision: 'allow' | 'deny'; answers?: Record<string, string>; message?: string };
 type PermissionResult = { behavior: 'allow'; updatedInput: Json } | { behavior: 'deny'; message: string };
@@ -172,6 +176,8 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
       prompt: input(),
       options: {
         cwd: spec.cwd, pathToClaudeCodeExecutable: path, model: spec.model || undefined, resume: spec.session_id || undefined,
+        ...(spec.fork_session_id && spec.session_id && spec.resume_session_at
+          ? { forkSession: true, sessionId: spec.fork_session_id, resumeSessionAt: spec.resume_session_at } : {}),
         permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         canUseTool: (toolName: string, toolInput: Json, context: Json) =>
