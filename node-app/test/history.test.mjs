@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -143,4 +144,37 @@ print(c.name, c.type.value, c.native_session_id, t.status.value, t.conversation_
     const output = execFileSync('uv', ['run', '--quiet', 'python', '-c', script, env.workspace, created, fresh.id], { cwd: repository, encoding: 'utf8' });
     assert.equal(output.trim(), 'fresh claude claude-session-1 done True claude-session-1');
   } finally { await env.close(); }
+});
+
+test('a turn the Python service runs is stopped there, never marked by this service', { timeout: 60_000 }, async () => {
+  const env = await environment({
+    accounts: 'NAME=claude-a TYPE=claude\n', projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\n`,
+    containers: { 'claude-app': 'running' }, bins: { claude: fakeClaude },
+  });
+  const stops = [];
+  const python = createServer((request, response) => {
+    if (request.method === 'DELETE') stops.push([request.url, request.headers.authorization]);
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(request.url === '/api/health' ? { status: 'ok', workspace: env.workspace } : { id: 'py1' }));
+  });
+  try {
+    // Started long ago by the Python service (no "node" fields): older than this service's start grace.
+    seed(env.workspace, env.project, { id: 'pc', project_name: 'app' }, [
+      { id: 'py1', status: 'running', execution_backend: 'sdk', log: lines([{ type: 'assistant', message: { content: [{ type: 'text', text: 'Working' }] } }]) },
+    ]);
+    await until(() => env.get('conversations/pc/turns'), value => value.body.at?.(-1)?.id === 'py1', 'seeded turn');
+    const refused = await env.post('turns/py1/cancel');
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /原 Python 服务运行，它现在没有运行/);
+    let turn = await lastTurn(env, 'pc');
+    assert.deepEqual([turn.status, turn.error], ['running', undefined], 'the view is not marked as failed');
+
+    await new Promise(resolve => python.listen(0, '127.0.0.1', resolve));
+    appendFileSync(join(env.workspace, 'config.conf'), 'CODERFLEET_PORT=' + python.address().port + '\n');
+    writeFileSync(join(env.workspace, 'api_key.txt'), 'python-key\n');
+    assert.equal((await env.post('turns/py1/cancel')).status, 200);
+    assert.deepEqual(stops, [['/api/tasks/py1', 'Bearer python-key']]);
+    turn = await lastTurn(env, 'pc');
+    assert.deepEqual([turn.status, turn.error], ['running', undefined], 'the Python service records the outcome');
+  } finally { python.close(); await env.close(); }
 });

@@ -44,11 +44,15 @@
 
   const ICONS = {
     plus: '<path d="M8 3v10M3 8h10"/>',
+    eye: '<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>',
     sidebar: '<rect x="2.5" y="3" width="11" height="10" rx="2"/><path d="M6.5 3v10"/>',
+    bookmark: '<path d="M4.5 2.5h7v11L8 10.5l-3.5 3z"/>',
     pin: '<path d="M6 2.5h4M7 2.5v4L4.5 9h7L9 6.5v-4M8 9v4.5"/>',
     copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5V9A1.5 1.5 0 0 0 4 10.5h1.5"/>',
     translate: '<path d="M2.5 4h6M5.5 2.5V4M7.5 4c0 3-2.5 5.5-5 6.5M4 6.5c1 1.5 2.5 3 4.5 3.5M9 13.5l2.5-6 2.5 6M9.8 11.5h3.4"/>',
     fork: '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/><path d="M4.5 5v1.5a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2V5M8 8.5V11"/>',
+    clip: '<path d="M13 7.5 8.2 12.3a3 3 0 0 1-4.3-4.2l5.3-5.3a2 2 0 0 1 2.8 2.8L6.7 10.9a1 1 0 0 1-1.4-1.4L10 4.8"/>',
+    file: '<path d="M9 2.5H4.5A1.5 1.5 0 0 0 3 4v8a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 12V6.5z"/><path d="M9 2.5v4h4"/>',
     image: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.1"/><path d="M13.5 10.5 10.5 7.5 4 13"/>',
     bolt: '<path d="M9 2 3.5 9H8l-1 5 5.5-7H8z"/>',
     chat: '<path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H7l-3 2.5V11h0A1.5 1.5 0 0 1 3 9.5z"/>',
@@ -129,6 +133,7 @@
       menu.append(h('button' + (item.danger ? '.danger' : '') + (item.checked ? '.checked' : ''), { role: 'menuitem', on: { click: () => { menu.remove(); item.run(); } } },
         item.avatar ? h('span.menu-avatar', item.avatar) : item.icon ? CF.icon(item.icon, 14) : null,
         item.hint ? h('span.menu-text', h('span', item.label), h('small', item.hint)) : h('span.menu-text', item.label),
+        item.trail ? h('span.menu-trail', item.trail) : null,
         item.checked ? h('span.menu-check', CF.icon('check', 14)) : null));
     }
     document.body.append(menu);
@@ -152,13 +157,28 @@
     const key = projectId + ':' + path;
     if (!uploadCache.has(key)) {
       const file = String(path).split('/').pop();
-      uploadCache.set(key, CF.get('projects/' + encodeURIComponent(projectId) + '/uploads/' + file)
+      uploadCache.set(key, CF.get('projects/' + encodeURIComponent(projectId) + '/uploads/' + encodeURIComponent(file))
         .then(image => 'data:' + image.mime + ';base64,' + image.data)
         .catch(error => { uploadCache.delete(key); throw error; }));
     }
     return uploadCache.get(key);
   };
   CF.seedUpload = (projectId, path, url) => uploadCache.set(projectId + ':' + path, Promise.resolve(url));
+
+  /** Upload paths are <16 hex>-<name>; the original name and size are remembered for this session. */
+  const uploadNames = new Map();
+  CF.rememberUpload = (path, name, size) => uploadNames.set(path, { name, size });
+  CF.uploadName = path => uploadNames.get(path)?.name || String(path).split('/').pop().replace(/^[a-f0-9]{16}[-.]/, '');
+  CF.uploadSize = path => uploadNames.get(path)?.size;
+  CF.isImageUpload = path => /\.(png|jpe?g|webp|gif)$/i.test(String(path));
+  const humanSize = size => size === undefined ? '' : size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(size < 10240 ? 1 : 0) + ' KB' : (size / 1048576).toFixed(1) + ' MB';
+  /** A file attachment: icon, name and size (extension shown as the icon label). */
+  CF.fileChip = (name, size) => {
+    const extension = /\.([A-Za-z0-9]{1,6})$/.exec(name)?.[1]?.toUpperCase() || '';
+    return h('span.file-chip', { title: name },
+      h('span.file-icon', CF.icon('file', 18), extension ? h('small', extension) : null),
+      h('span.file-meta', h('span.file-name', name), size !== undefined ? h('small', humanSize(size)) : null));
+  };
 
   /** A thumbnail of a project upload; clicking opens it full size. */
   CF.uploadThumb = (projectId, path, extra) => {
@@ -299,20 +319,66 @@
     void poll();
   };
 
-  /** Waits for an operation and reports it with a toast that can open the log. */
-  CF.trackOperation = async (operation, label, refresh) => {
-    for (;;) {
-      await new Promise(resolve => setTimeout(resolve, 800));
-      let current;
-      try { current = await CF.get('operations/' + operation.id); } catch { return; }
-      refresh?.();
-      if (current.status === 'running') continue;
-      const action = { label: '日志', run: () => CF.operationLog(operation, label) };
-      if (current.status === 'succeeded') CF.toast(label + '：完成', { action });
-      else CF.toast(label + '：失败', { error: true, action, timeout: 8000 });
-      refresh?.();
-      return current;
-    }
+  /** How an operation reads in lists and notifications. */
+  CF.operationLabel = operation => operation.kind === 'build' ? '构建镜像'
+    : ({ start: '启动', stop: '停止', restart: '重启', remove: '删除' }[operation.kind] || operation.kind) + ' ' + operation.target;
+  CF.operationProgress = operation => operation.status !== 'running' ? { succeeded: '已完成', failed: '失败' }[operation.status]
+    : operation.step ? '第 ' + operation.step.current + '/' + operation.step.total + ' 步' : '进行中';
+
+  /**
+   * Background operations of the connected backend (image builds, container
+   * starts…). Polls while any runs, reports each one that finishes with a toast
+   * and, when the window is in the background, a system notification.
+   */
+  CF.activity = (() => {
+    let operations = [];
+    let backend = '';
+    let timer = 0;
+    const listeners = new Set();
+    const waiters = new Map(); // operation id → resolve(final operation)
+    const notify = (title, body) => {
+      if (document.hasFocus() || typeof Notification === 'undefined') return;
+      try { const note = new Notification(title, { body, silent: false }); note.onclick = () => window.focus(); } catch { /* notifications unavailable */ }
+    };
+    const poll = async () => {
+      clearTimeout(timer);
+      const current = CF.state.backendId;
+      if (!current || !CF.state.connected) { timer = setTimeout(poll, 5000); return; }
+      let next;
+      try { next = await CF.get('operations'); } catch { timer = setTimeout(poll, 5000); return; }
+      if (current !== CF.state.backendId) return;
+      const before = backend === current ? new Map(operations.map(item => [item.id, item.status])) : null;
+      backend = current;
+      operations = next;
+      for (const operation of next) {
+        if (operation.status === 'running') continue;
+        waiters.get(operation.id)?.(operation);
+        waiters.delete(operation.id);
+        // Report what finished since the last poll (not what was already done when we connected).
+        if (before?.get(operation.id) !== 'running') continue;
+        const label = CF.operationLabel(operation);
+        const action = { label: '日志', run: () => CF.operationLog(operation, label) };
+        if (operation.status === 'succeeded') { CF.toast(label + '：完成', { action }); notify('CoderFleet · ' + label + '完成', operation.lastLine || ''); }
+        else { CF.toast(label + '：失败', { error: true, action, timeout: 10000 }); notify('CoderFleet · ' + label + '失败', operation.error || operation.lastLine || ''); }
+      }
+      for (const listener of listeners) listener(operations);
+      timer = setTimeout(poll, operations.some(item => item.status === 'running') ? 1500 : 15000);
+    };
+    return {
+      list: () => (backend === CF.state.backendId ? operations : []),
+      running: () => (backend === CF.state.backendId ? operations.filter(item => item.status === 'running') : []),
+      subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      /** Poll now (an operation just started, or the backend changed). */
+      refresh: () => { void poll(); },
+      /** Resolves with the operation once it has finished. */
+      wait: operation => new Promise(resolve => { waiters.set(operation.id, resolve); void poll(); }),
+    };
+  })();
+
+  /** Waits for an operation; the activity watcher reports how it ended. */
+  CF.trackOperation = async (operation, _label, refresh) => {
+    const timer = setInterval(() => refresh?.(), 2000);
+    try { return await CF.activity.wait(operation); } finally { clearInterval(timer); refresh?.(); }
   };
 
   /** A path short enough for a row: the last segments, with the full path as tooltip text. */
@@ -334,7 +400,7 @@
     if (delta < 3600) return Math.floor(delta / 60) + ' 分钟前';
     if (delta < 86400) return Math.floor(delta / 3600) + ' 小时前';
     if (delta < 86400 * 7) return Math.floor(delta / 86400) + ' 天前';
-    return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+    return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', timeZone: CF.timeZone.current() });
   };
 
   /**
@@ -366,24 +432,58 @@
     CF.toast(pinned ? '已置顶' : '已取消置顶');
   };
 
+  /**
+   * The time zone times are shown in: this App's setting, or the system's.
+   * Kept on this computer (like the window layout); the containers' own zone is
+   * CONTAINER_TIMEZONE in the workspace settings.
+   */
+  CF.timeZone = {
+    system: () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    chosen: () => { try { return localStorage.getItem('cf.timeZone') || ''; } catch { return ''; } },
+    current: () => CF.timeZone.chosen() || CF.timeZone.system(),
+    set(zone) {
+      if (zone) new Intl.DateTimeFormat('en', { timeZone: zone }); // throws on an unknown zone
+      try { zone ? localStorage.setItem('cf.timeZone', zone) : localStorage.removeItem('cf.timeZone'); } catch { /* storage unavailable */ }
+    },
+    all: () => { try { return Intl.supportedValuesOf('timeZone'); } catch { return ['UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York', 'Europe/London']; } },
+    /** "UTC+8" for a zone at the current moment. */
+    offset(zone) {
+      const part = new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'shortOffset' }).formatToParts(new Date()).find(item => item.type === 'timeZoneName');
+      return (part?.value || 'GMT').replace('GMT', 'UTC');
+    },
+  };
+  /** Calendar parts of a moment in the chosen time zone. */
+  const zoned = date => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+      timeZone: CF.timeZone.current(), year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short',
+    }).formatToParts(date).map(part => [part.type, part.value]));
+    return {
+      year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday),
+      time: String(Number(parts.hour) % 24).padStart(2, '0') + ':' + parts.minute,
+    };
+  };
   /** Compact time for lists, like mainstream chat apps: 14:32 · 昨天 · 周一 · 11月3日 · 2025/11/3. */
   CF.shortTime = iso => {
     const date = new Date(iso);
     if (!Number.isFinite(date.getTime())) return '';
-    const now = new Date();
-    const day = value => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
-    const days = Math.round((day(now) - day(date)) / 86400000);
-    if (days <= 0) return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const then = zoned(date);
+    const now = zoned(new Date());
+    const days = Math.round((Date.UTC(now.year, now.month - 1, now.day) - Date.UTC(then.year, then.month - 1, then.day)) / 86400000);
+    if (days <= 0) return then.time;
     if (days === 1) return '昨天';
-    if (days < 7) return '周' + '日一二三四五六'[date.getDay()];
-    if (date.getFullYear() === now.getFullYear()) return (date.getMonth() + 1) + '月' + date.getDate() + '日';
-    return date.getFullYear() + '/' + (date.getMonth() + 1) + '/' + date.getDate();
+    if (days < 7) return '周' + '日一二三四五六'[then.weekday];
+    if (then.year === now.year) return then.month + '月' + then.day + '日';
+    return then.year + '/' + then.month + '/' + then.day;
   };
   /** Full time for tooltips and message stamps. */
   CF.fullTime = iso => {
     const date = new Date(iso);
-    return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+    if (!Number.isFinite(date.getTime())) return '';
+    const parts = zoned(date);
+    return parts.year + '/' + parts.month + '/' + parts.day + ' ' + parts.time;
   };
+  /** Today's date line (projects page). */
+  CF.today = () => new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long', timeZone: CF.timeZone.current() });
 
   /** Interactive terminal sheet bound to a backend terminal session. */
   CF.openTerminal = async (title, subtitle, start) => {

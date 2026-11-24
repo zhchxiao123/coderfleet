@@ -25,9 +25,15 @@ test('the App initializes the workspace and manages accounts, projects, containe
     assert.match(readFileSync(join(env.workspace, 'config.conf'), 'utf8'), /^PROXY_HTTP_PORT=10808$/m);
     assert.equal((await env.put('settings', { PROXY_HOST: 'a b' })).status, 400);
 
-    // Image build runs as an operation.
+    // Image build runs as a background operation; asking again returns the running one.
+    process.env.FAKE_BUILD_STEPS = '4';
     const build = (await env.post('image/build')).body;
+    assert.equal((await env.post('image/build')).body.id, build.id);
+    const listed = await until(() => env.get('operations'), value => value.body[0]?.step, 'build step');
+    assert.deepEqual([listed.body[0].id, listed.body[0].status, listed.body[0].output], [build.id, 'running', undefined]);
+    assert.equal(listed.body[0].step.total, 4);
     assert.equal((await operation(env, build.id)).body.status, 'succeeded');
+    delete process.env.FAKE_BUILD_STEPS;
     assert.match((await env.get('operations/' + build.id)).body.output, /--tag coderfleet:latest/);
 
     // Accounts.
@@ -56,6 +62,18 @@ test('the App initializes the workspace and manages accounts, projects, containe
     assert.ok(compose.services['proxy-relay']);
     let project = (await env.get('projects')).body[0];
     assert.deepEqual([project.name, project.state, project.chat, project.typeLabel], ['app', 'running', true, 'Claude Code']);
+
+    // Project environment variables: projects/<name>/env, owner-only, put into the container on restart.
+    assert.deepEqual((await env.get('projects/app/env')).body.vars, {});
+    assert.equal((await env.put('projects/app/env', { vars: { '1BAD': 'x' } })).status, 400);
+    assert.deepEqual((await env.put('projects/app/env', { vars: { API_TOKEN: ' abc ', EMPTY: '', MODE: 'dev' } })).body.vars, { API_TOKEN: 'abc', MODE: 'dev' });
+    const projectEnvFile = join(env.workspace, 'projects', 'app', 'env');
+    assert.equal(readFileSync(projectEnvFile, 'utf8'), 'API_TOKEN=abc\nMODE=dev\n');
+    assert.equal(statSync(projectEnvFile).mode & 0o777, 0o600);
+    assert.equal((await operation(env, (await env.post('projects/app/restart')).body.id)).body.status, 'succeeded');
+    const recreated = JSON.parse(readFileSync(join(env.workspace, 'docker-compose.yml'), 'utf8').replace(/^#.*\n/, ''));
+    assert.equal(recreated.services['claude-project-app'].environment.MODE, 'dev');
+    assert.deepEqual((await env.put('projects/app/env', { vars: { MODE: 'dev' } })).body.vars, { MODE: 'dev' }, 'removed rows are dropped');
     assert.equal((await env.del('accounts/claude-a')).status, 400);
     accounts = (await env.get('accounts')).body;
     assert.deepEqual(accounts[0].projects, ['app']);

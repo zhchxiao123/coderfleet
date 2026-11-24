@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv,
-  writeSettings, WorkspaceError, type WorkspaceProject,
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv,
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
 import { Devices, FailedAuth, type Device } from './devices.js';
@@ -15,8 +14,9 @@ import { FollowUps, type FollowUp } from './follow-ups.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
+import { Titles } from './titles.js';
 import { configured, SystemLLMError, systemLLM, TranslationCache, translateText } from './translate.js';
-import { findPythonService, type PythonService } from './python-service.js';
+import { findPythonService, stopPythonTask, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
 import { WorkspaceStore } from './store.js';
 import { chatSupported, TaskRunner } from './tasks.js';
@@ -115,13 +115,25 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
   const followUps = new FollowUps(config.stateDirectory);
+  /** The conversation list (desktop and phone change feed). */
   const conversationList = () => {
-    const summaries = new Map<string, { updatedAt: string; status: string; turns: number; attention: boolean }>();
+    // Like the Python service (Conversation.touch at a task's start and end): a conversation's time is
+    // its latest activity — the newest turn's finish, or its start while it runs. Status is the newest turn's.
+    const time = (value: string): number => Date.parse(value) || 0;
+    const summaries = new Map<string, { updatedAt: string; latest: string; status: string; turns: number; attention: boolean }>();
     for (const item of store.turnIds()) {
       const conversationId = store.turnConversation(item.id);
       if (!conversationId) continue;
-      const current = summaries.get(conversationId) ?? { updatedAt: '', status: '', turns: 0, attention: false };
-      summaries.set(conversationId, { updatedAt: item.createdAt, status: item.status, turns: current.turns + 1, attention: item.attention });
+      const current = summaries.get(conversationId) ?? { updatedAt: '', latest: '', status: '', turns: 0, attention: false };
+      const activity = time(item.finishedAt) > time(item.createdAt) ? item.finishedAt : item.createdAt;
+      const newest = time(item.createdAt) >= time(current.latest);
+      summaries.set(conversationId, {
+        updatedAt: time(activity) > time(current.updatedAt) ? activity : current.updatedAt,
+        latest: newest ? item.createdAt : current.latest,
+        status: newest ? item.status : current.status,
+        turns: current.turns + 1,
+        attention: current.attention || item.attention,
+      });
     }
     return store.conversations().map(item => {
       const summary = summaries.get(item.id);
@@ -167,6 +179,36 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   /** Per-turn hashes of snapshots recently sent, so a change feed returns only changed turns. */
   const sentSnapshots = new Map<string, Map<string, string>>();
   const translations = new TranslationCache(join(workspace, 'translations'));
+  // Automatic conversation titles with the system LLM, as the Python service names them.
+  const titles = new Titles(store, workspace);
+  runner.onFinish = turn => titles.observe(turn);
+
+  /**
+   * Images a tool returned (Claude's Read of a picture, screenshots…), read back from the
+   * turn's log instead of being kept in the record: at most 6, each up to ~6 MB.
+   */
+  const toolImages = (turnId: string, toolId: string): { mime: string; data: string }[] => {
+    let log = '';
+    try { log = readFileSync(store.logPath(turnId), 'utf8'); } catch { return []; }
+    const images: { mime: string; data: string }[] = [];
+    for (const line of log.split('\n')) {
+      if (images.length >= 6 || !line.includes(toolId) || !line.includes('"image"')) continue;
+      let event: Record<string, unknown>;
+      try { event = record(JSON.parse(line)); } catch { continue; }
+      const blocks = record(event.message).content;
+      for (const block of Array.isArray(blocks) ? blocks.map(record) : []) {
+        if (block.type !== 'tool_result' || block.tool_use_id !== toolId || !Array.isArray(block.content)) continue;
+        for (const item of block.content.map(record)) {
+          const source = record(item.source);
+          const mime = text(source.media_type);
+          if (item.type === 'image' && source.type === 'base64' && /^image\/(png|jpeg|gif|webp)$/.test(mime) && text(source.data).length <= 8_000_000 && images.length < 6) {
+            images.push({ mime, data: text(source.data) });
+          }
+        }
+      }
+    }
+    return images;
+  };
 
   /** Starts a new turn in a conversation that has none running. */
   const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
@@ -196,6 +238,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       status: 'starting', answer: '', tools: [], blocks: [], ...(forkAt ? { forkAt } : {}),
     };
     store.createTurn(turn, target.path);
+    titles.observe(turn);
     if (turns.length === 0 && conversation.name === '新对话') {
       const title = (input.text || '图片').replace(/\s+/g, ' ').slice(0, 40);
       store.saveConversation({ ...conversation, name: title });
@@ -225,13 +268,14 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
 
   const UPLOAD_TYPES: Readonly<Record<string, string>> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
-  const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}\.(png|jpe?g|webp|gif)$/;
+  // <16 hex>-<name> (or the older <16 hex>.<ext>); only characters the Python service also accepts.
+  const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}[-.][\p{L}\p{N}_.-]{0,120}$/u;
   /** Validated upload references of a message: at most 20, each a file of this project. */
   const uploads = (projectId: string, value: unknown): string[] => {
     const list = Array.isArray(value) ? value : [];
-    if (list.length > 20 || !list.every(item => typeof item === 'string' && UPLOAD_PATH.test(item))) throw new HttpError(400, '图片必须是这个项目里上传的文件');
+    if (list.length > 20 || !list.every(item => typeof item === 'string' && UPLOAD_PATH.test(item) && !item.includes('..'))) throw new HttpError(400, '附件必须是这个项目里上传的文件');
     const directory = join(project(projectId).path, '.coderfleet-uploads');
-    for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '图片已不存在，请重新添加');
+    for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '附件已不存在，请重新添加');
     return list as string[];
   };
 
@@ -285,6 +329,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return readSettings(workspace);
     }],
     ['POST', /^image\/build$/, async () => lifecycle.build()],
+    // Background operations (image builds, container starts…) without their logs, newest first.
+    ['GET', /^operations$/, async () => lifecycle.recent()],
     ['GET', /^operations\/([\w-]+)$/, async (_request, [id]) => {
       const operation = lifecycle.operation(id as string);
       if (!operation) throw new HttpError(404, '操作不存在');
@@ -460,6 +506,23 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       });
       return result ?? { etag: since, unchanged: true };
     }],
+    // Project environment variables (applied when the project's container is recreated).
+    ['GET', /^projects\/([\w.-]+)\/env$/, async (_request, [name]) => ({ vars: readProjectEnv(workspace, project(name as string).name) })],
+    ['PUT', /^projects\/([\w.-]+)\/env$/, async (request, [name]) => {
+      const target = project(name as string);
+      const vars = Object.fromEntries(Object.entries(record((await body(request)).vars)).map(([key, value]) => [key.trim(), text(value)]));
+      writeProjectEnv(workspace, target.name, vars);
+      return { vars: readProjectEnv(workspace, target.name) };
+    }],
+    // Names the conversation again with the system LLM (replaces a manual title).
+    ['POST', /^conversations\/([\w-]+)\/title$/, async (_request, [id]) => {
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      if (!configured(systemLLM(workspace))) throw new HttpError(503, '还没有配置命名用的模型：在 设置 → 翻译与命名 里填写');
+      try { titles.request(conversation.id); } catch (error) { throw new HttpError(409, message(error)); }
+      titles.tick();
+      return { queued: true };
+    }],
     // Forks a Claude conversation at a finished turn into a new conversation.
     ['POST', /^conversations\/([\w-]+)\/fork$/, async (request, [id]) => {
       const source = store.conversation(identifier(id));
@@ -491,9 +554,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const message_ = { text: prompt, images, auto: input.auto === true, model };
       const running = turnsOf(conversation.id).find(active);
       if (!running) return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_)) };
-      if (running.controlReady && running.capabilities?.includes('message')) {
+      if (running.controlReady && running.capabilities?.includes('message') && !running.cancelRequested) {
         try {
           await runner.message(running, { text: prompt, images });
+          titles.observeMessage(running, prompt, randomUUID());
           return { delivered: 'message', turn: publicTurn(running) };
         } catch { /* the run is finishing: queue it as the next turn instead */ }
       }
@@ -509,31 +573,47 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     ['POST', /^projects\/([\w.-]+)\/uploads$/, async (request, [name]) => {
       const target = project(name as string);
       const input = await body(request, 28 * 1024 * 1024);
-      const extension = text(input.name).toLowerCase().split('.').pop() ?? '';
-      if (!UPLOAD_TYPES[extension]) throw new HttpError(400, '只支持 PNG、JPEG、WebP 和 GIF 图片');
       const data = Buffer.from(text(input.data), 'base64');
-      if (!data.length || data.length > 20 * 1024 * 1024) throw new HttpError(400, '图片不能超过 20 MB');
+      if (!data.length) throw new HttpError(400, '文件是空的');
+      if (data.length > 20 * 1024 * 1024) throw new HttpError(400, '附件不能超过 20 MB');
       const directory = join(target.path, '.coderfleet-uploads');
       mkdirSync(directory, { recursive: true });
-      const file = randomBytes(8).toString('hex') + '.' + (extension === 'jpeg' ? 'jpg' : extension);
+      // A unique prefix plus the name in characters every tool handles; the agent sees a readable file name.
+      const original = text(input.name).split(/[\\/]/).pop() ?? '';
+      const dot = original.lastIndexOf('.');
+      const extension = dot > 0 ? original.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
+      const stem = (dot > 0 ? original.slice(0, dot) : original).normalize('NFC').replace(/[^\p{L}\p{N}_.-]+/gu, '_').replace(/^[_.]+|[_.]+$/g, '').slice(0, 80) || 'file';
+      const file = randomBytes(8).toString('hex') + '-' + stem + (extension ? '.' + extension : '');
       writeFileSync(join(directory, file), data, { mode: 0o644 });
       return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size: data.length };
     }],
-    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}\.(?:png|jpe?g|webp|gif))$/, async (_request, [name, file]) => {
-      const path = join(project(name as string).path, '.coderfleet-uploads', file as string);
+    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}[-.%][^/]*\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) => {
+      let file = '';
+      try { file = decodeURIComponent(encoded as string); } catch { throw new HttpError(400, '无效的文件名'); }
+      if (!/^[a-f0-9]{16}[-.][\p{L}\p{N}_.-]*$/u.test(file)) throw new HttpError(400, '无效的文件名');
+      const path = join(project(name as string).path, '.coderfleet-uploads', file);
       if (!existsSync(path) || statSync(path).size > 20 * 1024 * 1024) throw new HttpError(404, '图片不存在');
-      return { mime: UPLOAD_TYPES[(file as string).split('.').pop() as string], data: readFileSync(path).toString('base64') };
+      return { mime: UPLOAD_TYPES[file.split('.').pop()?.toLowerCase() as string], data: readFileSync(path).toString('base64') };
     }],
     ['GET', /^turns\/([\w-]+)\/tools\/(.+)$/, async (_request, [id, toolId]) => {
       const turn = store.turn(identifier(id));
       const tool = turn?.tools.find(item => item.id === decodeURIComponent(toolId as string));
       if (!tool) throw new HttpError(404, '找不到这次工具调用');
-      return { id: tool.id, title: tool.title, status: tool.status, input: tool.input ?? {}, output: tool.output ?? '' };
+      return { id: tool.id, title: tool.title, status: tool.status, input: tool.input ?? {}, output: tool.output ?? '', images: toolImages(turn?.id as string, tool.id) };
     }],
     ['POST', /^turns\/([\w-]+)\/(permission|cancel)$/, async (request, [id, action]) => {
       const turn = store.turn(identifier(id));
       if (!turn) throw new HttpError(404, 'Turn not found');
       if (!active(turn)) throw new HttpError(409, 'The turn has already finished');
+      // A turn the Python service runs (or took over) is stopped there; this service only shows it.
+      if (turn.origin !== 'node') {
+        if (action !== 'cancel') throw new HttpError(409, '这一轮由原 Python 服务运行，请在它的界面里处理');
+        const service = await findPythonService(workspace);
+        if (!service?.url) throw new HttpError(409, '这一轮由原 Python 服务运行，它现在没有运行，无法停止');
+        try { await stopPythonTask(workspace, service.url, turn.id); }
+        catch (error) { throw new HttpError(409, message(error)); }
+        return { accepted: true };
+      }
       if (action === 'cancel') { await runner.cancel(turn); return { accepted: true }; }
       const input = await body(request);
       const key = identifier(input.id);
@@ -594,9 +674,11 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }
   });
   // Follows every active turn; after a restart this resumes from the saved log offsets.
+  let titlesTicked = 0;
   const timer = setInterval(() => {
     for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
     void drainFollowUps();
+    if (Date.now() - titlesTicked > 1_000) { titlesTicked = Date.now(); titles.tick(); }
   }, 250);
   timer.unref();
   server.once('close', () => clearInterval(timer));
@@ -618,6 +700,7 @@ function publicTurn(turn: Turn): Record<string, unknown> {
     ...visible,
     // A message sent mid-turn shows at the end until the agent's next message starts.
     blocks: [...(turn.blocks ?? []), ...(heldMessages ?? [])],
+    ...(turn.cancelRequested && active(turn) ? { stopping: true } : {}),
     tools: turn.tools.map(({ input, output, ...tool }) => ({ ...tool, hasDetail: Boolean(output) || Object.keys(record(input)).length > 0 })),
   };
 }

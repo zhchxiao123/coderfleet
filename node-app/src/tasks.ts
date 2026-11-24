@@ -17,6 +17,8 @@ import type { WorkspaceStore } from './store.js';
 export const PERMISSION_TIMEOUT_SECONDS = 600;
 const START_GRACE = 60_000;
 const PROBE_INTERVAL = 10_000;
+/** How long a stop request may go unanswered before the next, harder step: interrupt → TERM → KILL. */
+const STOP_ESCALATION = 20_000;
 const MAX_READ = 4 * 1024 * 1024;
 const MAX_ANSWER = 4_000_000;
 const TASKS = '.coderfleet-tasks';
@@ -241,9 +243,12 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
 }
 
 export class TaskRunner {
-  private readonly signalled = new Set<string>();
+  /** Turns being stopped: the last step taken and when. */
+  private readonly signalled = new Map<string, { step: 'interrupt' | 'TERM' | 'KILL'; at: number }>();
   private readonly lastProbe = new Map<string, number>();
   private readonly busy = new Set<string>();
+  /** Called once a turn has settled (done, failed or cancelled). */
+  public onFinish?: (turn: Turn) => void;
 
   public constructor(
     private readonly store: WorkspaceStore,
@@ -314,6 +319,7 @@ export class TaskRunner {
     this.store.saveTurn(turn);
     this.signalled.delete(turn.id);
     this.lastProbe.delete(turn.id);
+    try { this.onFinish?.(turn); } catch (error) { console.error('Turn finish hook failed:', turn.id, message(error)); }
   }
 
   /** Applies complete new lines from the worker log. Returns true when the offset advanced. */
@@ -346,7 +352,8 @@ export class TaskRunner {
 
   /** One follow step for an active turn. */
   public async tick(turn: Turn): Promise<void> {
-    if (this.busy.has(turn.id)) return;
+    // Only turns this service launched; others are read-only views of another service's work.
+    if (turn.origin !== 'node' || this.busy.has(turn.id)) return;
     if (!turn.launchedAt) {
       // Saved but never dispatched (the service stopped during launch).
       if (Date.now() - Date.parse(turn.createdAt) > START_GRACE) this.finish(turn, 'failed', 'The turn was not started. The prompt was not sent.');
@@ -358,12 +365,12 @@ export class TaskRunner {
       if (!project) { this.finish(turn, 'failed', 'The project was removed from projects.conf'); return; }
       const paths = this.paths(project, turn);
       if (this.readLog(turn, paths.log)) this.store.saveTurn(turn);
-      if (turn.cancelRequested && !this.signalled.has(turn.id)) await this.deliverCancel(project, turn);
+      if (turn.cancelRequested) await this.deliverCancel(project, turn);
       if (existsSync(paths.exit)) {
         while (this.readLog(turn, paths.log)) { /* drain */ }
         const code = Number(readFileSync(paths.exit, 'utf8').trim());
         if (code === 0) this.finish(turn, 'done');
-        else if (code === 143 || turn.interrupted) this.finish(turn, 'cancelled');
+        else if (code === 143 || turn.interrupted || turn.cancelRequested) this.finish(turn, 'cancelled');
         else this.finish(turn, 'failed', this.diagnostic(paths.diagnostic) || 'Antigravity worker exited with status ' + code);
         return;
       }
@@ -402,21 +409,29 @@ export class TaskRunner {
     this.finish(turn, 'failed', 'The worker stopped without a result. The prompt was not replayed.');
   }
 
+  /**
+   * Asks the worker to stop, and stops it harder when it has not exited after
+   * STOP_ESCALATION: a native interrupt first, then TERM, then KILL of its process group.
+   */
   private async deliverCancel(project: WorkspaceProject, turn: Turn): Promise<void> {
-    if (turn.controlReady) {
+    const last = this.signalled.get(turn.id);
+    if (last && (last.step === 'KILL' || Date.now() - last.at < STOP_ESCALATION)) return;
+    if (!last && turn.controlReady) {
       try {
         this.mailbox(project, turn).submit('interrupt', 'interrupt', {});
-        this.signalled.add(turn.id);
+        this.signalled.set(turn.id, { step: 'interrupt', at: Date.now() });
         return;
       } catch { /* the channel closed; fall back to stopping the process group */ }
     }
     const state = this.workerState(this.paths(project, turn).state);
     if (!state) return; // retried on the next tick once the worker has started
-    await signalGroup(this.dockerPath, project.container, state.pgid, 'TERM');
-    this.signalled.add(turn.id);
+    const step = last?.step === 'TERM' ? 'KILL' : 'TERM';
+    await signalGroup(this.dockerPath, project.container, state.pgid, step);
+    this.signalled.set(turn.id, { step, at: Date.now() });
   }
 
   public async cancel(turn: Turn): Promise<void> {
+    if (turn.origin !== 'node') throw new Error('This turn is run by another service');
     turn.cancelRequested = true;
     this.store.saveTurn(turn);
     await this.tick(turn);

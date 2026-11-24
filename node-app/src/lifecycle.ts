@@ -26,6 +26,26 @@ export interface Operation {
   error?: string;
 }
 
+const LABELS: Readonly<Record<OperationKind, string>> = { build: '构建镜像', start: '启动', stop: '停止', restart: '重启', remove: '删除' };
+
+/** What the App shows for a background operation without its full log. */
+export interface OperationSummary {
+  readonly id: string; readonly kind: OperationKind; readonly target: string; readonly status: OperationStatus;
+  readonly startedAt: string; readonly finishedAt?: string; readonly error?: string;
+  /** Build step from Docker's output (`[ 5/14]`), when it reports one. */
+  readonly step?: { readonly current: number; readonly total: number };
+  readonly lastLine: string;
+}
+
+export function summarize(operation: Operation): OperationSummary {
+  const tail = operation.output.slice(-8_000);
+  let step: OperationSummary['step'];
+  for (const match of tail.matchAll(/\[\s*(\d+)\/(\d+)\]/g)) step = { current: Number(match[1]), total: Number(match[2]) };
+  const lastLine = tail.split('\n').map(line => line.trim()).filter(Boolean).at(-1)?.slice(0, 200) ?? '';
+  const { output: _output, ...rest } = operation;
+  return { ...rest, ...(step ? { step } : {}), lastLine };
+}
+
 export interface ContainerState { readonly name: string; readonly state: string; readonly status: string }
 
 export class Lifecycle {
@@ -35,8 +55,8 @@ export class Lifecycle {
   public constructor(private readonly workspace: string, private readonly dockerPath: string) {}
 
   public operation(id: string): Operation | undefined { return this.operations.get(id); }
-  public recent(): Operation[] {
-    return [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)).slice(0, 30);
+  public recent(): OperationSummary[] {
+    return [...this.operations.values()].sort((left, right) => right.startedAt.localeCompare(left.startedAt)).slice(0, 30).map(summarize);
   }
 
   /** States of all CoderFleet-related containers, from one `docker ps` call. */
@@ -80,8 +100,12 @@ export class Lifecycle {
 
   private start(kind: OperationKind, target: string, steps: (log: (text: string) => void, exec: (args: string[]) => Promise<void>) => Promise<void>): Operation {
     const key = kind === 'build' ? 'image' : 'project:' + target;
-    const current = this.busy.get(key);
-    if (current) throw new WorkspaceError('另一个操作正在进行，请等它完成');
+    const current = this.operations.get(this.busy.get(key) ?? '');
+    if (current) {
+      // Asking again for what is already running returns it, so the App can show its progress.
+      if (current.kind === kind && current.target === target) return current;
+      throw new WorkspaceError('正在' + LABELS[current.kind] + (current.kind === 'build' ? '' : ' ' + current.target) + '，等它完成后再试');
+    }
     const operation: Operation = { id: randomUUID(), kind, target, startedAt: new Date().toISOString(), status: 'running', output: '' };
     this.operations.set(operation.id, operation);
     this.busy.set(key, operation.id);

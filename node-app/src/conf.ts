@@ -189,6 +189,39 @@ export function updateEnv(account: Account, values: Record<string, string>): voi
   chmodSync(account.envFile, 0o600);
 }
 
+/**
+ * Project environment variables: projects/<name>/env (KEY=value lines), which the
+ * compose file puts into the project's container, over the account's (compose.py).
+ */
+export function projectEnvPath(workspace: string, name: string): string {
+  if (!/^[\w.-]+$/.test(name)) throw new WorkspaceError('无效的项目名');
+  return join(workspace, 'projects', name, 'env');
+}
+
+export function readProjectEnv(workspace: string, name: string): Record<string, string> {
+  const path = projectEnvPath(workspace, name);
+  if (!existsSync(path)) return {};
+  const result: Record<string, string> = {};
+  for (const raw of readFileSync(path, 'utf8').split('\n')) {
+    const line = raw.trim();
+    const index = line.indexOf('=');
+    if (!line || line.startsWith('#') || index < 0) continue;
+    result[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+  }
+  return result;
+}
+
+/** Replaces the project's variables with `values` (owner-only file, like the Python service). */
+export function writeProjectEnv(workspace: string, name: string, values: Record<string, string>): void {
+  for (const key of Object.keys(values)) if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new WorkspaceError('无效的变量名 ' + key);
+  for (const value of Object.values(values)) if (/[\r\n]/.test(value)) throw new WorkspaceError('变量值不能包含换行');
+  const path = projectEnvPath(workspace, name);
+  mkdirSync(join(path, '..'), { recursive: true });
+  const lines = Object.entries(values).filter(([, value]) => value !== '').map(([key, value]) => key + '=' + value.trim());
+  writeText(path, lines.join('\n') + (lines.length ? '\n' : ''), 0o600);
+  chmodSync(path, 0o600);
+}
+
 export interface NewProject { name: string; account: string; path: string }
 
 export function addProject(workspace: string, input: NewProject): void {

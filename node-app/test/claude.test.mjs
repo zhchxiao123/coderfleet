@@ -19,6 +19,11 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.equal(turn.answer, 'echo:hello:opus');
     assert.equal(turn.sessionId, 'claude-session-1');
 
+    // The conversation's time is its latest activity: the turn's finish (as the Python service touches it).
+    const summary = (await env.get('conversations')).body.find(item => item.id === conversation);
+    assert.ok(turn.finishedAt && summary.updatedAt === turn.finishedAt, summary.updatedAt + ' vs ' + turn.finishedAt);
+    assert.equal(summary.status, 'done');
+
     await env.post('conversations/' + conversation + '/turns', { prompt: 'again' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'resumed turn');
     assert.equal(turn.answer, 'echo:again::resumed=claude-session-1');
@@ -55,13 +60,23 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     // Images go as base64 image blocks; auto mode bypasses permissions.
     const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64');
     const upload = (await env.post('projects/app/uploads', { name: 'shot.png', data: png })).body;
-    assert.match(upload.path, /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}\.png$/);
+    assert.match(upload.path, /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}-shot\.png$/);
     assert.equal((await env.get('projects/app/uploads/' + upload.path.split('/').pop())).body.data, png);
     assert.equal((await env.post('conversations/' + conversation + '/turns', { prompt: 'see', images: ['/workspace/.coderfleet-uploads/../x.png'] })).status, 400);
     await env.post('conversations/' + conversation + '/turns', { prompt: 'see', images: [upload.path] });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'image turn');
     assert.equal(turn.answer, 'images:image/png:' + png.length + ':see');
     assert.deepEqual(turn.images, [upload.path]);
+    // Any file: a PDF goes as a document block, anything else by its path (Python _input_content).
+    const pdf = (await env.post('projects/app/uploads', { name: '设计 稿.pdf', data: Buffer.from('%PDF-1.4').toString('base64') })).body;
+    const csv = (await env.post('projects/app/uploads', { name: 'data.csv', data: Buffer.from('a,b\n1,2').toString('base64') })).body;
+    assert.match(pdf.path, /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}-设计_稿\.pdf$/);
+    const chineseImage = (await env.post('projects/app/uploads', { name: '截图 1.png', data: png })).body;
+    assert.equal((await env.get('projects/app/uploads/' + encodeURIComponent(chineseImage.path.split('/').pop()))).body.data, png);
+    assert.match(csv.path, /-data\.csv$/);
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'files', images: [pdf.path, csv.path] });
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'files' && value.status === 'done', 'file turn');
+    assert.match(turn.answer, /^images:application\/pdf:\d+:files\[Attached file: \S+-data\.csv\]$/);
     await env.post('conversations/' + conversation + '/turns', { prompt: 'mode' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'manual turn');
     assert.equal(turn.answer, 'mode:acceptEdits');
@@ -85,6 +100,20 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.ok(turn.blocks.every(block => block.kind !== 'text' || !(block.text.includes('long-done') && block.text.includes('echo'))), kinds.join(' | '));
     assert.match(turn.answer, /\n\necho:also this/, 'each message is its own paragraph');
     assert.deepEqual((await env.get('conversations/' + conversation + '/follow-ups')).body, []);
+
+    // A newer CLI folds the message into the running turn: the turn still ends.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'fold' });
+    turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.capabilities?.includes('message'), 'folding turn');
+    assert.equal((await env.post('conversations/' + conversation + '/turns', { prompt: 'fold this' })).body.delivered, 'message');
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'folded turn', 400);
+    // Two assistant messages: two paragraphs.
+    assert.equal(turn.answer, 'working\n\n folded:fold this');
+
+    // A tool that returns an image (Read of a picture): the detail panel gets the image from the log.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'readimg' });
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'readimg' && value.status === 'done', 'image tool turn');
+    const imageTool = (await env.get('turns/' + turn.id + '/tools/img-1')).body;
+    assert.deepEqual([imageTool.output, imageTool.images], ['', [{ mime: 'image/png', data: 'iVBORw0KGgo=' }]]);
 
     // Fork at a finished turn: a new conversation resumes it under a new session ID.
     const source = (await env.post('conversations', { projectId: 'app' })).body.id;
@@ -122,5 +151,12 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     await env.post('turns/' + turn.id + '/cancel');
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'interrupted turn');
     assert.equal(turn.interrupted, true);
+
+    // A CLI that ignores the interrupt is killed; the turn still stops.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'stubborn' });
+    turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.controlReady, 'stubborn turn');
+    await env.post('turns/' + turn.id + '/cancel');
+    assert.equal((await lastTurn(env, conversation)).stopping, true);
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'stopped stubborn turn', 500);
   } finally { await env.close(); }
 });

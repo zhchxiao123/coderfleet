@@ -336,9 +336,9 @@ export class Turn {
     // Images go as ACP image blocks when the agent accepts them, otherwise as paths in the text.
     const files = attachments(this.spec.cwd, this.spec.images);
     const imageBlocks = object(object(initialized.agentCapabilities).promptCapabilities).image === true;
-    const content: Json[] = imageBlocks
-      ? [...(this.spec.prompt ? [{ type: 'text', text: this.spec.prompt }] : []), ...files.map(file => ({ type: 'image', mimeType: file.mime, data: file.data() }))]
-      : [{ type: 'text', text: withPaths(this.spec.prompt, files) }];
+    const native = imageBlocks ? files.filter(file => file.kind === 'image') : [];
+    const listed = withPaths(this.spec.prompt, files.filter(file => !native.includes(file)));
+    const content: Json[] = [...(listed ? [{ type: 'text', text: listed }] : []), ...native.map(file => ({ type: 'image', mimeType: file.mime, data: file.data() }))];
     const params: Json = { cwd: this.spec.cwd, mcpServers: [] };
     const supplied = this.spec.session_id;
     if (supplied) {

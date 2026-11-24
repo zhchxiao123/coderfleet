@@ -62,6 +62,10 @@ const say = text => {
 };
 const finish = (subtype = 'success', result = 'ok') => send({ type: 'result', subtype, is_error: subtype !== 'success', result, session_id: sessionId });
 let interrupt;
+// Newer CLIs fold messages sent mid-turn into the running turn and report each
+// message's progress as command_lifecycle events; no run of their own follows.
+let folding;
+const lifecycle = (uuid, state) => send({ type: 'command_lifecycle', command_uuid: uuid, state, uuid: crypto.randomUUID(), session_id: sessionId });
 const DEMO = [
   '## 服务启动流程',
   '',
@@ -93,14 +97,21 @@ async function handle(message) {
   if (message.type === 'control_response') { waiting.get(message.response.request_id)?.(message.response.response); return; }
   if (message.type !== 'user') return;
   const prompt = message.message.content;
+  if (folding) { lifecycle(message.uuid, 'queued'); folding.push(message); return; }
   if (prompt === 'forkme' && !resume) sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   send({ type: 'system', subtype: 'init', session_id: sessionId, model });
   const mode = argv.find(value => value.startsWith('--permission-mode='))?.slice(18) ?? (argv.includes('--permission-mode') ? argv[argv.indexOf('--permission-mode') + 1] : '');
   if (Array.isArray(prompt)) {
     // Text plus base64 image blocks.
     const text = prompt.filter(block => block.type === 'text').map(block => block.text).join('');
-    const images = prompt.filter(block => block.type === 'image').map(block => block.source.media_type + ':' + block.source.data.length);
+    const images = prompt.filter(block => block.type === 'image' || block.type === 'document').map(block => block.source.media_type + ':' + block.source.data.length);
     say('images:' + images.join(',') + ':' + text);
+    finish();
+  } else if (prompt === 'readimg') {
+    // Read of a picture: the tool result is an image block.
+    send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'img-1', name: 'Read', input: { file_path: '/workspace/shot.png' } }] } });
+    send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'img-1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: process.env.FAKE_READ_IMAGE || 'iVBORw0KGgo=' } }] }] } });
+    say('looked');
     finish();
   } else if (prompt === 'forkme') {
     say('fork-source');
@@ -150,6 +161,23 @@ async function handle(message) {
     }
     say(DEMO);
     finish();
+  } else if (prompt === 'fold') {
+    lifecycle(message.uuid, 'queued');
+    lifecycle(message.uuid, 'started');
+    folding = [];
+    say('working');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const folded = folding;
+    folding = undefined;
+    for (const item of folded) lifecycle(item.uuid, 'started');
+    for (const item of folded) lifecycle(item.uuid, 'completed');
+    say(' folded:' + folded.map(item => item.message.content).join(','));
+    finish();
+    lifecycle(message.uuid, 'completed');
+  } else if (prompt === 'stubborn') {
+    // Ignores interrupts and the end of its input.
+    say('working');
+    setInterval(() => undefined, 1000);
   } else if (prompt === 'slow') {
     say('working');
     await new Promise(resolve => { interrupt = resolve; });

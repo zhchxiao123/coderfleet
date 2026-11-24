@@ -26,6 +26,8 @@
   const translations = new Map();
   // Whether the backend has a system LLM for translation, per backend.
   const translateReady = new Map();
+  // Turns being translated: turnId → { done, total } or { error }.
+  const translating = new Map();
 
   function toolGlyph(status) {
     if (status === 'running') return h('span.spinner.tool-spinner');
@@ -64,10 +66,17 @@
       const empty = tool.status === 'running' ? '还在运行，结束后显示输出。'
         : tool.status === 'waiting' ? '等你确认后才会运行。'
           : tool.status === 'denied' ? '已拒绝，没有运行。' : '没有输出。';
+      // Images the tool returned (e.g. Read of a picture); clicking opens one full size.
+      const images = (data.images || []).map(image => {
+        const url = 'data:' + image.mime + ';base64,' + image.data;
+        return h('button.tool-image', { title: '查看大图', on: { click: () => CF.sheet({ title: tool.title + ' · 图片', wide: true }, () => h('img.preview-full', { src: url, alt: '' })) } },
+          h('img', { src: url, alt: '' }));
+      });
       panel.replaceChildren(
         input ? h('div.section', h('div.label', '输入'), input) : null,
         h('div.section', h('div.label', tool.status === 'failed' ? '错误' : '输出'),
-          output ? h('pre' + (tool.status === 'failed' ? '.error' : ''), output) : h('div.empty-note', empty)));
+          images.length ? h('div.tool-images', images) : null,
+          output ? h('pre' + (tool.status === 'failed' ? '.error' : ''), output) : images.length ? null : h('div.empty-note', empty)));
     };
     const cached = toolDetails.get(key);
     if (cached && cached.status === tool.status) show(cached.data);
@@ -219,7 +228,7 @@
   function userBubble(projectId, text, images, label) {
     return h('div.user-msg',
       label ? h('div.user-label', label) : null,
-      images?.length ? h('div.user-images', images.map(path => CF.uploadThumb(projectId, path))) : null,
+      images?.length ? h('div.user-images', images.map(path => CF.isImageUpload(path) ? CF.uploadThumb(projectId, path) : CF.fileChip(CF.uploadName(path), CF.uploadSize(path)))) : null,
       text ? h('div.bubble', text) : null);
   }
 
@@ -238,10 +247,23 @@
       session?.rerender(turn.id);
       return;
     }
-    await CF.busy(button, async () => {
-      const results = await Promise.all(parts.map(([, text]) => CF.api('POST', 'translate', { text, target: '简体中文' })));
-      parts.forEach(([index], position) => translations.set(turn.id + ':' + index, { showing: true, text: results[position].translated }));
-    });
+    if (translating.get(turn.id)?.total) return;
+    const missing = parts.filter(([index]) => translations.get(turn.id + ':' + index)?.text === undefined);
+    const progress = { done: parts.length - missing.length, total: parts.length };
+    translating.set(turn.id, progress);
+    session?.rerender(turn.id);
+    try {
+      await Promise.all(missing.map(async ([index, text]) => {
+        const result = await CF.api('POST', 'translate', { text, target: '简体中文' });
+        translations.set(turn.id + ':' + index, { showing: false, text: result.translated });
+        progress.done += 1;
+        session?.rerender(turn.id);
+      }));
+      for (const [index] of parts) translations.get(turn.id + ':' + index).showing = true;
+      translating.delete(turn.id);
+    } catch (error) {
+      translating.set(turn.id, { error: translateError(CF.errorText(error)) });
+    }
     session?.rerender(turn.id);
   }
 
@@ -270,14 +292,44 @@
         button.replaceChildren(CF.icon('check', 13));
         setTimeout(() => button.replaceChildren(CF.icon('copy', 13)), 1200);
       }) : null,
-      text && translateReady.get(CF.state.backendId) ? action('translate', translated ? '显示原文' : '翻译成中文', button => toggleTranslation(turn, button), translated ? '.on' : '') : null,
+      text && translateReady.get(CF.state.backendId)
+        ? (translating.get(turn.id)?.total
+          ? h('span.turn-action.busy', { title: '正在翻译' }, h('span.spinner'), '翻译中…')
+          : action('translate', translated ? '显示原文' : '翻译成中文', button => toggleTranslation(turn, button), translated ? '.on' : ''))
+        : null,
       turn.type === 'claude' && turn.status === 'done' && !turn.inherited && turn.sessionId
         ? action('fork', '从这里分叉', button => forkAt(turn, button)) : null);
+  }
+
+  /** A translation failure in plain words; the provider's text only when nothing better fits. */
+  function translateError(raw) {
+    const status = Number(/上游返回 (\d{3})/.exec(raw)?.[1] || 0);
+    if (status === 401 || status === 403) return 'API Key 无效或没有权限，请到 设置 → 翻译与命名 检查';
+    if (status === 404) return '找不到这个模型或接口地址，请到 设置 → 翻译与命名 检查模型和 Base URL';
+    if (status === 429) return '模型的调用次数或额度用完了，稍后再试';
+    if (status >= 500) return '模型服务暂时出错（' + status + '），稍后再试';
+    if (/超时/.test(raw)) return '连接模型超时，检查网络或出站代理';
+    if (/请求上游失败|ECONNREFUSED|ENOTFOUND|代理/.test(raw)) return '连不上模型服务，检查 Base URL 或出站代理';
+    return raw.length > 160 ? raw.slice(0, 160) + '…' : raw;
+  }
+
+  /** While a turn is translated (or after it failed): one line above the answer. */
+  function translationStatus(turn) {
+    const state = translating.get(turn.id);
+    if (!state) return null;
+    if (state.error) {
+      return h('div.translate-status.failed', CF.icon('x', 12), h('span', '翻译失败：' + state.error),
+        h('button.btn.ghost.small', { on: { click: () => { translating.delete(turn.id); void toggleTranslation(turn); } } }, '重试'),
+        h('button.icon-btn', { title: '关闭', on: { click: () => { translating.delete(turn.id); session?.rerender(turn.id); } } }, CF.icon('x', 12)));
+    }
+    return h('div.translate-status', h('span.spinner'),
+      h('span.shimmer', '正在翻译成中文' + (state.total > 1 ? '（' + state.done + '/' + state.total + ' 段）' : '') + '…'));
   }
 
   function turnNode(turn) {
     const node = h('div.turn' + (turn.inherited ? '.inherited' : ''),
       userBubble(turn.projectId, turn.prompt, turn.images),
+      translationStatus(turn),
       body(turn),
       turnActions(turn),
       turn.permission ? approvalCard(turn) : null,
@@ -291,6 +343,7 @@
 
   const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
     textBlocks(turn).map(([index]) => translations.get(turn.id + ':' + index)?.showing ? 1 : 0).join(''), translateReady.get(CF.state.backendId) ? 1 : 0,
+    JSON.stringify(translating.get(turn.id) ?? null),
     turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
 
   function project() {
@@ -328,6 +381,9 @@
   }
 
   CF.chat = {
+    /** Draws every turn again (after a display setting such as the time zone changed). */
+    redraw() { if (session) for (const turn of session.turns) session.rerender?.(turn.id); },
+
     /** After the translation model changes in Settings. */
     translationChanged() { translateReady.clear(); },
 
@@ -355,12 +411,11 @@
       const textarea = h('textarea', { rows: 1, placeholder: '描述你想做的事', 'aria-label': '消息' });
       const modelSelect = h('select', { 'aria-label': '模型', hidden: true });
       const sendButton = h('button.send', { title: '发送' }, CF.icon('send', 16));
-      const stopButton = h('button.stop-turn', { title: '中断（Esc）', hidden: true }, CF.icon('square', 13));
       const hint = h('span.hint');
       // Images: picked, pasted or dropped; uploaded into the project right away.
       const attachRow = h('div.attach-row', { hidden: true });
-      const fileInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', multiple: true, hidden: true });
-      const attachButton = h('button.composer-icon', { title: '添加图片（也可以粘贴或拖进来）', on: { click: () => fileInput.click() } }, CF.icon('image', 16));
+      const fileInput = h('input', { type: 'file', multiple: true, hidden: true });
+      const attachButton = h('button.composer-icon', { title: '添加附件：图片、PDF 或任意文件（也可以粘贴或拖进来）', on: { click: () => fileInput.click() } }, CF.icon('clip', 16));
       // Auto mode: tools run without asking (Python `auto`), remembered per project.
       const autoKey = 'cf.auto:' + CF.state.backendId + ':' + projectId;
       const autoButton = h('button.auto-toggle', {
@@ -389,17 +444,23 @@
 
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
       const activeTurn = () => current.turns.find(isActive);
-      const canInject = turn => Boolean(turn?.controlReady && turn.capabilities?.includes('message'));
+      const canInject = turn => Boolean(turn?.controlReady && turn.capabilities?.includes('message') && !turn.stopping);
       const updateComposer = () => {
         const running = activeTurn();
         const info = project();
         const containerReady = info?.state === 'running';
         const uploading = current.attachments.some(item => !item.path);
         const content = Boolean(textarea.value.trim()) || current.attachments.length > 0;
-        sendButton.disabled = current.sending || current.readOnly || !content || uploading || !containerReady;
-        sendButton.title = running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
-        stopButton.hidden = !running;
-        hint.textContent = running ? (canInject(running) ? '正在回答 · 现在发送会插入这一轮' : '正在回答 · 现在发送会排在这轮之后')
+        // One button: with something typed it sends (into the running answer, or queued after it);
+        // with an empty box while an answer runs it stops.
+        const stopping = Boolean(running) && !content;
+        sendButton.classList.toggle('stop', stopping);
+        sendButton.replaceChildren(stopping ? h('span.stop-mark') : CF.icon('send', 16));
+        sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || !content || uploading || !containerReady;
+        sendButton.title = stopping ? (running.stopping ? '正在停止…' : '中断（Esc）') : running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
+        sendButton.setAttribute('aria-label', sendButton.title);
+        hint.textContent = running?.stopping ? '正在停止…' : running && !content ? '正在回答 · Esc 停止，也可以继续输入'
+          : running ? (canInject(running) ? '发送会插入这一轮回答' : '发送会排在这轮回答之后')
           : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
       };
@@ -441,6 +502,81 @@
       };
       let bannerNode = null;
       let dividerNode = null;
+      // The conversation map at the left edge (like Codex): one dash per turn, the one in view
+      // darker; hover shows the question and the start of the reply; click jumps there.
+      const rail = h('nav.turn-rail', { 'aria-label': '对话导航' });
+      const peek = h('div.turn-peek', { hidden: true });
+      const bookmarkKey = () => 'cf.bookmarks:' + CF.state.backendId + ':' + current.conversationId;
+      const bookmarks = () => { try { return new Set(JSON.parse(localStorage.getItem(bookmarkKey()) || '[]')); } catch { return new Set(); } };
+      const toggleBookmark = id => {
+        const marks = bookmarks();
+        marks.has(id) ? marks.delete(id) : marks.add(id);
+        try { localStorage.setItem(bookmarkKey(), JSON.stringify([...marks])); } catch { /* storage unavailable */ }
+        renderRail();
+      };
+      let railCurrent = '';
+      let jumpUntil = 0;
+      // A jump from the map marks its turn current, even when the view cannot scroll it to the top.
+      const jumpTo = id => {
+        const node = nodes.get(id)?.node;
+        if (!node) return;
+        jumpUntil = Date.now() + 1200;
+        railCurrent = id;
+        for (const dash of rail.querySelectorAll('.rail-dash')) dash.classList.toggle('current', dash.dataset.turn === id);
+        node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+      let peekTurn = '';
+      let peekTimer = 0;
+      // Reply text without Markdown markup: code blocks, heading/quote/list markers, emphasis, table bars.
+      const plain = value => String(value || '').replace(/```[\s\S]*?```/g, ' ').replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+        .replace(/\*\*|__|`|\|/g, ' ').replace(/^\s*-{3,}\s*$/gm, ' ').replace(/\s+/g, ' ').trim();
+      const showPeek = (turn, dash) => {
+        clearTimeout(peekTimer);
+        peekTurn = turn.id;
+        const marked = bookmarks().has(turn.id);
+        const reply = plain(turn.answer) || (isActive(turn) ? '正在回答…' : turn.error ? '失败：' + turn.error : '没有文字回复');
+        peek.replaceChildren(
+          h('div.peek-head', h('span.peek-title', plain(turn.prompt) || '（图片或附件）'),
+            h('button.icon-btn.peek-mark' + (marked ? '.on' : ''), { title: marked ? '取消书签' : '加书签', on: { click: event => { event.stopPropagation(); toggleBookmark(turn.id); showPeek(turn, rail.querySelector('[data-turn="' + turn.id + '"]')); } } }, CF.icon('bookmark', 14))),
+          h('div.peek-body', reply.slice(0, 400)));
+        peek.hidden = false;
+        const railBox = rail.getBoundingClientRect();
+        const box = dash.getBoundingClientRect();
+        peek.style.top = Math.max(8, Math.min(box.top + box.height / 2 - railBox.top - peek.offsetHeight / 2, window.innerHeight - railBox.top - peek.offsetHeight - 8)) + 'px';
+      };
+      const hidePeek = () => { peekTimer = setTimeout(() => { peek.hidden = true; peekTurn = ''; }, 120); };
+      peek.addEventListener('mouseenter', () => clearTimeout(peekTimer));
+      peek.addEventListener('mouseleave', hidePeek);
+      peek.addEventListener('click', () => jumpTo(peekTurn));
+      const renderRail = () => {
+        const turns = current.turns;
+        rail.hidden = turns.length < 2;
+        if (rail.hidden) { peek.hidden = true; return; }
+        const marks = bookmarks();
+        rail.replaceChildren(...turns.map(turn => h('button.rail-dash' + (turn.id === railCurrent ? '.current' : '') + (marks.has(turn.id) ? '.marked' : '') + (isActive(turn) ? '.live' : ''), {
+          dataset: { turn: turn.id }, 'aria-label': plain(turn.prompt).slice(0, 60),
+          on: {
+            mouseenter: event => showPeek(turn, event.currentTarget), mouseleave: hidePeek, focus: event => showPeek(turn, event.currentTarget), blur: hidePeek,
+            click: () => jumpTo(turn.id),
+          },
+        }, h('span'))), peek);
+      };
+      // The turn whose top is nearest above the middle of the view is "current".
+      const trackCurrent = () => {
+        if (Date.now() < jumpUntil) return;
+        const top = transcript.getBoundingClientRect().top + transcript.clientHeight * 0.35;
+        let found = current.turns[0]?.id || '';
+        for (const turn of current.turns) {
+          const node = nodes.get(turn.id)?.node;
+          if (node && node.getBoundingClientRect().top <= top) found = turn.id;
+        }
+        if (found !== railCurrent) {
+          railCurrent = found;
+          for (const dash of rail.querySelectorAll('.rail-dash')) dash.classList.toggle('current', dash.dataset.turn === found);
+        }
+      };
+      transcript.addEventListener('scroll', () => requestAnimationFrame(trackCurrent), { passive: true });
+
       const renderTurns = () => {
         if (!current.turns.length) { if (!welcome.isConnected) transcript.replaceWith(welcome); return; }
         if (welcome.isConnected) welcome.replaceWith(transcript);
@@ -459,11 +595,13 @@
         }
         if (atBottom) transcript.scrollTop = transcript.scrollHeight;
         updateComposer();
+        renderRail();
+        trackCurrent();
       };
       const renderAttachments = () => {
         attachRow.hidden = !current.attachments.length;
-        attachRow.replaceChildren(...current.attachments.map(item => h('div.attach' + (item.path ? '' : '.uploading'),
-          h('img', { src: item.url, alt: item.name }),
+        attachRow.replaceChildren(...current.attachments.map(item => h('div.attach' + (item.path ? '' : '.uploading') + (item.image ? '' : '.file'), { title: item.name },
+          item.image ? h('img', { src: item.url, alt: item.name }) : CF.fileChip(item.name, item.size),
           item.path ? null : h('span.spinner'),
           h('button.remove', { title: '移除', on: { click: () => {
             current.attachments = current.attachments.filter(other => other !== item);
@@ -471,24 +609,26 @@
           } } }, CF.icon('x', 11)))));
         updateComposer();
       };
-      const TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      const IMAGES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      // Any file up to 20 MB, uploaded into the project right away (images also get a preview).
       const addFiles = files => {
         for (const file of files) {
-          if (!TYPES.includes(file.type)) { CF.toast('只支持 PNG、JPEG、WebP 和 GIF 图片'); continue; }
+          if (!file.size) { CF.toast((file.name || '这个文件') + ' 是空的'); continue; }
           if (file.size > 20 * 1024 * 1024) { CF.toast(file.name + ' 超过 20 MB'); continue; }
-          if (current.attachments.length >= 20) { CF.toast('一次最多 20 张图片'); break; }
-          const item = { name: file.name || 'image.' + file.type.split('/')[1], url: '', path: '' };
+          if (current.attachments.length >= 20) { CF.toast('一次最多 20 个附件'); break; }
+          const image = IMAGES.includes(file.type);
+          const name = file.name || (image ? 'image.' + file.type.split('/')[1].replace('jpeg', 'jpg') : 'file');
+          const item = { name, size: file.size, image, url: '', path: '' };
           current.attachments.push(item);
           const reader = new FileReader();
           reader.onload = async () => {
             item.url = String(reader.result);
             renderAttachments();
             try {
-              const extension = file.type.split('/')[1].replace('jpeg', 'jpg');
-              const name = /\.(png|jpe?g|webp|gif)$/i.test(item.name) ? item.name : item.name + '.' + extension;
               const saved = await CF.api('POST', 'projects/' + encodeURIComponent(projectId) + '/uploads', { name, data: item.url.split(',')[1] });
               item.path = saved.path;
-              CF.seedUpload(projectId, saved.path, item.url);
+              CF.rememberUpload(saved.path, name, file.size);
+              if (image) CF.seedUpload(projectId, saved.path, item.url);
             } catch (error) {
               current.attachments = current.attachments.filter(other => other !== item);
               CF.fail(error);
@@ -501,7 +641,7 @@
       };
       fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = ''; });
       textarea.addEventListener('paste', event => {
-        const files = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/'));
+        const files = [...(event.clipboardData?.files || [])];
         if (files.length) { event.preventDefault(); addFiles(files); }
       });
       const renderFollowUps = () => {
@@ -547,7 +687,7 @@
       const stop = async () => {
         const running = activeTurn();
         if (!running) return;
-        await CF.busy(stopButton, () => CF.api('POST', 'turns/' + running.id + '/cancel'));
+        await CF.busy(sendButton, () => CF.api('POST', 'turns/' + running.id + '/cancel'));
         await current.refresh();
       };
       // Sends while idle (a new turn) or while a turn runs: Claude takes it into the
@@ -583,14 +723,13 @@
         } catch (error) { CF.fail(error); }
         finally { current.sending = false; updateComposer(); }
       };
-      stopButton.addEventListener('click', () => void stop());
 
       textarea.addEventListener('input', () => { autosize(); updateComposer(); });
       textarea.addEventListener('keydown', event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
         else if (event.key === 'Escape' && activeTurn() && !textarea.value) { event.preventDefault(); void stop(); }
       });
-      sendButton.addEventListener('click', () => void send());
+      sendButton.addEventListener('click', () => void (sendButton.classList.contains('stop') ? stop() : send()));
 
       const rename = async () => {
         const target = CF.state.conversations.find(item => item.id === current.conversationId);
@@ -608,6 +747,10 @@
       };
       const more = h('button.btn.ghost.icon', { title: '更多', on: { click: () => CF.menu(more, [
         current.conversationId ? { label: '重命名', run: rename } : null,
+        current.conversationId ? { label: '重新生成标题', icon: 'spark', run: async () => {
+          try { await CF.api('POST', 'conversations/' + current.conversationId + '/title'); CF.toast('正在生成标题…'); }
+          catch (error) { CF.fail(error); }
+        } } : null,
         { label: '打开项目终端', icon: 'terminal', run: () => CF.projects.terminal(projectId) },
         { label: '查看项目', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
       ].filter(Boolean)) } }, CF.icon('more', 16));
@@ -616,7 +759,7 @@
       transcript.addEventListener('scroll', () => topbar.classList.toggle('scrolled', transcript.scrollTop > 4), { passive: true });
       container.replaceChildren(
         topbar,
-        h('div.chat', current.conversationId ? transcript : welcome,
+        h('div.chat', rail, current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, followHost, h('div.composer', {
             on: {
               dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
@@ -624,7 +767,7 @@
               drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); addFiles([...event.dataTransfer.files]); },
             },
           }, attachRow, textarea, fileInput,
-            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, stopButton, sendButton)))),
+            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, sendButton)))),
       );
       renderHeader();
       autosize();

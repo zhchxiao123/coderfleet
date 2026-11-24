@@ -24,7 +24,16 @@ const project = process.env.FAKE_PROJECT;
 if (command === 'version') { console.log('27.0.0'); process.exit(0); }
 if (command === 'ps') { for (const [name, value] of Object.entries(containers)) console.log(name + '\\t' + value + '\\t' + value); process.exit(0); }
 if (command === 'image') process.exit(process.env.FAKE_IMAGE === 'missing' ? 1 : 0);
-if (command === 'build') { console.log('building ' + args.join(' ')); process.exit(0); }
+if (command === 'build') {
+  console.log('building ' + args.join(' '));
+  // FAKE_BUILD_STEPS: print BuildKit-style steps slowly (the UI preview shows progress).
+  const steps = Number(process.env.FAKE_BUILD_STEPS || 0);
+  for (let step = 1; step <= steps; step += 1) {
+    console.log('#' + (step + 4) + ' [' + String(step).padStart(2) + '/' + steps + '] RUN step ' + step);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+  }
+  process.exit(0);
+}
 if (command === 'rm') { for (const name of args.filter(value => !value.startsWith('-'))) delete containers[name]; save(); process.exit(0); }
 if (command === 'compose') {
   const services = args.slice(3).filter(value => !value.startsWith('-'));

@@ -14,7 +14,7 @@ import { loadConfig } from './conf.js';
 import { atomicJSON, record, text } from './state.js';
 
 export class SystemLLMError extends Error {}
-class OutputLimitError extends SystemLLMError {}
+export class OutputLimitError extends SystemLLMError {}
 class IncompleteTranslation extends SystemLLMError {}
 
 export interface SystemLLMConfig { provider: string; apiKey: string; model: string; baseUrl: string; proxy: string }
