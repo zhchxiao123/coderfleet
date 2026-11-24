@@ -105,6 +105,12 @@ async function handle(message) {
     const images = prompt.filter(block => block.type === 'image' || block.type === 'document').map(block => block.source.media_type + ':' + block.source.data.length);
     say('images:' + images.join(',') + ':' + text);
     finish();
+  } else if (prompt === 'readimg') {
+    // Read of a picture: the tool result is an image block.
+    send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'img-1', name: 'Read', input: { file_path: '/workspace/shot.png' } }] } });
+    send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'img-1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: process.env.FAKE_READ_IMAGE || 'iVBORw0KGgo=' } }] }] } });
+    say('looked');
+    finish();
   } else if (prompt === 'forkme') {
     say('fork-source');
     finish();

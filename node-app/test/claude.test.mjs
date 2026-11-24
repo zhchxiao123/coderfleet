@@ -98,6 +98,12 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'folded turn', 400);
     assert.equal(turn.answer, 'working folded:fold this');
 
+    // A tool that returns an image (Read of a picture): the detail panel gets the image from the log.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'readimg' });
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'readimg' && value.status === 'done', 'image tool turn');
+    const imageTool = (await env.get('turns/' + turn.id + '/tools/img-1')).body;
+    assert.deepEqual([imageTool.output, imageTool.images], ['', [{ mime: 'image/png', data: 'iVBORw0KGgo=' }]]);
+
     // Fork at a finished turn: a new conversation resumes it under a new session ID.
     const source = (await env.post('conversations', { projectId: 'app' })).body.id;
     await env.post('conversations/' + source + '/turns', { prompt: 'forkme' });

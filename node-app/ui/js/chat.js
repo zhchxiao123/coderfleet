@@ -66,10 +66,17 @@
       const empty = tool.status === 'running' ? '还在运行，结束后显示输出。'
         : tool.status === 'waiting' ? '等你确认后才会运行。'
           : tool.status === 'denied' ? '已拒绝，没有运行。' : '没有输出。';
+      // Images the tool returned (e.g. Read of a picture); clicking opens one full size.
+      const images = (data.images || []).map(image => {
+        const url = 'data:' + image.mime + ';base64,' + image.data;
+        return h('button.tool-image', { title: '查看大图', on: { click: () => CF.sheet({ title: tool.title + ' · 图片', wide: true }, () => h('img.preview-full', { src: url, alt: '' })) } },
+          h('img', { src: url, alt: '' }));
+      });
       panel.replaceChildren(
         input ? h('div.section', h('div.label', '输入'), input) : null,
         h('div.section', h('div.label', tool.status === 'failed' ? '错误' : '输出'),
-          output ? h('pre' + (tool.status === 'failed' ? '.error' : ''), output) : h('div.empty-note', empty)));
+          images.length ? h('div.tool-images', images) : null,
+          output ? h('pre' + (tool.status === 'failed' ? '.error' : ''), output) : images.length ? null : h('div.empty-note', empty)));
     };
     const cached = toolDetails.get(key);
     if (cached && cached.status === tool.status) show(cached.data);

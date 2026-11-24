@@ -96,6 +96,33 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const titles = new Titles(store, workspace);
   runner.onFinish = turn => titles.observe(turn);
 
+  /**
+   * Images a tool returned (Claude's Read of a picture, screenshots…), read back from the
+   * turn's log instead of being kept in the record: at most 6, each up to ~6 MB.
+   */
+  const toolImages = (turnId: string, toolId: string): { mime: string; data: string }[] => {
+    let log = '';
+    try { log = readFileSync(store.logPath(turnId), 'utf8'); } catch { return []; }
+    const images: { mime: string; data: string }[] = [];
+    for (const line of log.split('\n')) {
+      if (images.length >= 6 || !line.includes(toolId) || !line.includes('"image"')) continue;
+      let event: Record<string, unknown>;
+      try { event = record(JSON.parse(line)); } catch { continue; }
+      const blocks = record(event.message).content;
+      for (const block of Array.isArray(blocks) ? blocks.map(record) : []) {
+        if (block.type !== 'tool_result' || block.tool_use_id !== toolId || !Array.isArray(block.content)) continue;
+        for (const item of block.content.map(record)) {
+          const source = record(item.source);
+          const mime = text(source.media_type);
+          if (item.type === 'image' && source.type === 'base64' && /^image\/(png|jpeg|gif|webp)$/.test(mime) && text(source.data).length <= 8_000_000 && images.length < 6) {
+            images.push({ mime, data: text(source.data) });
+          }
+        }
+      }
+    }
+    return images;
+  };
+
   /** Starts a new turn in a conversation that has none running. */
   const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
     const target = chatProject(conversation.projectId);
@@ -452,7 +479,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const turn = store.turn(identifier(id));
       const tool = turn?.tools.find(item => item.id === decodeURIComponent(toolId as string));
       if (!tool) throw new HttpError(404, '找不到这次工具调用');
-      return { id: tool.id, title: tool.title, status: tool.status, input: tool.input ?? {}, output: tool.output ?? '' };
+      return { id: tool.id, title: tool.title, status: tool.status, input: tool.input ?? {}, output: tool.output ?? '', images: toolImages(turn?.id as string, tool.id) };
     }],
     ['POST', /^turns\/([\w-]+)\/(permission|cancel)$/, async (request, [id, action]) => {
       const turn = store.turn(identifier(id));
