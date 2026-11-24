@@ -344,12 +344,23 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
 
     // Conversations
     ['GET', /^conversations$/, async () => {
-      const summaries = new Map<string, { updatedAt: string; status: string; turns: number; attention: boolean }>();
+      // Like the Python service (Conversation.touch at a task's start and end): a conversation's time is
+      // its latest activity — the newest turn's finish, or its start while it runs. Status is the newest turn's.
+      const time = (value: string): number => Date.parse(value) || 0;
+      const summaries = new Map<string, { updatedAt: string; latest: string; status: string; turns: number; attention: boolean }>();
       for (const item of store.turnIds()) {
         const conversationId = store.turnConversation(item.id);
         if (!conversationId) continue;
-        const current = summaries.get(conversationId) ?? { updatedAt: '', status: '', turns: 0, attention: false };
-        summaries.set(conversationId, { updatedAt: item.createdAt, status: item.status, turns: current.turns + 1, attention: item.attention });
+        const current = summaries.get(conversationId) ?? { updatedAt: '', latest: '', status: '', turns: 0, attention: false };
+        const activity = time(item.finishedAt) > time(item.createdAt) ? item.finishedAt : item.createdAt;
+        const newest = time(item.createdAt) >= time(current.latest);
+        summaries.set(conversationId, {
+          updatedAt: time(activity) > time(current.updatedAt) ? activity : current.updatedAt,
+          latest: newest ? item.createdAt : current.latest,
+          status: newest ? item.status : current.status,
+          turns: current.turns + 1,
+          attention: current.attention || item.attention,
+        });
       }
       return store.conversations().map(item => {
         const summary = summaries.get(item.id);

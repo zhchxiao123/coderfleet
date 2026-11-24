@@ -216,21 +216,21 @@ export class WorkspaceStore {
   }
 
   /** Turn summaries of a conversation (or of all), without reading logs except for live turns. */
-  public turnIds(conversationId?: string): { id: string; createdAt: string; status: Status; attention: boolean; projectId: string }[] {
+  public turnIds(conversationId?: string): { id: string; createdAt: string; finishedAt: string; status: Status; attention: boolean; projectId: string }[] {
     this.refresh();
-    const result: { id: string; createdAt: string; status: Status; attention: boolean; projectId: string }[] = [];
+    const result: { id: string; createdAt: string; finishedAt: string; status: Status; attention: boolean; projectId: string }[] = [];
     for (const { raw } of this.taskIndex.values()) {
       const id = text(raw.id);
       if (conversationId !== undefined && text(raw.conversation_id) !== conversationId) continue;
       const live = this.live.get(id);
       result.push({
-        id, createdAt: text(raw.created), status: live?.status ?? FROM_PYTHON[text(raw.status)] ?? 'failed', attention: Boolean(live?.permission),
+        id, createdAt: text(raw.created), finishedAt: live?.finishedAt ?? text(raw.finished), status: live?.status ?? FROM_PYTHON[text(raw.status)] ?? 'failed', attention: Boolean(live?.permission),
         projectId: text(raw.project_name) || this.projectForPath(text(raw.project)) || '',
       });
     }
     for (const live of this.live.values()) {
       if ((conversationId === undefined || live.conversationId === conversationId) && !result.some(item => item.id === live.id)) {
-        result.push({ id: live.id, createdAt: live.createdAt, status: live.status, attention: Boolean(live.permission), projectId: live.projectId });
+        result.push({ id: live.id, createdAt: live.createdAt, finishedAt: live.finishedAt ?? '', status: live.status, attention: Boolean(live.permission), projectId: live.projectId });
       }
     }
     return result.sort((left, right) => left.createdAt.localeCompare(right.createdAt));

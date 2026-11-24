@@ -19,6 +19,11 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.equal(turn.answer, 'echo:hello:opus');
     assert.equal(turn.sessionId, 'claude-session-1');
 
+    // The conversation's time is its latest activity: the turn's finish (as the Python service touches it).
+    const summary = (await env.get('conversations')).body.find(item => item.id === conversation);
+    assert.ok(turn.finishedAt && summary.updatedAt === turn.finishedAt, summary.updatedAt + ' vs ' + turn.finishedAt);
+    assert.equal(summary.status, 'done');
+
     await env.post('conversations/' + conversation + '/turns', { prompt: 'again' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'resumed turn');
     assert.equal(turn.answer, 'echo:again::resumed=claude-session-1');
