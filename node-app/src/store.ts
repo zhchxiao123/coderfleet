@@ -142,6 +142,23 @@ export class WorkspaceStore {
     this.conversationIndex.set(value.id, { mtime: statSync(path).mtimeMs, raw: next });
   }
 
+  /**
+   * One synchronous read-modify-write of a conversation record; `change` returns
+   * false to leave it untouched. Used for title state, which must not move `updated`.
+   */
+  public changeConversation(id: string, change: (raw: Raw) => boolean): void {
+    const path = join(this.conversationsDir, id + '.json');
+    const raw = readJson(path);
+    if (!raw || !change(raw)) return;
+    writeJson(path, raw);
+    this.conversationIndex.set(id, { mtime: statSync(path).mtimeMs, raw });
+  }
+
+  /** The conversation's title state (Python ConversationTitle), read fresh from disk. */
+  public conversationTitle(id: string): Raw {
+    return record(readJson(join(this.conversationsDir, id + '.json'))?.title);
+  }
+
   private touchConversation(id: string, change: (raw: Raw) => void): void {
     const path = join(this.conversationsDir, id + '.json');
     const raw = readJson(path);

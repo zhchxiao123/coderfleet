@@ -81,6 +81,13 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.deepEqual(turn.blocks.filter(block => block.kind === 'user'), [{ kind: 'user', text: 'also this' }]);
     assert.deepEqual((await env.get('conversations/' + conversation + '/follow-ups')).body, []);
 
+    // A newer CLI folds the message into the running turn: the turn still ends.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'fold' });
+    turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.capabilities?.includes('message'), 'folding turn');
+    assert.equal((await env.post('conversations/' + conversation + '/turns', { prompt: 'fold this' })).body.delivered, 'message');
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'folded turn', 400);
+    assert.equal(turn.answer, 'working folded:fold this');
+
     // Fork at a finished turn: a new conversation resumes it under a new session ID.
     const source = (await env.post('conversations', { projectId: 'app' })).body.id;
     await env.post('conversations/' + source + '/turns', { prompt: 'forkme' });
@@ -117,5 +124,12 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     await env.post('turns/' + turn.id + '/cancel');
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'interrupted turn');
     assert.equal(turn.interrupted, true);
+
+    // A CLI that ignores the interrupt is killed; the turn still stops.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'stubborn' });
+    turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.controlReady, 'stubborn turn');
+    await env.post('turns/' + turn.id + '/cancel');
+    assert.equal((await lastTurn(env, conversation)).stopping, true);
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'stopped stubborn turn', 500);
   } finally { await env.close(); }
 });

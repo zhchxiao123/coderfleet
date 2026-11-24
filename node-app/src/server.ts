@@ -13,8 +13,9 @@ import { assertContainer, models } from './docker.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
+import { Titles } from './titles.js';
 import { configured, SystemLLMError, systemLLM, TranslationCache, translateText } from './translate.js';
-import { findPythonService, type PythonService } from './python-service.js';
+import { findPythonService, stopPythonTask, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
 import { WorkspaceStore } from './store.js';
 import { chatSupported, TaskRunner } from './tasks.js';
@@ -92,6 +93,9 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
   const followUps = new FollowUps(config.stateDirectory);
   const translations = new TranslationCache(join(workspace, 'translations'));
+  // Automatic conversation titles with the system LLM, as the Python service names them.
+  const titles = new Titles(store, workspace);
+  runner.onFinish = turn => titles.observe(turn);
 
   /** Starts a new turn in a conversation that has none running. */
   const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
@@ -121,6 +125,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       status: 'starting', answer: '', tools: [], blocks: [], ...(forkAt ? { forkAt } : {}),
     };
     store.createTurn(turn, target.path);
+    titles.observe(turn);
     if (turns.length === 0 && conversation.name === '新对话') {
       const title = (input.text || '图片').replace(/\s+/g, ' ').slice(0, 40);
       store.saveConversation({ ...conversation, name: title });
@@ -352,6 +357,15 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       });
       return [...inherited, ...turnsOf(id as string).map(publicTurn)];
     }],
+    // Names the conversation again with the system LLM (replaces a manual title).
+    ['POST', /^conversations\/([\w-]+)\/title$/, async (_request, [id]) => {
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      if (!configured(systemLLM(workspace))) throw new HttpError(503, '还没有配置命名用的模型：在 设置 → 翻译与命名 里填写');
+      try { titles.request(conversation.id); } catch (error) { throw new HttpError(409, message(error)); }
+      titles.tick();
+      return { queued: true };
+    }],
     // Forks a Claude conversation at a finished turn into a new conversation.
     ['POST', /^conversations\/([\w-]+)\/fork$/, async (request, [id]) => {
       const source = store.conversation(identifier(id));
@@ -383,9 +397,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const message_ = { text: prompt, images, auto: input.auto === true, model };
       const running = turnsOf(conversation.id).find(active);
       if (!running) return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_)) };
-      if (running.controlReady && running.capabilities?.includes('message')) {
+      if (running.controlReady && running.capabilities?.includes('message') && !running.cancelRequested) {
         try {
           await runner.message(running, { text: prompt, images });
+          titles.observeMessage(running, prompt, randomUUID());
           return { delivered: 'message', turn: publicTurn(running) };
         } catch { /* the run is finishing: queue it as the next turn instead */ }
       }
@@ -426,6 +441,15 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const turn = store.turn(identifier(id));
       if (!turn) throw new HttpError(404, 'Turn not found');
       if (!active(turn)) throw new HttpError(409, 'The turn has already finished');
+      // A turn the Python service runs (or took over) is stopped there; this service only shows it.
+      if (turn.origin !== 'node') {
+        if (action !== 'cancel') throw new HttpError(409, '这一轮由原 Python 服务运行，请在它的界面里处理');
+        const service = await findPythonService(workspace);
+        if (!service?.url) throw new HttpError(409, '这一轮由原 Python 服务运行，它现在没有运行，无法停止');
+        try { await stopPythonTask(workspace, service.url, turn.id); }
+        catch (error) { throw new HttpError(409, message(error)); }
+        return { accepted: true };
+      }
       if (action === 'cancel') { await runner.cancel(turn); return { accepted: true }; }
       const input = await body(request);
       const key = identifier(input.id);
@@ -472,9 +496,11 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }
   });
   // Follows every active turn; after a restart this resumes from the saved log offsets.
+  let titlesTicked = 0;
   const timer = setInterval(() => {
     for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
     void drainFollowUps();
+    if (Date.now() - titlesTicked > 1_000) { titlesTicked = Date.now(); titles.tick(); }
   }, 250);
   timer.unref();
   server.once('close', () => clearInterval(timer));
@@ -493,6 +519,7 @@ function publicTurn(turn: Turn): Record<string, unknown> {
   const { resumeId: _resume, controlToken: _token, logOffset: _offset, launchedAt: _launched, cancelRequested: _cancel, ...visible } = turn;
   return {
     ...visible,
+    ...(turn.cancelRequested && active(turn) ? { stopping: true } : {}),
     tools: turn.tools.map(({ input, output, ...tool }) => ({ ...tool, hasDetail: Boolean(output) || Object.keys(record(input)).length > 0 })),
   };
 }

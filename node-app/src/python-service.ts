@@ -52,3 +52,19 @@ export async function findPythonService(workspace: string): Promise<PythonServic
   if (!same && pid === undefined) return undefined;
   return { url: same ? 'http://127.0.0.1:' + port : undefined, pid };
 }
+
+/**
+ * Asks the Python service to stop one of its tasks (`DELETE /api/tasks/<id>`), with the
+ * workspace's API key when it has one. Throws with the service's reason when it refuses.
+ */
+export async function stopPythonTask(workspace: string, url: string, id: string): Promise<void> {
+  let key = '';
+  try { key = readFileSync(join(workspace, 'api_key.txt'), 'utf8').trim(); } catch { /* authentication disabled */ }
+  const response = await fetch(url + '/api/tasks/' + encodeURIComponent(id), {
+    method: 'DELETE', headers: key ? { Authorization: 'Bearer ' + key } : {}, signal: AbortSignal.timeout(15_000),
+  });
+  if (response.ok) return;
+  let reason = '';
+  try { reason = text(record(await response.json()).detail); } catch { /* not JSON */ }
+  throw new Error(reason || '原 Python 服务拒绝了停止请求（HTTP ' + response.status + '）');
+}

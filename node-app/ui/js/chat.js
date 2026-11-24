@@ -389,7 +389,7 @@
 
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
       const activeTurn = () => current.turns.find(isActive);
-      const canInject = turn => Boolean(turn?.controlReady && turn.capabilities?.includes('message'));
+      const canInject = turn => Boolean(turn?.controlReady && turn.capabilities?.includes('message') && !turn.stopping);
       const updateComposer = () => {
         const running = activeTurn();
         const info = project();
@@ -399,7 +399,8 @@
         sendButton.disabled = current.sending || current.readOnly || !content || uploading || !containerReady;
         sendButton.title = running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
         stopButton.hidden = !running;
-        hint.textContent = running ? (canInject(running) ? '正在回答 · 现在发送会插入这一轮' : '正在回答 · 现在发送会排在这轮之后')
+        stopButton.disabled = Boolean(running?.stopping);
+        hint.textContent = running?.stopping ? '正在停止 · 现在发送会排在这轮之后' : running ? (canInject(running) ? '正在回答 · 现在发送会插入这一轮' : '正在回答 · 现在发送会排在这轮之后')
           : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
       };
@@ -608,6 +609,10 @@
       };
       const more = h('button.btn.ghost.icon', { title: '更多', on: { click: () => CF.menu(more, [
         current.conversationId ? { label: '重命名', run: rename } : null,
+        current.conversationId ? { label: '重新生成标题', icon: 'spark', run: async () => {
+          try { await CF.api('POST', 'conversations/' + current.conversationId + '/title'); CF.toast('正在生成标题…'); }
+          catch (error) { CF.fail(error); }
+        } } : null,
         { label: '打开项目终端', icon: 'terminal', run: () => CF.projects.terminal(projectId) },
         { label: '查看项目', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
       ].filter(Boolean)) } }, CF.icon('more', 16));

@@ -25,6 +25,10 @@ type QueryFunction = (input: { prompt: AsyncIterable<Json>; options: Json }) => 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan']);
 /** After a result, how long to wait for the run that answers a message sent mid-turn. */
 const FOLLOW_UP_WAIT = 5_000;
+/** After an interrupt, how long the CLI gets to wind down before the worker exits anyway. */
+const INTERRUPT_GRACE = 15_000;
+/** Lifecycle states after which the CLI will not run a sent message (again). */
+const COMMAND_ENDED = new Set(['completed', 'cancelled', 'failed', 'discarded']);
 
 /** A user message: plain text, or text plus base64 image blocks (Python `_input_content`). */
 export function userContent(cwd: string, text: string, images: readonly string[] | undefined): string | Json[] {
@@ -56,6 +60,8 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
   const inbox: Json[] = [];
   let wakeInput: () => void = () => undefined;
   let accepting = false;
+  // Messages sent mid-turn that the CLI has not reported finished (command_lifecycle).
+  const open = new Set<string>();
   let sentSinceResult = 0;
   const send = (content: string | Json[], uuid = randomUUID()): void => {
     inbox.push({ type: 'user', session_id: '', parent_tool_use_id: null, uuid, message: { role: 'user', content } });
@@ -107,12 +113,7 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
     const payload = command.payload;
     if (command.kind === 'ping') mailbox.acknowledge(command.id, { connected: true });
     else if (command.kind === 'interrupt') {
-      if (!interrupted) {
-        interrupted = true;
-        for (const resolve of pending.values()) resolve({ decision: 'deny', message: 'The turn was interrupted' });
-        await query?.interrupt().catch(() => undefined);
-        system(spec, 'coderfleet_interrupted');
-      }
+      await stop();
       mailbox.acknowledge(command.id, { interrupted: true });
     } else if (command.kind === 'approval' || command.kind === 'answer') {
       const resolve = pending.get(str(payload.tool_call_id));
@@ -139,20 +140,32 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
       try { content = userContent(spec.cwd, text, images as string[]); }
       catch (error) { mailbox.acknowledge(command.id, undefined, errorMessage(error)); return; }
       sentSinceResult += 1;
-      send(content);
+      const uuid = randomUUID();
+      open.add(uuid);
+      send(content, uuid);
       system(spec, 'coderfleet_message_accepted', { request_id: command.id, text, images });
       mailbox.acknowledge(command.id, { queued_in_sdk: true });
     } else mailbox.acknowledge(command.id, undefined, 'Command is unavailable for this Claude turn');
   };
 
   let pump: ReturnType<typeof pumpCommands> | undefined;
-  const onSignal = (): void => {
+  // Stops the run and closes the input, so the CLI exits even when it sits idle
+  // between runs (an interrupt alone does nothing then). A CLI that still does
+  // not end is killed with the worker after INTERRUPT_GRACE.
+  async function stop(): Promise<void> {
     if (interrupted) return;
     interrupted = true;
+    accepting = false;
     for (const resolve of pending.values()) resolve({ decision: 'deny', message: 'The turn was interrupted' });
-    void query?.interrupt().catch(() => undefined);
     system(spec, 'coderfleet_interrupted');
-  };
+    setTimeout(() => {
+      // The launcher starts the worker as a process group leader: the CLI goes with it.
+      try { mailbox.close(); process.kill(-process.pid, 'SIGKILL'); } finally { process.exit(143); }
+    }, INTERRUPT_GRACE).unref();
+    await query?.interrupt().catch(() => undefined);
+    finished();
+  }
+  const onSignal = (): void => { void stop(); };
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
   try {
@@ -191,9 +204,18 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
     let result: Json | undefined;
     let announced = false;
     let settle: ReturnType<typeof setTimeout> | undefined;
+    const close = (): void => { clearTimeout(settle); settle = undefined; accepting = false; finished(); };
     for await (const message of query) {
-      // Anything after a result means a message sent mid-turn started its own run.
-      if (settle) { clearTimeout(settle); settle = undefined; result = undefined; }
+      if (message.type === 'command_lifecycle') {
+        // The CLI reports each sent message as queued, started and ended; newer CLIs fold
+        // messages sent mid-turn into the running turn, so no run of their own follows.
+        if (COMMAND_ENDED.has(str(message.state))) open.delete(str(message.command_uuid));
+        process.stdout.write(JSON.stringify(message) + '\n');
+        if (settle && !open.size) close();
+        continue;
+      }
+      // Output after a result means a message sent mid-turn started its own run.
+      if (settle && ['assistant', 'user', 'stream_event'].includes(str(message.type))) { clearTimeout(settle); settle = undefined; result = undefined; }
       const sessionId = str(message.session_id);
       if (!announced && sessionId) {
         announced = true;
@@ -205,8 +227,8 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
         result = message;
         // A message sent during this run may be answered by a run of its own, or merged
         // into this one (then nothing follows): wait briefly before closing the input.
-        if (sentSinceResult > 0 && !interrupted) { sentSinceResult = 0; settle = setTimeout(() => { accepting = false; finished(); }, FOLLOW_UP_WAIT); }
-        else { accepting = false; finished(); }
+        if (sentSinceResult > 0 && open.size && !interrupted) { sentSinceResult = 0; settle = setTimeout(close, FOLLOW_UP_WAIT); }
+        else close();
       }
     }
     if (interrupted) return 143;

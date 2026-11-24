@@ -149,10 +149,10 @@
       const saveLlm = h('button.btn.primary.small', { on: { click: () => CF.busy(saveLlm, async () => {
         await CF.api('PUT', 'settings', Object.fromEntries(Object.entries(llmInputs).map(([key, input]) => [key, input.value.trim()])));
         CF.chat.translationChanged();
-        CF.toast('已保存，回答下面会出现「翻译」');
+        CF.toast('已保存：新对话会自动起标题，回答下面会出现「翻译」');
       }) } }, '保存');
       page.append(h('div.card',
-        h('div.card-head', h('div', h('h2', '翻译'), h('p', '把回答翻译成中文。用这里配置的模型，不占用项目账号的额度；和原服务共用设置与译文缓存。')), saveLlm),
+        h('div.card-head', h('div', h('h2', '翻译与命名'), h('p', '用来把回答翻译成中文、给对话自动起标题。用这里配置的模型，不占用项目账号的额度；和原服务共用同一份设置。')), saveLlm),
         h('div.card-body', h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:0 18px' }, llmFields))));
       const fields = Object.entries(LABELS).map(([key, [label, hint]]) => {
         inputs[key] = h('input', { value: values[key] ?? '', spellcheck: false });
