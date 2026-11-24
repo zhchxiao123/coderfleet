@@ -63,7 +63,7 @@ try {
   await page.waitForSelector('.running-status');
   await page.waitForTimeout(700);
   await shot('chat-running');
-  await page.click('.send.stop');
+  await page.click('.stop-turn');
   await page.waitForSelector('.turn-note');
   await page.click('.nav-item:has-text("项目")');
   await page.waitForSelector('.row');

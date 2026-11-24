@@ -133,6 +133,7 @@ export async function environment({ accounts = '', projects = (project) => '', b
     root, workspace, project, bin,
     get: path => call('GET', path),
     post: (path, value = {}) => call('POST', path, value),
+    delete: path => call('DELETE', path),
     put: (path, value) => call('PUT', path, value),
     del: path => call('DELETE', path),
     async restart() { await stop(); server = await serve(config); },

@@ -89,7 +89,8 @@ export interface Tool {
   readonly output?: string;
 }
 
-export type Block = { kind: 'text'; text: string } | { kind: 'tool'; id: string };
+/** `user`: a message sent while the turn was running (Claude takes it into the same run). */
+export type Block = { kind: 'text'; text: string } | { kind: 'tool'; id: string } | { kind: 'user'; text: string; images?: string[] };
 
 export interface QuestionOption { readonly label: string; readonly description: string }
 export interface Question { readonly question: string; readonly header: string; readonly multiSelect: boolean; readonly options: readonly QuestionOption[] }
@@ -117,6 +118,10 @@ export interface Turn {
   readonly conversationId: string;
   readonly projectId: string;
   readonly prompt: string;
+  /** Project uploads sent with the prompt, as container paths (/workspace/.coderfleet-uploads/…). */
+  readonly images?: readonly string[];
+  /** Tools run without asking (Python `auto`: bypass permissions / --yolo / always approve). */
+  readonly auto?: boolean;
   readonly requestedModel: string;
   readonly createdAt: string;
   readonly resumeId: string;
@@ -134,6 +139,8 @@ export interface Turn {
   /** Capability for this run's control mailbox; never returned by the API. */
   controlToken?: string;
   controlReady?: boolean;
+  /** What the running worker's control channel accepts (`message`: mid-turn messages). */
+  capabilities?: string[];
   /** Bytes of the worker's event log already applied to this record. */
   logOffset?: number;
   launchedAt?: string;

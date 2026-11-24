@@ -1,13 +1,14 @@
 // Runs one Codex turn inside the project's persistent container with the
 // official TypeScript Codex SDK (@openai/codex-sdk), which drives the
-// container's `codex` CLI. Manual mode matches the Python scheduler: the
-// workspace-write sandbox, resume by thread ID. Codex thread events are
+// container's `codex` CLI. Like the Python scheduler: the workspace-write sandbox,
+// or danger-full-access without approvals in auto mode; resume by thread ID;
+// images as local_image inputs. Codex thread events are
 // translated into the shared stream-json events.
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
-import { emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 function text(type: 'text' | 'thinking', value: string, id: string): void {
   if (!value) return;
@@ -66,7 +67,7 @@ export function translate(spec: BaseSpec, event: Json): string | undefined {
 
 export interface CodexSpec extends BaseSpec { vendor_directory: string }
 
-interface CodexThread { runStreamed(input: string, options: { signal: AbortSignal }): Promise<{ events: AsyncIterable<Json> }> }
+interface CodexThread { runStreamed(input: string | Json[], options: { signal: AbortSignal }): Promise<{ events: AsyncIterable<Json> }> }
 interface CodexClient {
   startThread(options: Json): CodexThread;
   resumeThread(id: string, options: Json): CodexThread;
@@ -100,15 +101,19 @@ export async function runCodex(spec: CodexSpec): Promise<number> {
   try {
     const sdk = await import(pathToFileURL(join(spec.vendor_directory, 'codex-sdk', 'index.js')).href) as { Codex: new (options: Json) => CodexClient };
     const codex = new sdk.Codex({ codexPathOverride: codexPath() });
-    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode: 'workspace-write', ...(spec.model ? { model: spec.model } : {}) };
+    const sandboxMode = spec.auto ? 'danger-full-access' : 'workspace-write';
+    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode, ...(spec.auto ? { approvalPolicy: 'never' } : {}), ...(spec.model ? { model: spec.model } : {}) };
+    const images = attachments(spec.cwd, spec.images);
     const thread = spec.session_id ? codex.resumeThread(spec.session_id, options) : codex.startThread(options);
     mailbox.publish('accepting');
     system(spec, 'coderfleet_backend', { execution_backend: 'sdk' });
-    system(spec, 'coderfleet_control_ready', { capabilities: ['interrupt'], permission_mode: 'workspace-write' });
+    system(spec, 'coderfleet_control_ready', { capabilities: ['interrupt'], permission_mode: sandboxMode });
     pump = pumpCommands(spec, mailbox, handle);
     // A resumed thread does not announce itself again; keep the saved ID.
     if (spec.session_id) system(spec, 'coderfleet_session', { session_id: spec.session_id });
-    const { events } = await thread.runStreamed(spec.prompt, { signal: abort.signal });
+    const { events } = await thread.runStreamed(images.length
+      ? [...(spec.prompt ? [{ type: 'text', text: spec.prompt }] : []), ...images.map(image => ({ type: 'local_image', path: image.path }))]
+      : spec.prompt, { signal: abort.signal });
     for await (const event of events) failure = translate(spec, object(event)) ?? failure;
     if (interrupted) return 143;
     if (failure) throw new Error(failure);

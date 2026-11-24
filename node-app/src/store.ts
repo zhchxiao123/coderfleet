@@ -155,6 +155,7 @@ export class WorkspaceStore {
     const turn: Turn = {
       id, origin, conversationId: text(raw.conversation_id), projectId: text(raw.project_name) || this.projectForPath(text(raw.project)) || '',
       account: text(raw.account), type: text(raw.type), prompt: text(raw.prompt), requestedModel: node.requestedModel ?? text(raw.model),
+      images: Array.isArray(raw.images) ? raw.images.filter((item): item is string => typeof item === 'string') : [], auto: raw.auto === true,
       createdAt: text(raw.created), resumeId: '', status: FROM_PYTHON[text(raw.status)] ?? 'failed',
       answer: '', tools: [], blocks: [], sessionId: text(raw.native_session_id) || undefined, model: text(raw.model) || undefined,
       interrupted: raw.interrupted === true || undefined, finishedAt: text(raw.finished) || undefined,
@@ -232,7 +233,7 @@ export class WorkspaceStore {
     };
     const finished = turn.status === 'done' || turn.status === 'failed' || turn.status === 'cancelled';
     const next: Raw = {
-      archived: false, auto: false, images: [], pid: '', execution_runtime: 'container', sdk_version: 'node', cli_version: '',
+      archived: false, pid: '', execution_runtime: 'container', sdk_version: 'node', cli_version: '',
       sdk_capabilities: [], sdk_permission_mode: '', sdk_options: {}, sdk_checkpoints: [], sdk_action: {}, platform_run_id: '',
       terminal_notified: false, git_branch: '', git_worktree: false, git_diff_added: 0, git_diff_removed: 0, execute_at: null,
       parent_task_id: '', depends_on: [], pipeline_id: '', board_card_id: '', tokens_input: 0, tokens_output: 0, cost_usd: 0,
@@ -240,7 +241,7 @@ export class WorkspaceStore {
       ephemeral_container_name: '', task_secrets: {}, continuation_id: '', retry_of: '', retry_count: 0, retry_task_id: '', pending_intervention: null,
       ...current,
       id: turn.id, status: TO_PYTHON[turn.status], account: turn.account ?? current.account, type: turn.type ?? current.type,
-      prompt: turn.prompt, project: current.project, project_name: turn.projectId, conversation_id: turn.conversationId,
+      prompt: turn.prompt, images: [...(turn.images ?? [])], auto: turn.auto === true, project: current.project, project_name: turn.projectId, conversation_id: turn.conversationId,
       native_session_id: turn.sessionId ?? '', created: turn.createdAt, finished: finished ? (turn.finishedAt ?? now()) : null,
       model: turn.model ?? turn.requestedModel, execution_backend: 'sdk', interrupted: turn.interrupted === true,
       sdk_control_token: turn.controlToken ?? '', sdk_control_ready: turn.controlReady === true,

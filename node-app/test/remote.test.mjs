@@ -80,7 +80,8 @@ test('the App installs the backend over SSH and reaches it through a tunnel', { 
     const base = 'http://127.0.0.1:' + tunnel.localPort + '/v1/';
     const headers = { Authorization: 'Bearer ' + result.token };
     const health = await (await fetch(base + 'health', { headers })).json();
-    assert.deepEqual({ ...health, pid: undefined }, { service: 'coderfleet-node', version: 1, build: bundle.version, pid: undefined });
+    assert.deepEqual({ ...health, pid: undefined, buildId: undefined }, { service: 'coderfleet-node', version: 1, build: bundle.version, pid: undefined, buildId: undefined });
+    assert.match(health.buildId, new RegExp('^' + bundle.version.replaceAll('.', '\\.') + '\\+[a-f0-9]{12}$'), 'the bundle carries its build ID');
     assert.ok(Number.isInteger(health.pid));
     const overview = await (await fetch(base + 'overview', { headers })).json();
     assert.equal(overview.workspace, join(dir, 'workspace'));

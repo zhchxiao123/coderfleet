@@ -6,7 +6,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Command } from './control.js';
-import { emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, withPaths, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 const HERMES = process.env.CODERFLEET_HERMES_BIN || 'hermes';
 
@@ -24,7 +24,9 @@ export async function runHermes(spec: BaseSpec): Promise<number> {
   const mailbox = openMailbox(spec);
   writeState(spec);
   const structured = await supportsStreamJson();
-  const args = [...(spec.session_id ? ['--resume', spec.session_id] : []), 'chat', '-q', spec.prompt, ...(structured ? ['--format', 'stream-json'] : [])];
+  // Auto mode matches the Python command line: --yolo skips Hermes' approvals.
+  const args = [...(spec.session_id ? ['--resume', spec.session_id] : []), 'chat', '-q', withPaths(spec.prompt, attachments(spec.cwd, spec.images)),
+    ...(spec.auto ? ['--yolo'] : []), ...(structured ? ['--format', 'stream-json'] : [])];
   let interrupted = false;
   const child = spawn(HERMES, args, { cwd: spec.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   const stop = (): void => {

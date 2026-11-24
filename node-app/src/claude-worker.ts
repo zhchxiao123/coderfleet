@@ -1,6 +1,7 @@
 // Runs one Claude Code turn inside the project's persistent container with the
 // TypeScript Claude Agent SDK. Follows coderfleet_claude_sdk_worker.py:
-// acceptEdits by default, tool approvals and native questions through the
+// acceptEdits by default (bypassPermissions in auto mode), images as content
+// blocks, messages sent mid-turn go into the same session, tool approvals and native questions through the
 // control mailbox, native interrupt, resume by session ID. SDK messages are
 // written to stdout unchanged; CoderFleet events are `system` lines.
 import { execFileSync } from 'node:child_process';
@@ -8,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
-import { emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 export interface ClaudeSpec extends BaseSpec { sdk_directory: string; permission_mode?: string }
 
@@ -18,6 +19,16 @@ interface Query extends AsyncIterable<Json> { interrupt(): Promise<unknown> }
 type QueryFunction = (input: { prompt: AsyncIterable<Json>; options: Json }) => Query;
 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan']);
+/** After a result, how long to wait for the run that answers a message sent mid-turn. */
+const FOLLOW_UP_WAIT = 5_000;
+
+/** A user message: plain text, or text plus base64 image blocks (Python `_input_content`). */
+export function userContent(cwd: string, text: string, images: readonly string[] | undefined): string | Json[] {
+  const files = attachments(cwd, images);
+  if (!files.length) return text;
+  return [...(text ? [{ type: 'text', text }] : []),
+    ...files.map(file => ({ type: 'image', source: { type: 'base64', media_type: file.mime, data: file.data() } }))];
+}
 
 function cliPath(): string {
   try { return execFileSync('bash', ['-lc', 'command -v claude'], { encoding: 'utf8', timeout: 10_000 }).trim(); }
@@ -37,6 +48,15 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
   let query: Query | undefined;
   let finished: () => void = () => undefined;
   const done = new Promise<void>(resolve => { finished = resolve; });
+  // The SDK reads user messages from this queue; mid-turn messages are appended to it.
+  const inbox: Json[] = [];
+  let wakeInput: () => void = () => undefined;
+  let accepting = false;
+  let sentSinceResult = 0;
+  const send = (content: string | Json[], uuid = randomUUID()): void => {
+    inbox.push({ type: 'user', session_id: '', parent_tool_use_id: null, uuid, message: { role: 'user', content } });
+    wakeInput();
+  };
   // Approvals and questions are shown one at a time, like the Python worker.
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -103,6 +123,21 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
         resolve({ decision, message: str(payload.message) });
       }
       mailbox.acknowledge(command.id);
+    } else if (command.kind === 'message') {
+      const text = payload.text;
+      const images = payload.images ?? [];
+      if (!accepting || interrupted) { mailbox.acknowledge(command.id, undefined, 'The turn is finishing; send it as a new message'); return; }
+      if (typeof text !== 'string' || !Array.isArray(images) || !images.every(item => typeof item === 'string') || (!text.trim() && !images.length)) {
+        mailbox.acknowledge(command.id, undefined, 'A non-empty message is required');
+        return;
+      }
+      let content: string | Json[];
+      try { content = userContent(spec.cwd, text, images as string[]); }
+      catch (error) { mailbox.acknowledge(command.id, undefined, errorMessage(error)); return; }
+      sentSinceResult += 1;
+      send(content);
+      system(spec, 'coderfleet_message_accepted', { request_id: command.id, text, images });
+      mailbox.acknowledge(command.id, { queued_in_sdk: true });
     } else mailbox.acknowledge(command.id, undefined, 'Command is unavailable for this Claude turn');
   };
 
@@ -121,16 +156,23 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
     const path = cliPath();
     system(spec, 'coderfleet_backend', { execution_backend: 'sdk', cli_version: cliVersion(path) });
     const sdk = await import(pathToFileURL(join(spec.sdk_directory, 'sdk.mjs')).href) as { query: QueryFunction };
+    send(userContent(spec.cwd, spec.prompt, spec.images));
     async function* input(): AsyncGenerator<Json> {
-      yield { type: 'user', session_id: '', parent_tool_use_id: null, uuid: randomUUID(), message: { role: 'user', content: spec.prompt } };
-      await done;
+      let ended = false;
+      void done.then(() => { ended = true; wakeInput(); });
+      while (true) {
+        while (inbox.length) yield inbox.shift() as Json;
+        if (ended) return;
+        await new Promise<void>(resolve => { wakeInput = resolve; });
+      }
     }
-    const permissionMode = PERMISSION_MODES.has(spec.permission_mode ?? '') ? spec.permission_mode : 'acceptEdits';
+    const permissionMode = spec.auto ? 'bypassPermissions'
+      : PERMISSION_MODES.has(spec.permission_mode ?? '') ? spec.permission_mode : 'acceptEdits';
     query = sdk.query({
       prompt: input(),
       options: {
         cwd: spec.cwd, pathToClaudeCodeExecutable: path, model: spec.model || undefined, resume: spec.session_id || undefined,
-        permissionMode, settingSources: ['user', 'project', 'local'], includePartialMessages: true,
+        permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         canUseTool: (toolName: string, toolInput: Json, context: Json) =>
           ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),
@@ -138,18 +180,28 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
       },
     });
     mailbox.publish('accepting');
+    accepting = true;
     pump = pumpCommands(spec, mailbox, handle);
     let result: Json | undefined;
     let announced = false;
+    let settle: ReturnType<typeof setTimeout> | undefined;
     for await (const message of query) {
+      // Anything after a result means a message sent mid-turn started its own run.
+      if (settle) { clearTimeout(settle); settle = undefined; result = undefined; }
       const sessionId = str(message.session_id);
       if (!announced && sessionId) {
         announced = true;
         system(spec, 'coderfleet_session', { session_id: sessionId });
-        system(spec, 'coderfleet_control_ready', { capabilities: ['approval', 'answer', 'interrupt'], permission_mode: permissionMode });
+        system(spec, 'coderfleet_control_ready', { capabilities: ['approval', 'answer', 'interrupt', 'message'], permission_mode: permissionMode });
       }
       process.stdout.write(JSON.stringify(message) + '\n');
-      if (message.type === 'result') { result = message; finished(); }
+      if (message.type === 'result') {
+        result = message;
+        // A message sent during this run may be answered by a run of its own, or merged
+        // into this one (then nothing follows): wait briefly before closing the input.
+        if (sentSinceResult > 0 && !interrupted) { sentSinceResult = 0; settle = setTimeout(() => { accepting = false; finished(); }, FOLLOW_UP_WAIT); }
+        else { accepting = false; finished(); }
+      }
     }
     if (interrupted) return 143;
     if (!result) throw new Error('Claude Code ended without a result');

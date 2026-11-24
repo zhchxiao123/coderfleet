@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, type IpcMainInvokeEvent } from 'electron';
 import { findBundle, freePort, install, probe, Tunnel, validateTarget, type SshTarget } from './remote.js';
 import { atomicJSON, message, readConfig, record, text } from './state.js';
-import { VERSION } from './version.js';
+import { BUILD_ID } from './version.js';
 import { ensureLocal } from './local-backend.js';
 
 interface Profile {
@@ -113,7 +113,7 @@ async function connect(profile: Profile, restart = false): Promise<unknown> {
       return await ensureLocal({
         configPath: profile.configPath, managed: profile.configPath === join(app.getPath('userData'), 'local-backend.json'),
         logPath: join(app.getPath('userData'), 'backend.log'), pidPath: join(app.getPath('userData'), 'backend.pid'),
-        command: [process.execPath, cliPath], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, version: VERSION, restart,
+        command: [process.execPath, cliPath], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, version: BUILD_ID, restart,
       });
     } finally { requests.delete(profile.id); }
   }

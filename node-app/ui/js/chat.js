@@ -200,15 +200,24 @@
     for (const block of blocks) {
       if (block.kind === 'tool') { const tool = byId.get(block.id); if (tool) group.push(tool); continue; }
       flush();
+      if (block.kind === 'user') { nodes.push(userBubble(turn.projectId, block.text, block.images, '插话')); continue; }
       if (block.text.trim()) nodes.push(h('div.assistant', CF.markdown(block.text)));
     }
     flush();
     return nodes;
   }
 
+  /** A user message: its images above the text, like mainstream chat apps. */
+  function userBubble(projectId, text, images, label) {
+    return h('div.user-msg',
+      label ? h('div.user-label', label) : null,
+      images?.length ? h('div.user-images', images.map(path => CF.uploadThumb(projectId, path))) : null,
+      text ? h('div.bubble', text) : null);
+  }
+
   function turnNode(turn) {
     const node = h('div.turn',
-      h('div.user-msg', h('div.bubble', turn.prompt)),
+      userBubble(turn.projectId, turn.prompt, turn.images),
       body(turn),
       turn.permission ? approvalCard(turn) : null,
       isActive(turn) && !turn.permission ? h('div.running-status', h('span.orb'), h('span.shimmer', { dataset: { text: STATUS[turn.status] } }, STATUS[turn.status])) : null,
@@ -219,7 +228,7 @@
     return node;
   }
 
-  const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '',
+  const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
     turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
 
   function project() {
@@ -281,24 +290,52 @@
       const textarea = h('textarea', { rows: 1, placeholder: '描述你想做的事', 'aria-label': '消息' });
       const modelSelect = h('select', { 'aria-label': '模型', hidden: true });
       const sendButton = h('button.send', { title: '发送' }, CF.icon('send', 16));
+      const stopButton = h('button.stop-turn', { title: '中断（Esc）', hidden: true }, CF.icon('square', 13));
+      const hint = h('span.hint');
+      // Images: picked, pasted or dropped; uploaded into the project right away.
+      const attachRow = h('div.attach-row', { hidden: true });
+      const fileInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', multiple: true, hidden: true });
+      const attachButton = h('button.composer-icon', { title: '添加图片（也可以粘贴或拖进来）', on: { click: () => fileInput.click() } }, CF.icon('image', 16));
+      // Auto mode: tools run without asking (Python `auto`), remembered per project.
+      const autoKey = 'cf.auto:' + CF.state.backendId + ':' + projectId;
+      const autoButton = h('button.auto-toggle', {
+        title: '自动模式：工具直接执行，不再逐个确认。Claude 跳过权限确认，Codex 不再限制在工作区，其他账号自动批准。',
+        on: { click: () => {
+          const next = autoButton.getAttribute('aria-pressed') !== 'true';
+          try { localStorage.setItem(autoKey, next ? '1' : ''); } catch { /* storage unavailable */ }
+          setAuto(next);
+          CF.toast(next ? '自动模式已开：之后发的消息里，工具不再逐个确认' : '已关闭自动模式');
+        } },
+      }, CF.icon('bolt', 13), h('span', '自动'));
+      const setAuto = on => { autoButton.setAttribute('aria-pressed', String(on)); autoButton.classList.toggle('on', on); };
+      let savedAuto = '';
+      try { savedAuto = localStorage.getItem(autoKey) || ''; } catch { /* storage unavailable */ }
+      setAuto(Boolean(savedAuto));
+      const followHost = h('div.follow-ups');
+      // Only a new conversation can still change its project.
+      const chip = conversation ? null : projectChip(projectId);
       const title = h('div.title');
       const meta = h('div.meta');
       const welcome = h('div.welcome-chat', h('div.hero', h('div.brand-mark', 'C'), h('h2'), h('p', '对话在项目容器里运行，可以读写这个项目的文件。')));
-      session = { key, conversationId: conversation?.id || '', projectId, turns: [], timer: 0, textarea, sending: false };
+      session = { key, conversationId: conversation?.id || '', projectId, turns: [], followUps: [], attachments: [], timer: 0, textarea, sending: false };
       if (projectId) { try { localStorage.setItem(lastKey(), projectId); } catch { /* storage unavailable */ } }
       const current = session;
       textarea.value = drafts.get(key) || '';
 
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
       const activeTurn = () => current.turns.find(isActive);
+      const canInject = turn => Boolean(turn?.controlReady && turn.capabilities?.includes('message'));
       const updateComposer = () => {
         const running = activeTurn();
         const info = project();
         const containerReady = info?.state === 'running';
-        sendButton.replaceChildren(CF.icon(running ? 'square' : 'send', 16));
-        sendButton.classList.toggle('stop', Boolean(running));
-        sendButton.title = running ? '中断' : '发送';
-        sendButton.disabled = current.sending || (!running && (current.readOnly || !textarea.value.trim() || !containerReady));
+        const uploading = current.attachments.some(item => !item.path);
+        const content = Boolean(textarea.value.trim()) || current.attachments.length > 0;
+        sendButton.disabled = current.sending || current.readOnly || !content || uploading || !containerReady;
+        sendButton.title = running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
+        stopButton.hidden = !running;
+        hint.textContent = running ? (canInject(running) ? '正在回答 · 现在发送会插入这一轮' : '正在回答 · 现在发送会排在这轮之后')
+          : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
       };
       const renderHeader = () => {
@@ -343,28 +380,94 @@
         if (atBottom) transcript.scrollTop = transcript.scrollHeight;
         updateComposer();
       };
+      const renderAttachments = () => {
+        attachRow.hidden = !current.attachments.length;
+        attachRow.replaceChildren(...current.attachments.map(item => h('div.attach' + (item.path ? '' : '.uploading'),
+          h('img', { src: item.url, alt: item.name }),
+          item.path ? null : h('span.spinner'),
+          h('button.remove', { title: '移除', on: { click: () => {
+            current.attachments = current.attachments.filter(other => other !== item);
+            renderAttachments();
+          } } }, CF.icon('x', 11)))));
+        updateComposer();
+      };
+      const TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      const addFiles = files => {
+        for (const file of files) {
+          if (!TYPES.includes(file.type)) { CF.toast('只支持 PNG、JPEG、WebP 和 GIF 图片'); continue; }
+          if (file.size > 20 * 1024 * 1024) { CF.toast(file.name + ' 超过 20 MB'); continue; }
+          if (current.attachments.length >= 20) { CF.toast('一次最多 20 张图片'); break; }
+          const item = { name: file.name || 'image.' + file.type.split('/')[1], url: '', path: '' };
+          current.attachments.push(item);
+          const reader = new FileReader();
+          reader.onload = async () => {
+            item.url = String(reader.result);
+            renderAttachments();
+            try {
+              const extension = file.type.split('/')[1].replace('jpeg', 'jpg');
+              const name = /\.(png|jpe?g|webp|gif)$/i.test(item.name) ? item.name : item.name + '.' + extension;
+              const saved = await CF.api('POST', 'projects/' + encodeURIComponent(projectId) + '/uploads', { name, data: item.url.split(',')[1] });
+              item.path = saved.path;
+              CF.seedUpload(projectId, saved.path, item.url);
+            } catch (error) {
+              current.attachments = current.attachments.filter(other => other !== item);
+              CF.fail(error);
+            }
+            if (session === current) renderAttachments();
+          };
+          reader.readAsDataURL(file);
+        }
+        renderAttachments();
+      };
+      fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = ''; });
+      textarea.addEventListener('paste', event => {
+        const files = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/'));
+        if (files.length) { event.preventDefault(); addFiles(files); }
+      });
+      const renderFollowUps = () => {
+        followHost.replaceChildren(...current.followUps.map(item => h('div.follow-up',
+          h('span.badge', '排队中'),
+          h('span.text', item.text || '图片'),
+          item.images.length ? h('span.count', CF.icon('image', 12), String(item.images.length)) : null,
+          h('button.icon-btn', { title: '不发了', on: { click: async () => {
+            try { await CF.api('DELETE', 'conversations/' + current.conversationId + '/follow-ups/' + item.id); }
+            catch (error) { CF.fail(error); }
+            await current.refresh();
+          } } }, CF.icon('x', 12)))));
+      };
+
       current.refresh = async () => {
         if (!current.conversationId || session !== current) return;
         clearTimeout(current.timer);
         try {
-          current.turns = await CF.get('conversations/' + current.conversationId + '/turns');
+          const [turns, followUps] = await Promise.all([
+            CF.get('conversations/' + current.conversationId + '/turns'),
+            CF.get('conversations/' + current.conversationId + '/follow-ups').catch(() => []),
+          ]);
           if (session !== current) return;
+          current.turns = turns;
+          current.followUps = followUps;
           renderTurns();
+          renderFollowUps();
           const running = activeTurn();
           if (!running && current.wasRunning) { void CF.app.refreshConversations(); void CF.app.refreshProjects(); }
           current.wasRunning = Boolean(running);
         } catch (error) { if (session === current) CF.fail(error); }
-        if (session === current) current.timer = setTimeout(current.refresh, activeTurn() ? 600 : 4000);
+        if (session === current) current.timer = setTimeout(current.refresh, activeTurn() || current.followUps.length ? 600 : 4000);
       };
 
-      const send = async () => {
+      const stop = async () => {
         const running = activeTurn();
-        if (running) {
-          await CF.busy(sendButton, () => CF.api('POST', 'turns/' + running.id + '/cancel'));
-          return current.refresh();
-        }
+        if (!running) return;
+        await CF.busy(stopButton, () => CF.api('POST', 'turns/' + running.id + '/cancel'));
+        await current.refresh();
+      };
+      // Sends while idle (a new turn) or while a turn runs: Claude takes it into the
+      // running turn; other agents get it as the next turn.
+      const send = async () => {
         const prompt = textarea.value.trim();
-        if (!prompt || current.sending) return;
+        if (sendButton.disabled || current.sending || (!prompt && !current.attachments.length)) return;
+        const images = current.attachments.map(item => item.path);
         current.sending = true;
         updateComposer();
         try {
@@ -375,9 +478,14 @@
             CF.state.conversations.unshift({ ...created, updatedAt: created.createdAt, status: 'starting', turns: 0 });
             CF.state.view = { name: 'chat', conversationId: created.id, projectId };
             current.key = created.id;
+            chip?.remove();
           }
-          await CF.api('POST', 'conversations/' + current.conversationId + '/turns', { prompt, model: modelSelect.value });
+          const result = await CF.api('POST', 'conversations/' + current.conversationId + '/turns',
+            { prompt, images, model: modelSelect.value, auto: autoButton.getAttribute('aria-pressed') === 'true' });
+          if (result?.delivered === 'queued') CF.toast('已排队，这一轮结束后自动发出');
           textarea.value = '';
+          current.attachments = [];
+          renderAttachments();
           drafts.delete(current.key);
           autosize();
           await CF.app.refreshConversations();
@@ -387,10 +495,12 @@
         } catch (error) { CF.fail(error); }
         finally { current.sending = false; updateComposer(); }
       };
+      stopButton.addEventListener('click', () => void stop());
 
       textarea.addEventListener('input', () => { autosize(); updateComposer(); });
       textarea.addEventListener('keydown', event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
+        else if (event.key === 'Escape' && activeTurn() && !textarea.value) { event.preventDefault(); void stop(); }
       });
       sendButton.addEventListener('click', () => void send());
 
@@ -419,8 +529,14 @@
       container.replaceChildren(
         topbar,
         h('div.chat', current.conversationId ? transcript : welcome,
-          h('div.composer-wrap', notice, h('div.composer', textarea,
-            h('div.composer-bar', current.conversationId ? null : projectChip(projectId), modelSelect, h('span.hint', 'Enter 发送 · Shift+Enter 换行'), sendButton)))),
+          h('div.composer-wrap', notice, followHost, h('div.composer', {
+            on: {
+              dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
+              dragleave: event => event.currentTarget.classList.remove('dragging'),
+              drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); addFiles([...event.dataTransfer.files]); },
+            },
+          }, attachRow, textarea, fileInput,
+            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, stopButton, sendButton)))),
       );
       renderHeader();
       autosize();

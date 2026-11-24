@@ -44,6 +44,8 @@
 
   const ICONS = {
     plus: '<path d="M8 3v10M3 8h10"/>',
+    image: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.1"/><path d="M13.5 10.5 10.5 7.5 4 13"/>',
+    bolt: '<path d="M9 2 3.5 9H8l-1 5 5.5-7H8z"/>',
     chat: '<path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H7l-3 2.5V11h0A1.5 1.5 0 0 1 3 9.5z"/>',
     folder: '<path d="M2.5 4.5A1.5 1.5 0 0 1 4 3h2.4l1.4 1.5H12A1.5 1.5 0 0 1 13.5 6v5.5A1.5 1.5 0 0 1 12 13H4a1.5 1.5 0 0 1-1.5-1.5z"/>',
     user: '<circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.6-2.4 2.6-3.8 5-3.8s4.4 1.4 5 3.8"/>',
@@ -125,6 +127,32 @@
     setTimeout(() => document.addEventListener('click', function close(event) {
       if (!menu.contains(event.target)) { menu.remove(); document.removeEventListener('click', close); }
     }), 0);
+  };
+
+  /** Project uploads as data URLs, fetched once each (the backend sends them as base64). */
+  const uploadCache = new Map();
+  CF.uploadUrl = (projectId, path) => {
+    const key = projectId + ':' + path;
+    if (!uploadCache.has(key)) {
+      const file = String(path).split('/').pop();
+      uploadCache.set(key, CF.get('projects/' + encodeURIComponent(projectId) + '/uploads/' + file)
+        .then(image => 'data:' + image.mime + ';base64,' + image.data)
+        .catch(error => { uploadCache.delete(key); throw error; }));
+    }
+    return uploadCache.get(key);
+  };
+  CF.seedUpload = (projectId, path, url) => uploadCache.set(projectId + ':' + path, Promise.resolve(url));
+
+  /** A thumbnail of a project upload; clicking opens it full size. */
+  CF.uploadThumb = (projectId, path, extra) => {
+    const img = h('img', { alt: '', loading: 'lazy' });
+    const node = h('button.thumb', { title: '查看图片', on: { click: async () => {
+      const url = await CF.uploadUrl(projectId, path);
+      const sheet = CF.sheet({ title: '图片', wide: true }, () => h('img.preview-full', { src: url, alt: '' }));
+      sheet.foot();
+    } } }, img, extra);
+    CF.uploadUrl(projectId, path).then(url => { img.src = url; }).catch(() => node.classList.add('broken'));
+    return node;
   };
 
   /**

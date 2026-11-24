@@ -2,13 +2,15 @@
 // control mailbox are copied together into the project's .coderfleet-tasks,
 // so only Node built-ins and sibling files may be imported here.
 import { randomBytes } from 'node:crypto';
-import { readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, realpathSync, renameSync, statSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ControlMailbox, type Command } from './control.js';
 
 export interface BaseSpec {
   task_id: string; cwd: string; prompt: string; session_id: string; model: string; env_auth: boolean;
+  /** Project uploads (/workspace/.coderfleet-uploads/<name>) and whether tools run without asking. */
+  images?: string[]; auto?: boolean;
   state_path: string; control_module: string; control_directory: string; control_token: string; permission_timeout: number;
 }
 
@@ -87,4 +89,32 @@ export async function runMain<T extends BaseSpec>(moduleUrl: string, run: (spec:
   process.exitCode = code;
   // Open SDK connections (event streams, pipes) must not keep a finished worker alive.
   setTimeout(() => process.exit(code), 500).unref();
+}
+
+export const IMAGE_TYPES: Readonly<Record<string, string>> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+const MAX_IMAGE = 20 * 1024 * 1024;
+
+export interface Attachment { readonly path: string; readonly mime: string; data(): string }
+
+/**
+ * Resolves the project uploads of a message (Python `_input_content`): each must be a file
+ * directly in <cwd>/.coderfleet-uploads, an image, at most 20 MiB. `data()` reads it as base64.
+ */
+export function attachments(cwd: string, images: readonly string[] | undefined): Attachment[] {
+  if (!images?.length) return [];
+  const root = realpathSync(join(cwd, '.coderfleet-uploads'));
+  return images.map(reference => {
+    if (dirname(reference) !== '/workspace/.coderfleet-uploads' && dirname(reference) !== join(cwd, '.coderfleet-uploads')) throw new Error('Attachments must be project uploads');
+    const path = realpathSync(join(root, basename(reference)));
+    if (dirname(path) !== root || !statSync(path).isFile()) throw new Error('Attachment does not belong to this project');
+    if (statSync(path).size > MAX_IMAGE) throw new Error('Attachment exceeds 20 MiB');
+    const mime = IMAGE_TYPES[path.slice(path.lastIndexOf('.')).toLowerCase()];
+    if (!mime) throw new Error('Only PNG, JPEG, WebP and GIF images can be attached');
+    return { path, mime, data: () => readFileSync(path).toString('base64') };
+  });
+}
+
+/** The prompt with attached image paths listed, for agents that take only text. */
+export function withPaths(text: string, images: readonly Attachment[]): string {
+  return images.length ? (text ? text + '\n\n' : '') + '[Attached images:\n' + images.map(image => image.path).join('\n') + ']' : text;
 }

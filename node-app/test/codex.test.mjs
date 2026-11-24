@@ -26,9 +26,33 @@ test('Codex turns run with codex exec in the container', { timeout: 120_000 }, a
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'failed', 'failed turn');
     assert.equal(turn.error, 'quota exceeded');
 
+    // Auto mode leaves the workspace sandbox without approvals; images are local_image inputs.
+    const upload = (await env.post('projects/web/uploads', { name: 'a.jpg', data: Buffer.from('ffd8ffe0', 'hex').toString('base64') })).body;
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'pic', images: [upload.path], auto: true });
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'auto turn');
+    assert.match(turn.answer, /--sandbox danger-full-access/);
+    assert.match(turn.answer, /approval_policy="never"/);
+    assert.match(turn.answer, new RegExp('--image \\S+/\\.coderfleet-uploads/' + upload.path.split('/').pop()));
+
+    // Codex cannot take a message mid-turn: it waits and becomes the next turn.
     await env.post('conversations/' + conversation + '/turns', { prompt: 'slow' });
     turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.controlReady, 'slow turn');
+    const queued = (await env.post('conversations/' + conversation + '/turns', { prompt: 'next one' })).body;
+    assert.equal(queued.delivered, 'queued');
+    const pending = (await env.get('conversations/' + conversation + '/follow-ups')).body;
+    assert.deepEqual(pending.map(item => item.text), ['next one']);
+    await env.post('turns/' + turn.id + '/cancel');
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'next one' && value.status === 'done', 'follow-up turn');
+    assert.match(turn.answer, /^echo:next one:/);
+    assert.deepEqual((await env.get('conversations/' + conversation + '/follow-ups')).body, []);
+    // A queued message can be withdrawn before it is sent.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'slow' });
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'slow' && value.controlReady && value.status === 'running', 'second slow turn');
+    const withdrawn = (await env.post('conversations/' + conversation + '/turns', { prompt: 'never mind' })).body.followUp;
+    assert.equal((await env.delete('conversations/' + conversation + '/follow-ups/' + withdrawn.id)).status, 200);
     await env.post('turns/' + turn.id + '/cancel');
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'cancelled turn');
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.equal((await lastTurn(env, conversation)).prompt, 'slow', 'the withdrawn message was not sent');
   } finally { await env.close(); }
 });

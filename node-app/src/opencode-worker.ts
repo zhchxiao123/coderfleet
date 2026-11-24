@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
-import { emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 export interface OpencodeSpec extends BaseSpec { vendor_directory: string }
 
@@ -167,6 +167,11 @@ export async function runOpencode(spec: OpencodeSpec): Promise<number> {
           if (properties.sessionID !== sessionId || interrupted) continue;
           const id = str(properties.id);
           const tool = object(properties.tool);
+          if (spec.auto) {
+            // Auto mode (Python: --dangerously-skip-permissions): approve without asking.
+            void opencode.postSessionIdPermissionsPermissionId({ path: { id: sessionId, permissionID: id }, body: { response: 'once' } }).catch(() => undefined);
+            continue;
+          }
           pending.set(id, true);
           system(spec, 'coderfleet_permission_pending', {
             tool_call_id: id, tool_use_id: str(tool.callID) || str(properties.callID),
@@ -182,12 +187,16 @@ export async function runOpencode(spec: OpencodeSpec): Promise<number> {
     })().catch(() => undefined);
 
     mailbox.publish('accepting');
-    system(spec, 'coderfleet_control_ready', { capabilities: ['approval', 'interrupt'], permission_mode: 'default' });
+    system(spec, 'coderfleet_control_ready', { capabilities: ['approval', 'interrupt'], permission_mode: spec.auto ? 'auto' : 'default' });
     pump = pumpCommands(spec, mailbox, handle);
+    const files = attachments(spec.cwd, spec.images);
     const [providerID, ...rest] = spec.model.split('/');
     const model = spec.model && rest.length ? { providerID, modelID: rest.join('/') } : undefined;
     const result = await opencode.session.prompt({
-      path: { id: sessionId }, body: { ...(model ? { model } : {}), parts: [{ type: 'text', text: spec.prompt }] },
+      path: { id: sessionId }, body: { ...(model ? { model } : {}), parts: [
+        ...(spec.prompt ? [{ type: 'text', text: spec.prompt }] : []),
+        ...files.map(file => ({ type: 'file', mime: file.mime, filename: file.path.split('/').pop(), url: 'data:' + file.mime + ';base64,' + file.data() })),
+      ] },
     });
     // Let the stream deliver the final part updates before closing.
     await new Promise(resolve => setTimeout(resolve, 300));

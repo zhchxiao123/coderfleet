@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
-import { emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, withPaths, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 const PACKAGE = '@earendil-works/pi-coding-agent';
 
@@ -86,7 +86,7 @@ export async function runPi(spec: BaseSpec): Promise<number> {
     mailbox.publish('accepting');
     system(spec, 'coderfleet_control_ready', { capabilities: ['interrupt'], permission_mode: 'none' });
     pump = pumpCommands(spec, mailbox, handle);
-    try { await agent.prompt(spec.prompt); }
+    try { await agent.prompt(withPaths(spec.prompt, attachments(spec.cwd, spec.images))); }
     finally { unsubscribe(); }
     if (interrupted) return 143;
     const last = [...agent.messages].reverse().find(message => message.role === 'assistant');

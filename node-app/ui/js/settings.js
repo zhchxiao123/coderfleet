@@ -80,9 +80,20 @@
             profile.kind === 'ssh' && profile.version && bundle && profile.version !== bundle
               ? h('button.btn.small.accent', { on: { click: event => reinstall(profile, event.currentTarget) } }, '升级到 ' + bundle) : null,
             profile.id === backendId ? null : h('button.btn.small', { on: { click: () => CF.app.loadProfiles(profile.id) } }, '切换'),
+            profile.kind === 'local' && profile.id === backendId && CF.transport.restartLocal ? h('button.btn.small', { title: '重启本机后端；容器里正在运行的对话不受影响', on: { click: event => CF.busy(event.currentTarget, async () => {
+              await CF.transport.restartLocal(profile.id);
+              await CF.app.loadProfiles(profile.id);
+              CF.toast('后端已重启');
+            }) } }, CF.icon('restart', 13), '重启') : null,
             (() => {
               const more = h('button.btn.ghost.icon.small', { title: '更多', on: { click: () => CF.menu(more, [
-                profile.kind === 'ssh' ? { label: '重新安装后端', icon: 'restart', run: () => reinstall(profile, more) } : null,
+                profile.kind === 'ssh' ? { label: '重启 / 重新安装后端', icon: 'restart', run: () => reinstall(profile, more) } : null,
+                profile.kind === 'local' && CF.transport.restartLocal ? { label: '重启后端', icon: 'restart', run: () => CF.busy(more, async () => {
+                  // Turns run in containers, so they keep going; the new backend picks them up.
+                  await CF.transport.restartLocal(profile.id);
+                  await CF.app.loadProfiles(profile.id);
+                  CF.toast('后端已重启');
+                }) } : null,
                 { label: '移除连接', icon: 'trash', danger: true, run: async () => {
                   if (!await CF.confirm('移除连接 ' + profile.name + '？', '只移除 App 里保存的连接；那台机器上的后端和数据都会保留。', { danger: true, label: '移除' })) return;
                   await CF.transport.remove(profile.id);

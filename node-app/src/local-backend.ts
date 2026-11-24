@@ -18,7 +18,7 @@ export async function probeLocal(url: string, token: string, version: string): P
   let health: Record<string, unknown>;
   try { health = record(await response.json()); } catch { return { kind: 'foreign' }; }
   if (!response.ok || health.service !== 'coderfleet-node') return { kind: 'foreign' };
-  if (health.build !== version) return { kind: 'stale', pid: typeof health.pid === 'number' ? health.pid : undefined, build: text(health.build) || '旧版本' };
+  if ((health.buildId ?? health.build) !== version) return { kind: 'stale', pid: typeof health.pid === 'number' ? health.pid : undefined, build: text(health.build) || '旧版本' };
   return { kind: 'ours', health };
 }
 
@@ -54,7 +54,7 @@ export interface LocalBackend {
   /** The program and script that run `serve <config>`. */
   readonly command: readonly string[];
   readonly env: NodeJS.ProcessEnv;
-  /** The backend version this App ships; any other build is replaced. */
+  /** The backend build this App ships (BUILD_ID); any other build is replaced. */
   readonly version: string;
   readonly restart?: boolean;
 }

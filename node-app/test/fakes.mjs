@@ -88,7 +88,22 @@ async function handle(message) {
   if (message.type !== 'user') return;
   send({ type: 'system', subtype: 'init', session_id: sessionId, model });
   const prompt = message.message.content;
-  if (prompt === 'tool') {
+  const mode = argv.find(value => value.startsWith('--permission-mode='))?.slice(18) ?? (argv.includes('--permission-mode') ? argv[argv.indexOf('--permission-mode') + 1] : '');
+  if (Array.isArray(prompt)) {
+    // Text plus base64 image blocks.
+    const text = prompt.filter(block => block.type === 'text').map(block => block.text).join('');
+    const images = prompt.filter(block => block.type === 'image').map(block => block.source.media_type + ':' + block.source.data.length);
+    say('images:' + images.join(',') + ':' + text);
+    finish();
+  } else if (prompt === 'mode') {
+    say('mode:' + mode);
+    finish();
+  } else if (prompt === 'long') {
+    say('working');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    say(' long-done');
+    finish();
+  } else if (prompt === 'tool') {
     const decision = await ask('Bash', { command: 'ls' });
     send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls' } }] } });
     send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'x', is_error: decision.behavior !== 'allow' }] } });

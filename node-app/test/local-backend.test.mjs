@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { ensureLocal, probeLocal } from '../dist/local-backend.js';
-import { VERSION } from '../dist/version.js';
+import { BUILD_ID, VERSION } from '../dist/version.js';
 import { port } from './helpers.mjs';
 
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
@@ -24,7 +24,7 @@ test('the App-managed backend moves off a busy port, replaces older builds and r
   const configPath = join(dir, 'local-backend.json');
   const options = (extra = {}) => ({
     configPath, managed: true, logPath: join(dir, 'backend.log'), pidPath: join(dir, 'backend.pid'),
-    command: [process.execPath, cli], env: { ...process.env }, version: VERSION, ...extra,
+    command: [process.execPath, cli], env: { ...process.env }, version: BUILD_ID, ...extra,
   });
   const stopOurs = async () => {
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -39,7 +39,7 @@ test('the App-managed backend moves off a busy port, replaces older builds and r
     assert.equal(health.build, VERSION);
     const moved = JSON.parse(readFileSync(configPath, 'utf8')).port;
     assert.notEqual(moved, busy, 'moved to a free port');
-    assert.equal((await probeLocal('http://127.0.0.1:' + moved, token, VERSION)).kind, 'ours');
+    assert.equal((await probeLocal('http://127.0.0.1:' + moved, token, BUILD_ID)).kind, 'ours');
 
     // Connecting again reuses the running backend; a restart replaces the process.
     assert.equal((await ensureLocal(options())).pid, health.pid);

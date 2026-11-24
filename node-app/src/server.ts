@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,13 +10,14 @@ import {
   writeSettings, WorkspaceError, type WorkspaceProject,
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
+import { FollowUps, type FollowUp } from './follow-ups.js';
 import { Lifecycle } from './lifecycle.js';
 import { findPythonService, type PythonService } from './python-service.js';
-import { active, identifier, message, readConfig, record, text, type Turn } from './state.js';
+import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
 import { WorkspaceStore } from './store.js';
 import { chatSupported, TaskRunner } from './tasks.js';
 import { Terminals } from './terminal.js';
-import { VERSION } from './version.js';
+import { BUILD_ID, VERSION } from './version.js';
 
 class HttpError extends Error {
   public constructor(public readonly status: number, message: string) { super(message); }
@@ -26,13 +28,13 @@ function reply(response: ServerResponse, status: number, data: unknown): void {
   response.end(JSON.stringify(data));
 }
 
-async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function body(request: IncomingMessage, limit = 160_000): Promise<Record<string, unknown>> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 160_000) throw new HttpError(413, 'The request body is too large');
+    if (size > limit) throw new HttpError(413, 'The request body is too large');
     chunks.push(buffer);
   }
   if (!size) return {};
@@ -86,9 +88,68 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     return found;
   };
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
+  const followUps = new FollowUps(config.stateDirectory);
+
+  /** Starts a new turn in a conversation that has none running. */
+  const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
+    const target = chatProject(conversation.projectId);
+    if (!target) throw new HttpError(404, 'Project not found');
+    if (conversation.type && conversation.type !== target.account.type) throw new HttpError(409, '这个对话属于 ' + conversation.type + ' 账号，项目现在绑定的是 ' + target.account.type);
+    try { await assertContainer(config.dockerPath, target); }
+    catch (error) { throw new HttpError(409, message(error)); }
+    // Re-read after the await: the check and the save below run without yielding.
+    const turns = turnsOf(conversation.id);
+    if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
+    if (turns.some(turn => turn.status === 'queued')) throw new HttpError(409, '这个对话还有原服务排队中的任务');
+    // Later turns resume the conversation's agent session (Python: native_session_id).
+    const resume = conversation.nativeSessionId || turns.findLast(turn => turn.sessionId)?.sessionId || '';
+    const turn: Turn = {
+      id: randomUUID().replaceAll('-', '').slice(0, 12), origin: 'node', conversationId: conversation.id, projectId: conversation.projectId,
+      account: target.account.name, type: target.account.type, prompt: input.text, images: input.images, auto: input.auto,
+      requestedModel: input.model, createdAt: new Date().toISOString(), resumeId: resume, status: 'starting', answer: '', tools: [], blocks: [],
+    };
+    store.createTurn(turn, target.path);
+    if (turns.length === 0 && conversation.name === '新对话') {
+      const title = (input.text || '图片').replace(/\s+/g, ' ').slice(0, 40);
+      store.saveConversation({ ...conversation, name: title });
+    }
+    await runner.launch(turn);
+    return turn;
+  };
+
+  /** Starts the next follow-up of conversations whose turn has ended. */
+  let draining = false;
+  const retryAt = new Map<string, number>();
+  const drainFollowUps = async (): Promise<void> => {
+    if (draining) return;
+    draining = true;
+    try {
+      for (const conversationId of followUps.conversations()) {
+        const conversation = store.conversation(conversationId);
+        if (!conversation) { for (const item of followUps.list(conversationId)) followUps.remove(conversationId, item.id); continue; }
+        if (turnsOf(conversationId).some(turn => active(turn) || turn.status === 'queued')) continue;
+        const next = followUps.list(conversationId)[0];
+        if (!next || Date.now() - (retryAt.get(next.id) ?? 0) < 30_000) continue;
+        // Removed only once its turn exists, so a stopped container never loses it.
+        try { await startTurn(conversation, next); followUps.remove(conversationId, next.id); retryAt.delete(next.id); }
+        catch (error) { retryAt.set(next.id, Date.now()); console.error('Follow-up not started:', conversationId, message(error)); }
+      }
+    } finally { draining = false; }
+  };
+
+  const UPLOAD_TYPES: Readonly<Record<string, string>> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+  const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}\.(png|jpe?g|webp|gif)$/;
+  /** Validated upload references of a message: at most 20, each a file of this project. */
+  const uploads = (projectId: string, value: unknown): string[] => {
+    const list = Array.isArray(value) ? value : [];
+    if (list.length > 20 || !list.every(item => typeof item === 'string' && UPLOAD_PATH.test(item))) throw new HttpError(400, '图片必须是这个项目里上传的文件');
+    const directory = join(project(projectId).path, '.coderfleet-uploads');
+    for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '图片已不存在，请重新添加');
+    return list as string[];
+  };
 
   const routes: [string, RegExp, Handler][] = [
-    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION, pid: process.pid })],
+    ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION, buildId: BUILD_ID, pid: process.pid })],
     ['POST', /^shutdown$/, async () => {
       if (!options.onShutdown) throw new HttpError(404, 'Unknown API endpoint');
       setTimeout(options.onShutdown, 100).unref();
@@ -102,7 +163,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (Date.now() - python.checked > 10_000) python = { checked: Date.now(), value: await findPythonService(workspace) };
       return {
         workspace, initialized, docker, image: docker ? await lifecycle.image() : undefined,
-        backend: { build: VERSION, pid: process.pid, host: config.host, port: config.port },
+        backend: { build: VERSION, buildId: BUILD_ID, pid: process.pid, host: config.host, port: config.port },
         python: python.value ?? null,
         accountTypes: Object.values(ACCOUNT_TYPES).map(({ id, label, envAuth, envHint, chat }) => ({ id, label, envAuth, envHint, chat })),
         operations: lifecycle.recent(),
@@ -251,33 +312,51 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (!store.conversation(identifier(id))) throw new HttpError(404, 'Conversation not found');
       return turnsOf(id as string).map(publicTurn);
     }],
+    // Sends a message: a new turn when nothing runs; into the running turn when its agent
+    // takes messages mid-turn (Claude); otherwise queued as the next turn.
     ['POST', /^conversations\/([\w-]+)\/turns$/, async (request, [id]) => {
       const conversation = store.conversation(identifier(id));
       if (!conversation) throw new HttpError(404, 'Conversation not found');
       const input = await body(request);
       const prompt = text(input.prompt).trim();
       const model = text(input.model).trim();
-      if (!prompt || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
-      const target = chatProject(conversation.projectId);
-      if (!target) throw new HttpError(404, 'Project not found');
-      try { await assertContainer(config.dockerPath, target); }
+      const images = uploads(conversation.projectId, input.images);
+      if ((!prompt && !images.length) || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
+      const message_ = { text: prompt, images, auto: input.auto === true, model };
+      const running = turnsOf(conversation.id).find(active);
+      if (!running) return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_)) };
+      if (running.controlReady && running.capabilities?.includes('message')) {
+        try {
+          await runner.message(running, { text: prompt, images });
+          return { delivered: 'message', turn: publicTurn(running) };
+        } catch { /* the run is finishing: queue it as the next turn instead */ }
+      }
+      try { return { delivered: 'queued', followUp: followUps.add(conversation.id, message_) }; }
       catch (error) { throw new HttpError(409, message(error)); }
-      // Re-read after the await: the check and the save below run without yielding.
-      const turns = turnsOf(id as string);
-      if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
-      if (turns.some(turn => turn.status === 'queued')) throw new HttpError(409, '这个对话还有原服务排队中的任务');
-      // Later turns resume the conversation's agent session (Python: native_session_id).
-      const resume = conversation.nativeSessionId || turns.findLast(turn => turn.sessionId)?.sessionId || '';
-      if (conversation.type && conversation.type !== target.account.type) throw new HttpError(409, '这个对话属于 ' + conversation.type + ' 账号，项目现在绑定的是 ' + target.account.type);
-      const turn: Turn = {
-        id: randomUUID().replaceAll('-', '').slice(0, 12), origin: 'node', conversationId: id as string, projectId: conversation.projectId,
-        account: target.account.name, type: target.account.type, prompt, requestedModel: model, createdAt: new Date().toISOString(),
-        resumeId: resume, status: 'starting', answer: '', tools: [], blocks: [],
-      };
-      store.createTurn(turn, target.path);
-      if (turns.length === 0 && conversation.name === '新对话') store.saveConversation({ ...conversation, name: prompt.replace(/\s+/g, ' ').slice(0, 40) });
-      await runner.launch(turn);
-      return publicTurn(turn);
+    }],
+    ['GET', /^conversations\/([\w-]+)\/follow-ups$/, async (_request, [id]) => followUps.list(identifier(id))],
+    ['DELETE', /^conversations\/([\w-]+)\/follow-ups\/([\w-]+)$/, async (_request, [id, item]) => {
+      if (!followUps.remove(identifier(id), identifier(item))) throw new HttpError(404, '这条消息已经发出');
+      return { removed: true };
+    }],
+    // Images for a message, saved in the project like the Python service (.coderfleet-uploads).
+    ['POST', /^projects\/([\w.-]+)\/uploads$/, async (request, [name]) => {
+      const target = project(name as string);
+      const input = await body(request, 28 * 1024 * 1024);
+      const extension = text(input.name).toLowerCase().split('.').pop() ?? '';
+      if (!UPLOAD_TYPES[extension]) throw new HttpError(400, '只支持 PNG、JPEG、WebP 和 GIF 图片');
+      const data = Buffer.from(text(input.data), 'base64');
+      if (!data.length || data.length > 20 * 1024 * 1024) throw new HttpError(400, '图片不能超过 20 MB');
+      const directory = join(target.path, '.coderfleet-uploads');
+      mkdirSync(directory, { recursive: true });
+      const file = randomBytes(8).toString('hex') + '.' + (extension === 'jpeg' ? 'jpg' : extension);
+      writeFileSync(join(directory, file), data, { mode: 0o644 });
+      return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size: data.length };
+    }],
+    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}\.(?:png|jpe?g|webp|gif))$/, async (_request, [name, file]) => {
+      const path = join(project(name as string).path, '.coderfleet-uploads', file as string);
+      if (!existsSync(path) || statSync(path).size > 20 * 1024 * 1024) throw new HttpError(404, '图片不存在');
+      return { mime: UPLOAD_TYPES[(file as string).split('.').pop() as string], data: readFileSync(path).toString('base64') };
     }],
     ['GET', /^turns\/([\w-]+)\/tools\/(.+)$/, async (_request, [id, toolId]) => {
       const turn = store.turn(identifier(id));
@@ -337,6 +416,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   // Follows every active turn; after a restart this resumes from the saved log offsets.
   const timer = setInterval(() => {
     for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
+    void drainFollowUps();
   }, 250);
   timer.unref();
   server.once('close', () => clearInterval(timer));

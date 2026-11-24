@@ -28,3 +28,13 @@ rmSync(ui, { recursive: true, force: true });
 mkdirSync(ui, { recursive: true });
 cpSync(join(root, 'node_modules', '@xterm', 'xterm', 'lib', 'xterm.js'), join(ui, 'xterm.js'));
 cpSync(join(root, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), join(ui, 'xterm.css'));
+
+// A hash of the compiled backend: the App replaces a local backend of another build.
+{
+  const { createHash } = await import('node:crypto');
+  const { readFileSync, writeFileSync } = await import('node:fs');
+  const dist = join(root, 'dist');
+  const hash = createHash('sha256');
+  for (const name of readdirSync(dist).filter(name => name.endsWith('.js')).sort()) hash.update(name).update(readFileSync(join(dist, name)));
+  writeFileSync(join(dist, 'build-id'), hash.digest('hex').slice(0, 12) + '\n');
+}

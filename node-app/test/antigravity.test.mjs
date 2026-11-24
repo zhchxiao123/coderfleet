@@ -60,13 +60,29 @@ test('Antigravity turns run in the persistent project container and survive a se
     assert.equal(turn.answer, 'refused');
     assert.equal(turn.tools[0].status, 'denied');
 
+    // Auto mode approves without asking.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'approve', model: '', auto: true });
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done' || value.permission, 'auto turn');
+    assert.equal(turn.permission, undefined);
+    assert.equal(turn.answer, 'written');
+    // Without image support in the agent, images are listed as paths in the prompt.
+    const upload = (await env.post('projects/' + (await env.get('conversations')).body.find(item => item.id === conversation).projectId + '/uploads',
+      { name: 'b.webp', data: Buffer.from('RIFF').toString('base64') })).body;
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'look', model: '', images: [upload.path] });
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'image turn');
+    assert.match(turn.answer, new RegExp('^echo:look\\n\\n\\[Attached images:\\n\\S+/\\.coderfleet-uploads/' + upload.path.split('/').pop() + '\\]'));
+
     // Cancel a running turn, then continue the conversation.
     await env.post('conversations/' + conversation + '/turns', { prompt: 'slow', model: '' });
     turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working', 'slow turn');
-    assert.equal((await env.post('conversations/' + conversation + '/turns', { prompt: 'overlap', model: '' })).status, 409);
+    // ACP agents take no message mid-turn: it waits and runs after this turn.
+    assert.equal((await env.post('conversations/' + conversation + '/turns', { prompt: 'overlap', model: '' })).body.delivered, 'queued');
+    const slowId = turn.id;
     assert.equal((await env.post('turns/' + turn.id + '/cancel')).status, 200);
-    turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'cancelled turn');
+    turn = await until(async () => (await env.get('conversations/' + conversation + '/turns')).body.find(item => item.id === slowId), value => value.status === 'cancelled', 'cancelled turn');
     assert.equal(turn.interrupted, true);
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'overlap' && value.status === 'done', 'queued turn');
+    assert.equal(turn.answer, 'echo:overlap:base:resumed=native-1');
     await env.post('conversations/' + conversation + '/turns', { prompt: 'after', model: '' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'turn after cancel');
     assert.equal(turn.answer, 'echo:after:base:resumed=native-1');

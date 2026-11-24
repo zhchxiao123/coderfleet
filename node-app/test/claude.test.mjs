@@ -50,6 +50,35 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'answered turn');
     assert.equal(turn.answer, 'answer:{"Pick one?":"B"}');
 
+    // Images go as base64 image blocks; auto mode bypasses permissions.
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64');
+    const upload = (await env.post('projects/app/uploads', { name: 'shot.png', data: png })).body;
+    assert.match(upload.path, /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}\.png$/);
+    assert.equal((await env.get('projects/app/uploads/' + upload.path.split('/').pop())).body.data, png);
+    assert.equal((await env.post('conversations/' + conversation + '/turns', { prompt: 'see', images: ['/workspace/.coderfleet-uploads/../x.png'] })).status, 400);
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'see', images: [upload.path] });
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'image turn');
+    assert.equal(turn.answer, 'images:image/png:' + png.length + ':see');
+    assert.deepEqual(turn.images, [upload.path]);
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'mode' });
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'manual turn');
+    assert.equal(turn.answer, 'mode:acceptEdits');
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'mode', auto: true });
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'auto turn');
+    assert.equal(turn.answer, 'mode:bypassPermissions');
+    assert.equal(turn.auto, true);
+
+    // A message sent while the turn runs goes into the same run.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'long' });
+    turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.capabilities?.includes('message'), 'long turn');
+    const sent = (await env.post('conversations/' + conversation + '/turns', { prompt: 'also this' })).body;
+    assert.equal(sent.delivered, 'message');
+    turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'interjected turn', 400);
+    assert.match(turn.answer, /echo:also this/);
+    assert.match(turn.answer, /long-done/);
+    assert.deepEqual(turn.blocks.filter(block => block.kind === 'user'), [{ kind: 'user', text: 'also this' }]);
+    assert.deepEqual((await env.get('conversations/' + conversation + '/follow-ups')).body, []);
+
     // Native interrupt.
     await env.post('conversations/' + conversation + '/turns', { prompt: 'slow' });
     turn = await until(() => lastTurn(env, conversation), value => value.answer === 'working' && value.controlReady, 'slow turn');

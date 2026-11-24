@@ -141,7 +141,17 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
           })),
         };
         return true;
-      case 'coderfleet_control_ready': turn.controlReady = true; if (turn.status === 'starting') turn.status = 'running'; return true;
+      case 'coderfleet_control_ready':
+        turn.controlReady = true;
+        turn.capabilities = Array.isArray(event.capabilities) ? event.capabilities.filter((item): item is string => typeof item === 'string') : [];
+        if (turn.status === 'starting') turn.status = 'running';
+        return true;
+      case 'coderfleet_message_accepted': {
+        // A message sent while the turn ran; the agent takes it into this run.
+        const images = Array.isArray(event.images) ? event.images.filter((item): item is string => typeof item === 'string') : [];
+        (turn.blocks ??= []).push({ kind: 'user', text: text(event.text), ...(images.length ? { images } : {}) });
+        return true;
+      }
       case 'coderfleet_permission_pending': {
         const details = JSON.stringify(event.tool_input ?? {}, null, 2).slice(0, 16_000);
         // Claude reports the tool-use ID as the approval ID; Antigravity sends it separately.
@@ -254,7 +264,7 @@ export class TaskRunner {
       turn.controlReady = false;
       turn.logOffset = 0;
       writeShared(paths.spec, JSON.stringify({
-        task_id: turn.id, cwd: containerPath('').replace(/\/$/, ''), prompt: turn.prompt, session_id: turn.resumeId,
+        task_id: turn.id, cwd: containerPath('').replace(/\/$/, ''), prompt: turn.prompt, images: turn.images ?? [], auto: turn.auto === true, session_id: turn.resumeId,
         model: turn.requestedModel, env_auth: project.account.auth === 'env',
         state_path: inside(turn.id + '.sdk-state.json'), control_module: inside(bundleName + '/control.js'),
         control_directory: inside(turn.id + '.control'), control_token: turn.controlToken,
@@ -392,6 +402,29 @@ export class TaskRunner {
     turn.cancelRequested = true;
     this.store.saveTurn(turn);
     await this.tick(turn);
+  }
+
+  /**
+   * Sends a message into the running turn (Claude takes it into the same session) and
+   * waits for the worker's receipt. Throws when the worker cannot take it.
+   */
+  public async message(turn: Turn, input: { text: string; images: string[] }): Promise<void> {
+    const project = this.project(turn.projectId);
+    if (!project) throw new Error('The project configuration is missing');
+    if (!turn.controlReady || !turn.capabilities?.includes('message')) throw new Error('This turn cannot take messages');
+    const mailbox = this.mailbox(project, turn);
+    const id = mailbox.submit('message-' + randomBytes(8).toString('hex'), 'message' satisfies CommandKind, input);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const reply = mailbox.reply(id);
+      if (reply) {
+        if (reply.status !== 'accepted') throw new Error(reply.error || 'The worker rejected this message');
+        await this.tick(turn);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('The message was delivered but not confirmed yet. It will not be resent.');
   }
 
   /** Delivers an approval decision or question answers and waits for the worker's receipt. */

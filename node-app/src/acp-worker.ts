@@ -11,7 +11,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Command, ControlMailbox } from './control.js';
-import { emit, errorMessage, list, object, openMailbox, runMain, str, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, emit, errorMessage, list, object, openMailbox, runMain, str, withPaths, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 export const AGY_VERSION = '1.5.15';
 
@@ -211,6 +211,11 @@ export class Turn {
       rpc.send({ id: request, result: { outcome: { outcome: 'cancelled' } } });
       return;
     }
+    if (this.spec.auto && choices.allow_once) {
+      // Auto mode (Python: --always-approve / --yolo): approve without asking.
+      rpc.send({ id: request, result: { outcome: { outcome: 'selected', optionId: choices.allow_once } } });
+      return;
+    }
     const details: Json = {};
     for (const key of ['rawInput', 'content', 'locations']) if (key in tool) details[key] = tool[key];
     this.permissions.push({ request, key: randomUUID().replaceAll('-', ''), toolId: str(tool.toolCallId), title: str(tool.title) || 'Tool', details, choices });
@@ -328,6 +333,12 @@ export class Turn {
     });
     if (initialized.protocolVersion !== 1) throw new AcpError(this.agent.label + ' negotiated an unsupported ACP version');
     const capabilities = object(object(initialized.agentCapabilities).sessionCapabilities);
+    // Images go as ACP image blocks when the agent accepts them, otherwise as paths in the text.
+    const files = attachments(this.spec.cwd, this.spec.images);
+    const imageBlocks = object(object(initialized.agentCapabilities).promptCapabilities).image === true;
+    const content: Json[] = imageBlocks
+      ? [...(this.spec.prompt ? [{ type: 'text', text: this.spec.prompt }] : []), ...files.map(file => ({ type: 'image', mimeType: file.mime, data: file.data() }))]
+      : [{ type: 'text', text: withPaths(this.spec.prompt, files) }];
     const params: Json = { cwd: this.spec.cwd, mcpServers: [] };
     const supplied = this.spec.session_id;
     if (supplied) {
@@ -351,9 +362,9 @@ export class Turn {
       await this.configureModel(rpc, session);
       this.active = true;
       this.mailbox.publish('accepting');
-      this.system('coderfleet_control_ready', { capabilities: ['approval', 'interrupt'], permission_mode: 'default' });
+      this.system('coderfleet_control_ready', { capabilities: ['approval', 'interrupt'], permission_mode: this.spec.auto ? 'auto' : 'default' });
       const stop = { done: false };
-      const prompt = rpc.request('session/prompt', { sessionId: this.sessionId, prompt: [{ type: 'text', text: this.spec.prompt }] }, null);
+      const prompt = rpc.request('session/prompt', { sessionId: this.sessionId, prompt: content }, null);
       const control = this.control(rpc, stop);
       let result: Json;
       try {
