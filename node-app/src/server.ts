@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv,
-  writeSettings, WorkspaceError, type WorkspaceProject,
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv,
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
@@ -358,6 +357,14 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         return turn ? [{ ...publicTurn(turn), inherited: true }] : [];
       });
       return [...inherited, ...turnsOf(id as string).map(publicTurn)];
+    }],
+    // Project environment variables (applied when the project's container is recreated).
+    ['GET', /^projects\/([\w.-]+)\/env$/, async (_request, [name]) => ({ vars: readProjectEnv(workspace, project(name as string).name) })],
+    ['PUT', /^projects\/([\w.-]+)\/env$/, async (request, [name]) => {
+      const target = project(name as string);
+      const vars = Object.fromEntries(Object.entries(record((await body(request)).vars)).map(([key, value]) => [key.trim(), text(value)]));
+      writeProjectEnv(workspace, target.name, vars);
+      return { vars: readProjectEnv(workspace, target.name) };
     }],
     // Names the conversation again with the system LLM (replaces a manual title).
     ['POST', /^conversations\/([\w-]+)\/title$/, async (_request, [id]) => {

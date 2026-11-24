@@ -60,6 +60,60 @@
       sheet.foot(h('button.btn', { on: { click: () => sheet.close() } }, '取消'), save);
     },
 
+    /**
+     * Edits the project's environment variables (projects/<name>/env, shared with the
+     * old Web UI). They reach the container when it is recreated, so a running
+     * project can be restarted straight from here.
+     */
+    async env(project) {
+      let values;
+      try { values = (await CF.get('projects/' + encodeURIComponent(project.id) + '/env')).vars; } catch (error) { CF.fail(error); return; }
+      const secret = key => /KEY|TOKEN|SECRET|PASSWORD/i.test(key);
+      const rows = h('div.env-rows');
+      const addRow = (key = '', value = '') => {
+        const keyInput = h('input.mono', { value: key, placeholder: 'NAME', spellcheck: false, autocomplete: 'off' });
+        const valueInput = h('input.mono', { value, placeholder: '值', spellcheck: false, autocomplete: 'off', type: secret(key) ? 'password' : 'text' });
+        keyInput.addEventListener('input', () => { if (secret(keyInput.value)) valueInput.type = 'password'; });
+        const reveal = h('button.icon-btn', { title: '显示/隐藏', on: { click: () => { valueInput.type = valueInput.type === 'password' ? 'text' : 'password'; } } }, CF.icon('eye', 13));
+        const row = h('div.env-row', keyInput, valueInput, reveal,
+          h('button.icon-btn', { title: '删除', on: { click: () => { row.remove(); if (!rows.children.length) addRow(); } } }, CF.icon('x', 13)));
+        rows.append(row);
+        return keyInput;
+      };
+      for (const [key, value] of Object.entries(values)) addRow(key, value);
+      if (!Object.keys(values).length) addRow();
+      const running = project.state === 'running';
+      const sheet = CF.sheet({ title: project.name + ' · 环境变量', subtitle: '容器里的环境变量，优先于账号的同名变量。保存后重启项目才生效；和原 Web 界面共用同一份配置。', wide: true }, () => [
+        h('div.env-head', h('span', '变量名'), h('span', '值')), rows,
+        h('button.btn.ghost.small', { on: { click: () => addRow().focus() } }, CF.icon('plus', 13), '添加变量'),
+      ]);
+      const collect = () => {
+        const vars = {};
+        for (const row of rows.querySelectorAll('.env-row')) {
+          const [keyInput, valueInput] = row.querySelectorAll('input');
+          const key = keyInput.value.trim();
+          if (!key && !valueInput.value) continue;
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('变量名只能用字母、数字和下划线，且不能以数字开头：' + (key || '（空）'));
+          if (key in vars) throw new Error('变量名重复：' + key);
+          vars[key] = valueInput.value;
+        }
+        return vars;
+      };
+      const save = async restart => {
+        let vars;
+        try { vars = collect(); } catch (error) { sheet.error(error.message); return; }
+        await CF.api('PUT', 'projects/' + encodeURIComponent(project.id) + '/env', { vars });
+        sheet.close();
+        if (!restart) { CF.toast(running ? '已保存，重启项目后生效' : '已保存，启动项目时生效'); return; }
+        const operation = await CF.api('POST', 'projects/' + project.id + '/restart');
+        if (operation) void track(project.id, '重启', operation);
+      };
+      const saveOnly = h('button.btn', { on: { click: () => CF.busy(saveOnly, () => save(false)) } }, '保存');
+      const saveRestart = running ? h('button.btn.primary', { on: { click: () => CF.busy(saveRestart, () => save(true)) } }, '保存并重启') : null;
+      sheet.foot(h('button.btn.ghost', { on: { click: () => sheet.close() } }, '取消'), saveOnly, saveRestart);
+      if (!running) saveOnly.classList.add('primary');
+    },
+
     mount(container) {
       const { projects, overview } = CF.state;
       const banners = [];
@@ -79,6 +133,7 @@
           running ? { label: '停止容器', icon: 'stop', run: () => act('stop', '停止')({ currentTarget: menuButton }) } : null,
           running ? { label: '重启容器', icon: 'restart', run: () => act('restart', '重启')({ currentTarget: menuButton }) } : null,
           running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
+          { label: '环境变量…', icon: 'key', run: () => CF.projects.env(project) },
           { label: project.active ? '停用项目' : '启用项目', run: () => CF.busy(null, async () => {
             await CF.api('POST', 'projects/' + project.id + '/' + (project.active ? 'disable' : 'enable'));
             await CF.app.refreshProjects();

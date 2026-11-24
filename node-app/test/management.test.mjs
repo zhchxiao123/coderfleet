@@ -62,6 +62,18 @@ test('the App initializes the workspace and manages accounts, projects, containe
     assert.ok(compose.services['proxy-relay']);
     let project = (await env.get('projects')).body[0];
     assert.deepEqual([project.name, project.state, project.chat, project.typeLabel], ['app', 'running', true, 'Claude Code']);
+
+    // Project environment variables: projects/<name>/env, owner-only, put into the container on restart.
+    assert.deepEqual((await env.get('projects/app/env')).body.vars, {});
+    assert.equal((await env.put('projects/app/env', { vars: { '1BAD': 'x' } })).status, 400);
+    assert.deepEqual((await env.put('projects/app/env', { vars: { API_TOKEN: ' abc ', EMPTY: '', MODE: 'dev' } })).body.vars, { API_TOKEN: 'abc', MODE: 'dev' });
+    const projectEnvFile = join(env.workspace, 'projects', 'app', 'env');
+    assert.equal(readFileSync(projectEnvFile, 'utf8'), 'API_TOKEN=abc\nMODE=dev\n');
+    assert.equal(statSync(projectEnvFile).mode & 0o777, 0o600);
+    assert.equal((await operation(env, (await env.post('projects/app/restart')).body.id)).body.status, 'succeeded');
+    const recreated = JSON.parse(readFileSync(join(env.workspace, 'docker-compose.yml'), 'utf8').replace(/^#.*\n/, ''));
+    assert.equal(recreated.services['claude-project-app'].environment.MODE, 'dev');
+    assert.deepEqual((await env.put('projects/app/env', { vars: { MODE: 'dev' } })).body.vars, { MODE: 'dev' }, 'removed rows are dropped');
     assert.equal((await env.del('accounts/claude-a')).status, 400);
     accounts = (await env.get('accounts')).body;
     assert.deepEqual(accounts[0].projects, ['app']);
