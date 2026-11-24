@@ -19,6 +19,11 @@ try {
   const errors = globalThis.pageErrors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  // 项目 / 账号 / 通用 are tabs of the settings screen, opened from the backend menu.
+  const openTab = async (tab, menuLabel) => {
+    if (!(await page.$('.settings-tab'))) { await page.click('.backend-row'); await page.click('.menu button:has-text("' + menuLabel + '")'); }
+    await page.click('.settings-tab:has-text("' + tab + '")');
+  };
   const shot = async name => { await page.waitForTimeout(500); await page.screenshot({ path: join(out, scheme + '-' + name + '.png') }); };
   await page.goto(preview.url);
   await page.waitForSelector('.sidebar:not([hidden])');
@@ -65,19 +70,19 @@ try {
   await shot('chat-running');
   await page.click('.send.stop');
   await page.waitForSelector('.turn-note');
-  await page.click('.nav-item:has-text("项目")');
+  await openTab('项目', '项目');
   await page.waitForSelector('.row');
   await shot('projects');
   await page.click('.page-head button:has-text("新建项目")');
   await shot('projects-new');
   await page.keyboard.press('Escape');
-  await page.click('.nav-item:has-text("账号")');
+  await openTab('账号', '账号');
   await page.waitForSelector('.row');
   await shot('accounts');
   await page.click('.page-head button:has-text("添加账号")');
   await shot('accounts-new');
   await page.keyboard.press('Escape');
-  await page.click('.nav-item:has-text("设置")');
+  await openTab('通用', '设置');
   await page.waitForSelector('text=代理与容器');
   await shot('settings');
   await page.click('button:has-text("通过 SSH 添加")');
@@ -88,7 +93,7 @@ try {
   await page.waitForSelector('button:has-text("开始使用")', { timeout: 15000 });
   await shot('ssh-installed');
   await page.click('button:has-text("开始使用")');
-  await page.click('.nav-item:has-text("项目")');
+  await openTab('项目', '项目');
   await page.click('button[title="终端"] >> nth=0');
   await page.waitForSelector('.xterm-rows');
   await page.waitForTimeout(800);

@@ -16,6 +16,12 @@
   };
 
   CF.app = {
+    /** Leaves the settings screen for the conversation that was open before. */
+    closeSettings() {
+      const last = CF.state.lastChat;
+      if (last && (!last.conversationId || CF.state.conversations.some(item => item.id === last.conversationId))) CF.app.go(last);
+      else { const target = CF.chat.defaultProject(); if (target) CF.app.go({ name: 'chat', projectId: target.id }); }
+    },
     /** Redraws the sidebar and the current page (after a local change such as a pin). */
     rerender() { renderSidebar(); if (['projects'].includes(CF.state.view.name)) renderMain(); },
     isLocal: () => CF.state.profiles.find(item => item.id === CF.state.backendId)?.kind === 'local',
@@ -190,6 +196,9 @@
       search.focus(); search.select();
     }
     if ((event.metaKey || event.ctrlKey) && event.key === '\\') { event.preventDefault(); CF.app.toggleSidebar(); }
+    if ((event.metaKey || event.ctrlKey) && event.key === ',') { event.preventDefault(); CF.app.go({ name: 'settings' }); }
+    if (event.key === 'Escape' && CF.state.view.name !== 'chat' && !document.querySelector('dialog[open], .menu')
+      && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) CF.app.closeSettings();
   });
 
   function conversationMeta(item) {
@@ -259,8 +268,6 @@
     const { view, profiles, backendId, projects, accounts, conversations, connected } = CF.state;
     const current = profiles.find(item => item.id === backendId);
     const running = projects.filter(item => item.state === 'running').length;
-    const nav = (name, icon, label, count) => h('button.nav-item' + (view.name === name ? '.selected' : ''), { on: { click: () => CF.app.go({ name }) } },
-      CF.icon(icon, 16), h('span.label', label), count === undefined ? null : h('span.count', String(count)));
     const waiting = conversations.filter(item => item.attention);
     const attention = waiting.length ? h('button.attention-row', {
       title: waiting.map(item => item.name).join('\n'),
@@ -284,7 +291,10 @@
         run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
       '-',
       { label: '通过 SSH 添加后端…', icon: 'plus', run: async () => { const result = await CF.addSshBackend(); if (result?.id) await CF.app.loadProfiles(result.id); } },
-      { label: '设置', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
+      '-',
+      { label: '项目', trail: connected ? String(projects.length) : '', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
+      { label: '账号', trail: connected ? String(accounts.length) : '', icon: 'user', run: () => CF.app.go({ name: 'accounts' }) },
+      { label: '设置', trail: CF.transport?.platform === 'darwin' ? '⌘,' : 'Ctrl+,', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
     ], { matchWidth: true }) } }, h('span.backend-avatar', (current?.name || '?').slice(0, 1)),
       h('span.names', h('strong', current?.name || '未连接'), h('small', connected ? (current?.kind === 'local' ? '这台电脑' : current?.kind === 'ssh' ? '远程 · ' + current.host : '远端') + ' · ' + running + ' 个容器运行中' : '未连接')),
       CF.icon('down', 13));
@@ -301,8 +311,6 @@
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),
       attention,
       h('div.sidebar-scroll',
-        h('nav.sidebar-nav', nav('projects', 'folder', '项目', connected ? projects.length : undefined), nav('accounts', 'user', '账号', connected ? accounts.length : undefined), nav('settings', 'gear', '设置')),
-        h('div.sidebar-label', '对话'),
         conversationsHost),
       h('div.sidebar-foot', activityHost, backendButton),
     );
@@ -311,11 +319,20 @@
     if (typing) { search.focus(); search.setSelectionRange(typing[0], typing[1]); }
   }
 
+  // 项目, 账号 and the rest are tabs of one 设置 screen, opened from the backend menu (or ⌘,).
+  const SETTINGS_TABS = [['projects', '项目', 'folder'], ['accounts', '账号', 'user'], ['settings', '通用', 'gear']];
+  const settingsBar = active => h('div.settings-bar',
+    h('button.btn.ghost.small.settings-back', { title: '返回对话（Esc）', on: { click: () => CF.app.closeSettings() } }, CF.icon('chevron', 13), '返回'),
+    h('div.settings-tabs', { role: 'tablist' }, SETTINGS_TABS.map(([name, label, icon]) => h('button.settings-tab' + (name === active ? '.selected' : ''), {
+      role: 'tab', 'aria-selected': String(name === active), on: { click: () => CF.app.go({ name }) },
+    }, CF.icon(icon, 14), label))));
+
   function renderMain() {
     const { view, connected } = CF.state;
     if (!connected && view.name !== 'settings') return;
+    if (view.name === 'chat') CF.state.lastChat = view;
     const container = h('div.view');
-    main.replaceChildren(container);
+    main.replaceChildren(...(view.name === 'chat' ? [] : [settingsBar(view.name)]), container);
     if (view.name === 'chat') CF.chat.mount(container, view);
     else if (view.name === 'projects') CF.projects.mount(container);
     else if (view.name === 'accounts') CF.accounts.mount(container);

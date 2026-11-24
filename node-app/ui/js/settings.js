@@ -37,7 +37,7 @@
 
     async mount(container) {
       const { overview, profiles, backendId } = CF.state;
-      const page = h('div.page-inner', h('div.page-head', h('div', h('div.eyebrow', '连接、工作区与容器'), h('h1', '设置'))));
+      const page = h('div.page-inner', h('div.page-head', h('div', h('div.eyebrow', '连接、显示、工作区与容器'), h('h1', '通用'))));
       container.replaceChildren(h('div.page', page));
       const notice = CF.pythonNotice(overview);
       if (notice) page.append(notice);

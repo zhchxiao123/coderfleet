@@ -866,3 +866,25 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .attach.file .spinner { left: auto; right: 10px; top: 50%; margin: -8px 0 0; }
 .attach.file .remove { top: -6px; right: -6px; }
 .user-images { align-items: center; }
+
+/* ── 设置: one screen with tabs (项目 · 账号 · 通用) ── */
+.settings-bar {
+  flex: none; height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 22px;
+  border-bottom: 1px solid var(--line); -webkit-app-region: drag;
+}
+.settings-bar > * { -webkit-app-region: no-drag; }
+.settings-back svg { transform: rotate(180deg); }
+.settings-tabs { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--fill); }
+.settings-tab {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border: 0; border-radius: 8px;
+  background: none; color: var(--text-2); font-size: 13px; font-weight: 560;
+}
+.settings-tab:hover { color: var(--text); }
+.settings-tab.selected { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(20, 28, 45, 0.08), 0 0 0 0.5px var(--line-strong); }
+.settings-tab svg { color: var(--text-3); }
+.settings-tab.selected svg { color: var(--accent); }
+.app.sidebar-hidden .settings-bar { padding-left: 96px; }
+.platform-darwin .app.sidebar-hidden .settings-bar { padding-left: 164px; }
+.settings-bar + .view .page-inner { padding-top: 26px; }
+.app.sidebar-hidden .settings-bar + .view .page-inner { padding-top: 26px; }
+.menu .menu-trail { flex: none; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }

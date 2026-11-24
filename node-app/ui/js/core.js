@@ -132,6 +132,7 @@
       menu.append(h('button' + (item.danger ? '.danger' : '') + (item.checked ? '.checked' : ''), { role: 'menuitem', on: { click: () => { menu.remove(); item.run(); } } },
         item.avatar ? h('span.menu-avatar', item.avatar) : item.icon ? CF.icon(item.icon, 14) : null,
         item.hint ? h('span.menu-text', h('span', item.label), h('small', item.hint)) : h('span.menu-text', item.label),
+        item.trail ? h('span.menu-trail', item.trail) : null,
         item.checked ? h('span.menu-check', CF.icon('check', 14)) : null));
     }
     document.body.append(menu);
