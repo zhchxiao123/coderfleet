@@ -37,6 +37,8 @@
   }
 
   const openTools = new Set();
+  // Agent calls whose finished sub-steps are unfolded: turnId:toolId.
+  const openChildren = new Set();
   const toolDetails = new Map(); // turnId:toolId → { status, data } once fetched
 
   /** The input of a tool call, shown the way a person checks it. */
@@ -107,6 +109,22 @@
       h('span.chev', CF.icon('chevron', 11)));
     node.append(row);
     if (open) node.append(toolPanel(turn, tool));
+    // An Agent call's own steps, indented under it: the latest few while it runs, folded once it is done.
+    const children = turn.tools.filter(item => item.parent === tool.id);
+    if (children.length) {
+      const unfolded = openChildren.has(key);
+      const running = tool.status === 'running' || tool.status === 'waiting';
+      const failed = children.filter(item => item.status === 'failed').length;
+      const shown = unfolded ? children : running ? children.slice(-5) : [];
+      const toggle = h('button.flow-row.children-toggle', { 'aria-expanded': String(unfolded), on: { click: () => {
+        unfolded ? openChildren.delete(key) : openChildren.add(key);
+        node.replaceWith(toolRow(turn, tool));
+      } } }, h('span.label', unfolded ? '收起子步骤'
+        : running ? (children.length > shown.length ? '前面还有 ' + (children.length - shown.length) + ' 步' : '')
+          : children.length + ' 个子步骤' + (failed ? ' · ' + failed + ' 个失败' : '')), CF.icon('chevron', 11));
+      const label = toggle.querySelector('.label').textContent;
+      node.append(h('div.tool-children', label ? toggle : null, shown.map(item => toolRow(turn, item))));
+    }
     return node;
   }
 
@@ -202,7 +220,7 @@
   /** Text and tool groups in the order they happened (older records: tools, then text). */
   function body(turn) {
     const blocks = turn.blocks?.length ? turn.blocks
-      : [...turn.tools.map(tool => ({ kind: 'tool', id: tool.id })), ...(turn.answer ? [{ kind: 'text', text: turn.answer }] : [])];
+      : [...turn.tools.filter(tool => !tool.parent).map(tool => ({ kind: 'tool', id: tool.id })), ...(turn.answer ? [{ kind: 'text', text: turn.answer }] : [])];
     const byId = new Map(turn.tools.map(tool => [tool.id, tool]));
     const nodes = [];
     let group = [];

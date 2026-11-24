@@ -41,6 +41,19 @@ test('tool details summarize the input', () => {
   assert.equal(toolDetail({ other: 1 }), '');
 });
 
+test('steps of a sub-agent belong to its Agent call, and its text is not the answer', () => {
+  const value = turn();
+  applyEvent(value, use('agent-1', 'Agent', { description: 'Review the diff' }));
+  const inner = (event, parent = 'agent-1') => ({ ...event, parent_tool_use_id: parent });
+  applyEvent(value, inner({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'sub-agent thinking' } } }));
+  applyEvent(value, inner(use('b1', 'Bash', { command: 'git diff' })));
+  applyEvent(value, inner(result('b1', false)));
+  applyEvent(value, result('agent-1', false));
+  assert.deepEqual(value.tools.map(tool => [tool.id, tool.parent, tool.status]), [['agent-1', undefined, 'completed'], ['b1', 'agent-1', 'completed']]);
+  assert.deepEqual(value.blocks, [{ kind: 'tool', id: 'agent-1' }]);
+  assert.equal(value.answer, '');
+});
+
 test('text and tool calls keep the order they happened in', () => {
   const value = turn();
   const delta = text => ({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });

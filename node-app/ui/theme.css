@@ -949,3 +949,10 @@ ul.addresses, ol.pair-addresses { list-style: none; margin: 0; padding: 0; displ
 img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius: 12px; background: #fff; padding: 6px; }
 .pair-hint { margin: 0; color: var(--text-3); font-size: 12.5px; text-align: center; }
 .pair ol.pair-addresses { width: 100%; }
+
+/* An Agent call's own steps */
+.tool-children { margin: 0 0 4px 7px; padding-left: 14px; border-left: 1px solid var(--line-strong); display: grid; grid-template-columns: minmax(0, 1fr); }
+.tool-children .flow-row { height: 24px; font-size: 12.5px; }
+.children-toggle { color: var(--text-3); }
+.children-toggle .label { color: var(--text-3) !important; font-weight: 500 !important; }
+.children-toggle[aria-expanded="true"] .chev, .children-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }

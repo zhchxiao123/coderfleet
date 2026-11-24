@@ -177,7 +177,7 @@ export function normalizeLog(type: string, native: boolean, content: string): Ev
     }
     if (claudeFormat) {
       if (item.type === 'system' && item.subtype === 'init' && text(item.session_id)) events.push(session(text(item.session_id)));
-      if (item.type === 'assistant' && !hasDeltas) {
+      if (item.type === 'assistant' && !hasDeltas && !item.parent_tool_use_id) {
         for (const block of entries(record(item.message).content)) if (block.type === 'text' && text(block.text)) events.push(delta(text(block.text)));
       }
       if (item.type === 'result' && item.is_error === true) events.push({ type: 'error', message: text(item.result) || text(item.error) || 'The run failed' });

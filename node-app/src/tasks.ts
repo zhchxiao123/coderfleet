@@ -195,7 +195,11 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       default: return false;
     }
   }
+  // A sub-agent's messages carry its Agent call's ID: its text is not the answer,
+  // and its tool calls are steps of that Agent call.
+  const parent = text(event.parent_tool_use_id);
   if (type === 'stream_event') {
+    if (parent) return false;
     if (record(event.event).type === 'message_start') {
       releaseHeld(turn);
       turn.messageStarted = true;
@@ -221,8 +225,8 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       if (item.type === 'tool_use' && text(item.id) && !turn.tools.some(tool => tool.id === item.id)) {
         // The approval can arrive before the tool call itself.
         const status: ToolStatus = turn.permission?.toolId === item.id ? 'waiting' : 'running';
-        turn.tools.push({ id: text(item.id), title: text(item.name) || 'Tool', status, detail: toolDetail(item.input), input: capInput(item.input) });
-        (turn.blocks ??= []).push({ kind: 'tool', id: text(item.id) });
+        turn.tools.push({ id: text(item.id), title: text(item.name) || 'Tool', status, detail: toolDetail(item.input), input: capInput(item.input), ...(parent ? { parent } : {}) });
+        if (!parent) (turn.blocks ??= []).push({ kind: 'tool', id: text(item.id) });
         changed = true;
       } else if (item.type === 'tool_result') {
         const current = turn.tools.find(tool => tool.id === item.tool_use_id);

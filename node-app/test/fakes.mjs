@@ -107,6 +107,19 @@ async function handle(message) {
     const images = prompt.filter(block => block.type === 'image' || block.type === 'document').map(block => block.source.media_type + ':' + block.source.data.length);
     say('images:' + images.join(',') + ':' + text);
     finish();
+  } else if (prompt === 'subagent') {
+    // An Agent call whose own steps carry its ID (parent_tool_use_id).
+    send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'agent-1', name: 'Agent', input: { description: 'Review platform deployment-tag diff', subagent_type: 'general-purpose' } }] } });
+    const steps = ['git status --short && git diff', 'cat src/test/MicrovmDeploymentTagTest.java', 'git grep -n AliyunMicrovmClient', 'sed -n 1,80p platform-web/src/main/Application.java', "git grep -n 'ownerKey' -- '*.java'", 'grep -n application-aliyun-microvm README.md', 'mvn -q -pl platform-provider-aliyun-agent-sandbox test'];
+    for (const [index, command] of steps.entries()) {
+      send({ type: 'stream_event', parent_tool_use_id: 'agent-1', session_id: sessionId, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'sub-agent note ' } } });
+      send({ type: 'assistant', parent_tool_use_id: 'agent-1', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 's' + index, name: 'Bash', input: { command } }] } });
+      send({ type: 'user', parent_tool_use_id: 'agent-1', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 's' + index, content: 'ok', is_error: index === 6 }] } });
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+    send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'agent-1', content: 'Review done: one failing test.' }] } });
+    say('审查完成：有一个测试没通过，其他改动没有问题。');
+    finish();
   } else if (prompt === 'readimg') {
     // Read of a picture: the tool result is an image block.
     send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'img-1', name: 'Read', input: { file_path: '/workspace/shot.png' } }] } });

@@ -102,6 +102,8 @@ export interface Tool {
   /** Full input and output, served on demand (GET /v1/turns/:id/tools/:toolId), capped in size. */
   readonly input?: unknown;
   readonly output?: string;
+  /** The Agent (Task) call this step ran inside: a sub-agent's own tool calls. */
+  readonly parent?: string;
 }
 
 /** `user`: a message sent while the turn was running (Claude takes it into the same run). */
