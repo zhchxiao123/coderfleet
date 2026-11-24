@@ -291,6 +291,8 @@
     renderConversations();
     // Re-rendering must not interrupt typing in the search field.
     const typing = document.activeElement === search ? [search.selectionStart, search.selectionEnd] : null;
+    // The list is rebuilt on every change (selection, status dots): keep where the user scrolled to.
+    const scrollTop = sidebar.querySelector('.sidebar-scroll')?.scrollTop ?? 0;
     sidebar.replaceChildren(
       h('div.sidebar-top',
         h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet')),
@@ -304,6 +306,8 @@
         conversationsHost),
       h('div.sidebar-foot', activityHost, backendButton),
     );
+    const scroller = sidebar.querySelector('.sidebar-scroll');
+    if (scroller) scroller.scrollTop = scrollTop;
     if (typing) { search.focus(); search.setSelectionRange(typing[0], typing[1]); }
   }
 
