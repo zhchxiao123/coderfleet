@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android cannot limit cleartext by IP range, so plain http is allowed here and the
+     app itself refuses http to anything but private, mesh and .local addresses
+     (lib/src/backend.dart, checkAddress). Everything else is https. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>
