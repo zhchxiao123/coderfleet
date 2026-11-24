@@ -167,3 +167,11 @@ export interface Turn {
 export function active(turn: Turn): boolean {
   return turn.status === 'starting' || turn.status === 'running';
 }
+
+/** Hosts an App-managed local backend may listen on: loopback, or every interface for phones on the LAN. */
+export const LOCAL_HOSTS: readonly string[] = ['127.0.0.1', 'localhost', '0.0.0.0'];
+
+/** How this computer reaches a local backend: over loopback even when it listens on every interface. */
+export function localUrl(config: { host: string; port: number }): string {
+  return 'http://' + (config.host === '0.0.0.0' ? '127.0.0.1' : config.host) + ':' + config.port;
+}

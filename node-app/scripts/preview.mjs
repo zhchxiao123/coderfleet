@@ -53,7 +53,7 @@ window.coderFleet = {
     { id: 'local', name: '本机', kind: 'local', url: 'http://127.0.0.1:${backendPort}' },
     { id: 'build', name: '构建服务器', kind: 'ssh', url: 'ssh://dev@10.0.8.21', host: 'dev@10.0.8.21', version: '0.0.9' },
   ],
-  connect: async () => ({}),
+  connect: async () => ({}), setLan: async () => ({}), restartLocal: async () => ({}),
   setupLocal: async () => 'local', addRemote: async () => 'local', remove: async () => [],
   pickDirectory: null, pickFile: null,
   bundle: async () => ({ version: '0.1.0' }),

@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -10,9 +10,11 @@ import {
   writeSettings, WorkspaceError, type WorkspaceProject,
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
+import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
+import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
 import { configured, SystemLLMError, systemLLM, TranslationCache, translateText } from './translate.js';
 import { findPythonService, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
@@ -55,6 +57,28 @@ const CLAUDE_MODELS = [
 
 type Handler = (request: IncomingMessage, params: string[], url: URL) => Promise<unknown>;
 
+/**
+ * What a paired phone's device token may call: the chat API only. Everything
+ * else (accounts, projects management, terminals, settings, devices) needs the
+ * backend's main token, which stays on the computer.
+ */
+const DEVICE_ROUTES: readonly [string, RegExp][] = [
+  ['GET', /^health$/], ['GET', /^device$/], ['GET', /^projects$/], ['GET', /^projects\/[\w.-]+\/models$/],
+  ['GET', /^conversations$/], ['GET', /^conversations\/changes$/], ['POST', /^conversations$/], ['PUT', /^conversations\/[\w-]+$/],
+  ['GET', /^conversations\/[\w-]+\/(turns|changes|follow-ups)$/], ['POST', /^conversations\/[\w-]+\/(turns|fork)$/],
+  ['DELETE', /^conversations\/[\w-]+\/follow-ups\/[\w-]+$/],
+  ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[\w.]+$/],
+  ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
+];
+export function deviceAllowed(method: string, path: string): boolean {
+  return DEVICE_ROUTES.some(([allowed, pattern]) => allowed === method && pattern.test(path));
+}
+
+const digest = (value: unknown): string => createHash('sha1').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+const LONG_POLL_MAX = 30_000;
+
+type AuthedRequest = IncomingMessage & { device?: Device };
+
 export interface ServeOptions {
   /** Called after an authenticated POST /v1/shutdown; only the standalone service passes it. */
   readonly onShutdown?: () => void;
@@ -91,6 +115,57 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
   const followUps = new FollowUps(config.stateDirectory);
+  const conversationList = () => {
+    const summaries = new Map<string, { updatedAt: string; status: string; turns: number; attention: boolean }>();
+    for (const item of store.turnIds()) {
+      const conversationId = store.turnConversation(item.id);
+      if (!conversationId) continue;
+      const current = summaries.get(conversationId) ?? { updatedAt: '', status: '', turns: 0, attention: false };
+      summaries.set(conversationId, { updatedAt: item.createdAt, status: item.status, turns: current.turns + 1, attention: item.attention });
+    }
+    return store.conversations().map(item => {
+      const summary = summaries.get(item.id);
+      return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
+        forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
+        updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false };
+    }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  };
+  const conversationTurns = (id: string): Record<string, unknown>[] => {
+    const conversation = store.conversation(id);
+    if (!conversation) throw new HttpError(404, 'Conversation not found');
+    // A fork shows the turns it branched from, read-only, before its own.
+    const inherited = (conversation.fork?.inherited_task_ids ?? []).flatMap(turnId => {
+      const turn = store.turn(turnId);
+      return turn ? [{ ...publicTurn(turn), inherited: true }] : [];
+    });
+    return [...inherited, ...turnsOf(id).map(publicTurn)];
+  };
+  /** Polls `check` until it returns a value, `wait` ms pass (at most 30 s), or the client goes away. */
+  const waitFor = async <T>(request: IncomingMessage, url: URL, check: () => T | undefined): Promise<T | undefined> => {
+    const wait = Math.min(Math.max(Number(url.searchParams.get('wait')) || 0, 0), LONG_POLL_MAX);
+    const deadline = Date.now() + wait;
+    let gone = false;
+    const onClose = (): void => { gone = true; };
+    request.socket.once('close', onClose);
+    try {
+      for (;;) {
+        const value = check();
+        if (value !== undefined || gone || Date.now() >= deadline) return value;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    } finally { request.socket.removeListener('close', onClose); }
+  };
+  const devices = new Devices(config.stateDirectory);
+  /** Addresses a phone tries in order: LAN and mesh interfaces (when listening beyond loopback), then added ones. */
+  const phoneAddresses = async (): Promise<Address[]> => {
+    const own = listensBeyondLoopback(config.host) ? interfaceAddresses(config.port) : [];
+    const seen = new Set<string>();
+    return [...own, ...extraAddresses.list()].filter(item => !seen.has(item.url) && seen.add(item.url));
+  };
+  const failedAuth = new FailedAuth();
+  const extraAddresses = new ExtraAddresses(config.stateDirectory);
+  /** Per-turn hashes of snapshots recently sent, so a change feed returns only changed turns. */
+  const sentSnapshots = new Map<string, Map<string, string>>();
   const translations = new TranslationCache(join(workspace, 'translations'));
 
   /** Starts a new turn in a conversation that has none running. */
@@ -308,21 +383,42 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }],
     ['DELETE', /^terminals\/([\w-]+)$/, async (_request, [id]) => { terminals.close(id as string); return { closed: true }; }],
 
+    // Phones: pairing, devices and the addresses they can use (main token only)
+    ['GET', /^device$/, async (request) => (request as AuthedRequest).device ?? { id: '', name: '主令牌' }],
+    ['GET', /^mobile$/, async () => ({
+      listening: { host: config.host, port: config.port, beyondLoopback: listensBeyondLoopback(config.host) },
+      addresses: await phoneAddresses(), interfaces: interfaceAddresses(config.port), extra: extraAddresses.list(),
+      tailscale: (await tailscaleName()) ?? null, devices: devices.list(), failures: failedAuth.recent(),
+    })],
+    ['PUT', /^mobile$/, async request => {
+      const input = await body(request);
+      const list = (Array.isArray(input.addresses) ? input.addresses : []).map(item => ({ url: text(record(item).url), label: text(record(item).label) }));
+      try { return { extra: extraAddresses.save(list) }; }
+      catch (error) { throw new HttpError(400, message(error)); }
+    }],
+    ['POST', /^devices$/, async request => {
+      const input = await body(request);
+      const addresses = await phoneAddresses();
+      if (!addresses.length) throw new HttpError(409, '手机还没有可用的地址：打开“允许局域网访问”，或添加组网 / 公网地址');
+      const { device, token: deviceToken } = devices.create(text(input.name));
+      return { device, link: pairingLink(text(input.backendName).trim().slice(0, 60) || 'CoderFleet', deviceToken, addresses), addresses };
+    }],
+    ['DELETE', /^devices\/([\w-]+)$/, async (_request, [id]) => {
+      if (!devices.revoke(identifier(id))) throw new HttpError(404, '设备不存在');
+      return { revoked: true };
+    }],
+
     // Conversations
-    ['GET', /^conversations$/, async () => {
-      const summaries = new Map<string, { updatedAt: string; status: string; turns: number; attention: boolean }>();
-      for (const item of store.turnIds()) {
-        const conversationId = store.turnConversation(item.id);
-        if (!conversationId) continue;
-        const current = summaries.get(conversationId) ?? { updatedAt: '', status: '', turns: 0, attention: false };
-        summaries.set(conversationId, { updatedAt: item.createdAt, status: item.status, turns: current.turns + 1, attention: item.attention });
-      }
-      return store.conversations().map(item => {
-        const summary = summaries.get(item.id);
-        return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
-          forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
-          updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false };
-      }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    ['GET', /^conversations$/, async () => conversationList()],
+    // Long poll for phones: answers at once when the list differs from `since`, else waits for a change.
+    ['GET', /^conversations\/changes$/, async (request, _params, url) => {
+      const since = url.searchParams.get('since') ?? '';
+      const result = await waitFor(request, url, () => {
+        const conversations = conversationList();
+        const etag = digest(conversations);
+        return etag === since ? undefined : { etag, conversations };
+      });
+      return result ?? { etag: since, unchanged: true };
     }],
     ['POST', /^conversations$/, async request => {
       const input = await body(request);
@@ -342,15 +438,27 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       store.saveConversation(renamed);
       return renamed;
     }],
-    ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id]) => {
-      const conversation = store.conversation(identifier(id));
-      if (!conversation) throw new HttpError(404, 'Conversation not found');
-      // A fork shows the turns it branched from, read-only, before its own.
-      const inherited = (conversation.fork?.inherited_task_ids ?? []).flatMap(turnId => {
-        const turn = store.turn(turnId);
-        return turn ? [{ ...publicTurn(turn), inherited: true }] : [];
+    ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id]) => conversationTurns(identifier(id))],
+    // Long poll for phones: the turns that changed since `since` (all of them when it is unknown),
+    // the turn order and queued messages; waits for a change when there is none.
+    ['GET', /^conversations\/([\w-]+)\/changes$/, async (request, [id], url) => {
+      const conversationId = identifier(id);
+      const since = url.searchParams.get('since') ?? '';
+      const result = await waitFor(request, url, () => {
+        const turns = conversationTurns(conversationId);
+        const queued = followUps.list(conversationId);
+        const hashes = new Map(turns.map(turn => [String(turn.id), digest(turn)]));
+        const etag = digest([[...hashes], queued]);
+        if (etag === since) return undefined;
+        const known = sentSnapshots.get(since);
+        sentSnapshots.set(etag, hashes);
+        if (sentSnapshots.size > 500) sentSnapshots.delete(sentSnapshots.keys().next().value as string);
+        return {
+          etag, full: !known, order: turns.map(turn => turn.id), followUps: queued,
+          turns: known ? turns.filter(turn => known.get(String(turn.id)) !== hashes.get(String(turn.id))) : turns,
+        };
       });
-      return [...inherited, ...turnsOf(id as string).map(publicTurn)];
+      return result ?? { etag: since, unchanged: true };
     }],
     // Forks a Claude conversation at a finished turn into a new conversation.
     ['POST', /^conversations\/([\w-]+)\/fork$/, async (request, [id]) => {
@@ -448,11 +556,25 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
 
   const server = createServer(async (request, response) => {
     try {
-      const auth = Buffer.from(request.headers.authorization ?? '');
-      if (token.length !== auth.length || !timingSafeEqual(auth, token)) throw new HttpError(401, 'Invalid backend token');
+      const address = request.socket.remoteAddress ?? '';
+      const header = request.headers.authorization ?? '';
+      const auth = Buffer.from(header);
+      let device: Device | undefined;
+      if (token.length !== auth.length || !timingSafeEqual(auth, token)) {
+        device = header.startsWith('Bearer ') ? devices.authenticate(header.slice(7), address) : undefined;
+        if (!device) {
+          const wait = failedAuth.blocked(address);
+          if (wait) { response.setHeader('Retry-After', String(wait)); throw new HttpError(429, '认证失败次数过多，请 ' + wait + ' 秒后再试'); }
+          failedAuth.record(address);
+          throw new HttpError(401, 'Invalid backend token');
+        }
+      }
+      failedAuth.clear(address);
       const url = new URL(request.url ?? '/', 'http://localhost');
       if (!url.pathname.startsWith('/v1/')) throw new HttpError(404, 'Unknown API endpoint');
       const path = url.pathname.slice('/v1/'.length);
+      if (device && !deviceAllowed(request.method ?? '', path)) throw new HttpError(403, '手机只能使用聊天功能');
+      (request as AuthedRequest).device = device;
       for (const [method, pattern, handler] of routes) {
         const match = pattern.exec(path);
         if (!match || method !== request.method) continue;

@@ -113,11 +113,11 @@ export async function environment({ accounts = '', projects = (project) => '', b
   const stop = () => new Promise(done => { server.close(done); server.closeAllConnections(); });
   const base = 'http://127.0.0.1:' + servicePort + '/v1/';
   // No keep-alive: a restarted service must not see requests on a socket the old one closed.
-  const call = (method, path, value) => new Promise((resolve, reject) => {
+  const call = (method, path, value, bearer = token) => new Promise((resolve, reject) => {
     const body = value === undefined ? undefined : JSON.stringify(value);
     const request = httpRequest(base + path, {
       method, agent: false,
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}) },
+      headers: { Authorization: 'Bearer ' + bearer, 'Content-Type': 'application/json', ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}) },
     }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -130,7 +130,9 @@ export async function environment({ accounts = '', projects = (project) => '', b
     request.end(body);
   });
   return {
-    root, workspace, project, bin,
+    root, workspace, project, bin, port: servicePort,
+    /** A request with another bearer token (a paired phone, or a wrong one). */
+    as: (bearer, method, path, value) => call(method, path, value, bearer),
     get: path => call('GET', path),
     post: (path, value = {}) => call('POST', path, value),
     delete: path => call('DELETE', path),

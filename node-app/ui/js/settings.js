@@ -109,6 +109,9 @@
 
       if (!current || !overview) return;
 
+      // Phones
+      page.append(CF.mobileCard(current));
+
       // Workspace & image
       const image = overview.image;
       page.append(h('div.card',

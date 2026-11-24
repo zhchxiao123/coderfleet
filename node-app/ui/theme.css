@@ -814,3 +814,32 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
   background: linear-gradient(135deg, #e7ecff, #cfd8ff); color: #3d4fd6;
 }
 .menu.wide { min-width: 0; }
+
+/* ── Settings → 手机访问 ─────────────────────────────── */
+.mobile-card .empty-note { font-size: 13px; color: var(--text-3); padding: 4px 0; }
+.mobile-lan { display: flex; align-items: center; gap: 16px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2, var(--fill)); margin-bottom: 6px; }
+.mobile-lan > div { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.mobile-lan strong { font-weight: 600; }
+.mobile-lan small { color: var(--text-3); font-size: 12.5px; line-height: 1.5; }
+.switch { position: relative; width: 40px; height: 24px; border: 0; border-radius: 999px; background: var(--line-strong); flex: none; transition: background 0.15s; padding: 0; }
+.switch .knob { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); transition: transform 0.15s; }
+.switch.on { background: var(--green); }
+.switch.on .knob { transform: translateX(16px); }
+.mobile-label { font-size: 12px; font-weight: 600; color: var(--text-3); margin: 16px 0 6px; }
+ul.addresses, ol.pair-addresses { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.addresses li, .pair-addresses li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 4px; font-size: 13px; }
+.addresses code, .pair-addresses code { font: 12.5px var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.addresses small, .pair-addresses small { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+.addresses .icon-btn { margin-left: auto; }
+.mobile-add { display: flex; gap: 8px; margin-top: 8px; }
+.mobile-add input { flex: 1; min-width: 0; }
+.mobile-hint { display: block; color: var(--text-3); font-size: 12px; margin-top: 6px; line-height: 1.5; }
+.mobile-suggest { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 12.5px; color: var(--text-2); }
+.mobile-suggest span { flex: 1; min-width: 0; line-height: 1.6; }
+.mobile-suggest code, .mobile-lan code { font: 12px var(--mono); }
+.mobile-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--amber); font-size: 12.5px; }
+.pair { display: grid; justify-items: center; gap: 10px; }
+.pair .field { width: 100%; justify-items: stretch; }
+img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius: 12px; background: #fff; padding: 6px; }
+.pair-hint { margin: 0; color: var(--text-3); font-size: 12.5px; text-align: center; }
+.pair ol.pair-addresses { width: 100%; }

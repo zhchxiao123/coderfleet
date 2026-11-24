@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, type IpcMainInvokeEvent } from 'electron';
 import { findBundle, freePort, install, probe, Tunnel, validateTarget, type SshTarget } from './remote.js';
-import { atomicJSON, message, readConfig, record, text } from './state.js';
+import { atomicJSON, LOCAL_HOSTS, localUrl, message, readConfig, record, text } from './state.js';
 import { BUILD_ID } from './version.js';
 import { ensureLocal } from './local-backend.js';
 
@@ -86,8 +86,8 @@ async function credentials(profile: Profile): Promise<{ url: string; token: stri
   }
   if (profile.kind === 'local' && profile.configPath) {
     const config = readConfig(profile.configPath);
-    if (!['127.0.0.1', 'localhost'].includes(config.host)) throw new Error('An App-managed service must listen on loopback');
-    return { url: 'http://' + config.host + ':' + config.port, token: config.token };
+    if (!LOCAL_HOSTS.includes(config.host)) throw new Error('A local backend must listen on loopback or 0.0.0.0');
+    return { url: localUrl(config), token: config.token };
   }
   if (!profile.encryptedToken || !safeStorage.isEncryptionAvailable()) throw new Error('Backend credentials are unavailable');
   return { url: profile.url, token: safeStorage.decryptString(Buffer.from(profile.encryptedToken, 'base64')) };
@@ -146,7 +146,7 @@ async function setupLocal(): Promise<string> {
   if (existing) return existing.id;
   const config = readConfig(configPath);
   const id = randomUUID();
-  profiles = [{ id, kind: 'local', name: '本机', url: 'http://' + config.host + ':' + config.port, configPath }, ...profiles];
+  profiles = [{ id, kind: 'local', name: '本机', url: localUrl(config), configPath }, ...profiles];
   persist();
   return id;
 }
@@ -221,11 +221,11 @@ function register(): void {
     const path = result.filePaths[0];
     if (result.canceled || !path) return null;
     const config = readConfig(path);
-    if (!['127.0.0.1', 'localhost'].includes(config.host)) throw new Error('An App-managed service must listen on loopback');
+    if (!LOCAL_HOSTS.includes(config.host)) throw new Error('A local backend must listen on loopback or 0.0.0.0');
     const existing = profiles.find(profile => profile.configPath === path);
     if (existing) return existing.id;
     const id = randomUUID();
-    profiles = [...profiles, { id, kind: 'local', name: 'This computer · ' + config.port, url: 'http://' + config.host + ':' + config.port, configPath: path }];
+    profiles = [...profiles, { id, kind: 'local', name: 'This computer · ' + config.port, url: localUrl(config), configPath: path }];
     persist();
     return id;
   });
@@ -262,6 +262,15 @@ function register(): void {
     guard(event);
     const profile = findProfile(id);
     if (profile.kind !== 'local' || !profile.configPath) throw new Error('只能重启本机后端');
+    return connect(profile, true);
+  });
+  // Phones on the LAN: the local backend listens on every interface (or loopback again), then restarts.
+  ipcMain.handle('backends:setLan', async (event, id: unknown, enabled: unknown) => {
+    guard(event);
+    const profile = findProfile(id);
+    if (profile.kind !== 'local' || !profile.configPath) throw new Error('只有本机后端可以开放局域网访问');
+    const raw = record(JSON.parse(readFileSync(profile.configPath, 'utf8')));
+    atomicJSON(profile.configPath, { ...raw, host: enabled === true ? '0.0.0.0' : '127.0.0.1' });
     return connect(profile, true);
   });
   ipcMain.handle('backends:request', (event, input: unknown) => {

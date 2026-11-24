@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { freePort } from './remote.js';
-import { atomicJSON, readConfig, record, text } from './state.js';
+import { atomicJSON, localUrl, readConfig, record, text } from './state.js';
 
 export type LocalState = { kind: 'ours'; health: unknown } | { kind: 'stale'; pid?: number; build: string } | { kind: 'foreign' } | { kind: 'down' };
 
@@ -66,7 +66,7 @@ export interface LocalBackend {
 export async function ensureLocal(options: LocalBackend): Promise<unknown> {
   const path = options.configPath;
   let config = readConfig(path);
-  let url = 'http://' + config.host + ':' + config.port;
+  let url = localUrl(config);
   let state = await probeLocal(url, config.token, options.version);
   if (state.kind === 'ours' && !options.restart) return state.health;
   if (state.kind === 'ours' || state.kind === 'stale') {
@@ -80,7 +80,7 @@ export async function ensureLocal(options: LocalBackend): Promise<unknown> {
     const raw = record(JSON.parse(readFileSync(path, 'utf8')));
     atomicJSON(path, { ...raw, port: await freePort() });
     config = readConfig(path);
-    url = 'http://' + config.host + ':' + config.port;
+    url = localUrl(config);
   }
   const log = openSync(options.logPath, 'a');
   const [program, ...args] = options.command;
