@@ -274,6 +274,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       await runner.launch(turn);
       return publicTurn(turn);
     }],
+    ['GET', /^turns\/([\w-]+)\/tools\/(.+)$/, async (_request, [id, toolId]) => {
+      const turn = store.turn(identifier(id));
+      const tool = turn?.tools.find(item => item.id === decodeURIComponent(toolId as string));
+      if (!tool) throw new HttpError(404, '找不到这次工具调用');
+      return { id: tool.id, title: tool.title, status: tool.status, input: tool.input ?? {}, output: tool.output ?? '' };
+    }],
     ['POST', /^turns\/([\w-]+)\/(permission|cancel)$/, async (request, [id, action]) => {
       const turn = store.turn(identifier(id));
       if (!turn) throw new HttpError(404, 'Turn not found');
@@ -339,7 +345,11 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   return server;
 }
 
-function publicTurn(turn: Turn): Omit<Turn, 'resumeId' | 'controlToken' | 'logOffset' | 'launchedAt' | 'cancelRequested'> {
+/** A turn for the client: no control fields, and tool input/output only as a flag (fetched per tool). */
+function publicTurn(turn: Turn): Record<string, unknown> {
   const { resumeId: _resume, controlToken: _token, logOffset: _offset, launchedAt: _launched, cancelRequested: _cancel, ...visible } = turn;
-  return visible;
+  return {
+    ...visible,
+    tools: turn.tools.map(({ input, output, ...tool }) => ({ ...tool, hasDetail: Boolean(output) || Object.keys(record(input)).length > 0 })),
+  };
 }

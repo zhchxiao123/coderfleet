@@ -30,20 +30,78 @@
     return h('span.tool-glyph.' + (TOOL_STATES[status]?.className || 'completed'), CF.icon(icon, 12));
   }
 
-  function toolRow(tool) {
+  const openTools = new Set();
+  const toolDetails = new Map(); // turnId:toolId → { status, data } once fetched
+
+  /** The input of a tool call, shown the way a person checks it. */
+  function toolInput(input) {
+    const raw = input && typeof input.rawInput === 'object' && input.rawInput ? input.rawInput : input || {};
+    const file = raw.file_path || raw.filePath || raw.path || raw.notebook_path;
+    const fileLine = typeof file === 'string' ? h('div.file', CF.icon('folder', 12), CF.projectPath(file)) : null;
+    const command = Array.isArray(raw.command) ? raw.command.join(' ') : raw.command || raw.cmd;
+    if (typeof command === 'string' && command) return h('pre.command', command);
+    if (typeof raw.old_string === 'string' || typeof raw.new_string === 'string') {
+      const lines = (value, kind) => String(value || '').split('\n').map(line => h('div.' + kind, line || ' '));
+      return [fileLine, h('div.diff', lines(raw.old_string, 'del'), lines(raw.new_string, 'add'))];
+    }
+    if (typeof raw.content === 'string' && fileLine) return [fileLine, h('div.diff', raw.content.split('\n').map(line => h('div.add', line || ' ')))];
+    // The path is already shown above; the rest of the input as JSON.
+    const rest = Object.fromEntries(Object.entries(raw).filter(([key]) => !(fileLine && ['file_path', 'filePath', 'path', 'notebook_path'].includes(key))));
+    if (!Object.keys(rest).length) return fileLine;
+    return [fileLine, h('pre', JSON.stringify(rest, null, 2))];
+  }
+
+  function toolPanel(turn, tool) {
+    const key = turn.id + ':' + tool.id;
+    const panel = h('div.tool-panel', h('div.section', h('div.empty-note', '正在读取…')));
+    const show = data => {
+      const input = toolInput(data.input);
+      const output = typeof data.output === 'string' ? data.output : JSON.stringify(data.output, null, 2);
+      const empty = tool.status === 'running' ? '还在运行，结束后显示输出。'
+        : tool.status === 'waiting' ? '等你确认后才会运行。'
+          : tool.status === 'denied' ? '已拒绝，没有运行。' : '没有输出。';
+      panel.replaceChildren(
+        input ? h('div.section', h('div.label', '输入'), input) : null,
+        h('div.section', h('div.label', tool.status === 'failed' ? '错误' : '输出'),
+          output ? h('pre' + (tool.status === 'failed' ? '.error' : ''), output) : h('div.empty-note', empty)));
+    };
+    const cached = toolDetails.get(key);
+    if (cached && cached.status === tool.status) show(cached.data);
+    else {
+      CF.api('GET', 'turns/' + turn.id + '/tools/' + encodeURIComponent(tool.id)).then(data => {
+        toolDetails.set(key, { status: tool.status, data });
+        show(data);
+      }).catch(error => panel.replaceChildren(h('div.section', h('div.empty-note', '读取失败：' + (error?.message || error)))));
+    }
+    return panel;
+  }
+
+  function toolRow(turn, tool) {
     const state = TOOL_STATES[tool.status] || TOOL_STATES.running;
     const detail = CF.projectPath(tool.detail);
-    return h('div.flow-row.tool-' + state.className, { title: tool.detail ? tool.title + ' · ' + tool.detail : tool.title },
-      toolGlyph(tool.status), h('span.label', tool.title),
+    const key = turn.id + ':' + tool.id;
+    const open = openTools.has(key);
+    const node = h('div.tool' + (open ? '.open' : ''));
+    const row = h('button.flow-row.tool-toggle.tool-' + state.className, {
+      title: tool.detail ? tool.title + ' · ' + tool.detail : tool.title, 'aria-expanded': String(open),
+      on: { click: () => {
+        open ? openTools.delete(key) : openTools.add(key);
+        node.replaceWith(toolRow(turn, tool));
+      } },
+    }, toolGlyph(tool.status), h('span.label', tool.title),
       detail ? h('span.detail', detail) : null,
-      tool.status === 'completed' ? null : h('span.tool-state', state.label));
+      tool.status === 'completed' ? null : h('span.tool-state', state.label),
+      h('span.chev', CF.icon('chevron', 11)));
+    node.append(row);
+    if (open) node.append(toolPanel(turn, tool));
+    return node;
   }
 
   /** Tool calls as one-line flow rows; a settled group of more than three folds into a summary row. */
   function toolFlow(turn, tools = turn.tools, key = turn.id) {
     if (!tools.length) return null;
     const settled = tools.every(tool => SETTLED.has(tool.status));
-    if (!settled || tools.length <= 3) return h('div.flow', tools.map(toolRow));
+    if (!settled || tools.length <= 3) return h('div.flow', tools.map(tool => toolRow(turn, tool)));
     const counts = {};
     for (const tool of tools) counts[tool.status] = (counts[tool.status] || 0) + 1;
     const extra = ['failed', 'denied', 'interrupted', 'unknown'].filter(status => counts[status])
@@ -56,7 +114,7 @@
     } } }, toolGlyph(counts.failed ? 'failed' : 'completed'), h('span.label', '使用了 ' + tools.length + ' 个工具'), extra,
       h('span.chev', CF.icon('chevron', 11)));
     flow.append(summary);
-    if (open) flow.append(h('div.flow-children', tools.map(toolRow)));
+    if (open) flow.append(h('div.flow-children', tools.map(tool => toolRow(turn, tool))));
     return flow;
   }
 

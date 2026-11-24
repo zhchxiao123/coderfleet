@@ -28,6 +28,19 @@ try {
   // The latest conversation opens first: its build is still running after a failed test.
   await page.waitForSelector('.tool-running');
   await shot('chat-tools');
+  // Expand a finished tool call to show its input and output.
+  await page.click('.tool-toggle.tool-completed >> nth=0').catch(async () => {
+    await page.click('.flow > button.flow-row >> nth=0');
+    await page.click('.tool-toggle >> nth=0');
+  });
+  await page.waitForSelector('.tool-panel .label');
+  await shot('chat-tool-open');
+  // Neither the sidebar nor the transcript may scroll sideways.
+  const overflow = await page.evaluate(() => ['.sidebar-scroll', '.transcript'].map(selector => {
+    const node = document.querySelector(selector);
+    return node && node.scrollWidth > node.clientWidth + 1 ? selector + ' ' + node.scrollWidth + '>' + node.clientWidth : null;
+  }).filter(Boolean));
+  if (overflow.length) errors.push('horizontal overflow: ' + overflow.join(', '));
   await page.click('.conv-item:has-text("请帮我梳理")');
   await page.waitForSelector('.approval');
   await shot('chat-approval');

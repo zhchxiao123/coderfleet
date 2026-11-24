@@ -84,6 +84,9 @@ export interface Tool {
   readonly status: ToolStatus;
   /** A short line from the tool input: command, path, pattern or query. */
   readonly detail?: string;
+  /** Full input and output, served on demand (GET /v1/turns/:id/tools/:toolId), capped in size. */
+  readonly input?: unknown;
+  readonly output?: string;
 }
 
 export type Block = { kind: 'text'; text: string } | { kind: 'tool'; id: string };

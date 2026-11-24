@@ -10,7 +10,7 @@ const result = (id, isError) => ({ type: 'user', message: { content: [{ type: 't
 test('a tool call moves through running, waiting, approved and completed', () => {
   const value = turn();
   applyEvent(value, use('a', 'Bash', { command: 'npm   test' }));
-  assert.deepEqual(value.tools, [{ id: 'a', title: 'Bash', status: 'running', detail: 'npm test' }]);
+  assert.deepEqual(value.tools, [{ id: 'a', title: 'Bash', status: 'running', detail: 'npm test', input: { command: 'npm   test' } }]);
   applyEvent(value, system('coderfleet_permission_pending', { tool_call_id: 'a', tool_name: 'Bash', tool_input: {} }));
   assert.equal(value.tools[0].status, 'waiting');
   applyEvent(value, system('coderfleet_permission_closed', { tool_call_id: 'a', status: 'approved' }));
@@ -54,4 +54,15 @@ test('text and tool calls keep the order they happened in', () => {
     { kind: 'text', text: 'Now building.' }, { kind: 'tool', id: 'b' },
   ]);
   assert.equal(value.answer, 'Checking first.Now building.');
+});
+
+test('a tool call keeps its input and output for the detail panel', () => {
+  const value = turn();
+  applyEvent(value, use('a', 'Bash', { command: 'ls' }));
+  applyEvent(value, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'a', content: [{ type: 'text', text: 'a.ts\nb.ts' }] }] } });
+  assert.deepEqual(value.tools[0].input, { command: 'ls' });
+  assert.equal(value.tools[0].output, 'a.ts\nb.ts');
+  applyEvent(value, use('b', 'Read', { file_path: 'big' }));
+  applyEvent(value, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', content: 'x'.repeat(200_000) }] } });
+  assert.ok(value.tools[1].output.length < 70_000, 'long output is capped');
 });

@@ -154,7 +154,7 @@
     if (item.status === 'queued') return h('span.dot', { title: '在原服务里排队' });
     if (['starting', 'running'].includes(item.status)) return h('span.dot.busy', { title: '进行中' });
     if (item.status === 'failed') return h('span.dot.failed', { title: '失败' });
-    return h('span.meta', CF.relative(item.updatedAt));
+    return null;
   }
 
   function renderConversations() {
@@ -167,12 +167,12 @@
       const folded = collapsed.has(project.id) && !filter;
       const showAll = expanded.has(project.id) || Boolean(filter);
       const shown = showAll ? items : items.slice(0, 6);
-      const add = h('button.icon-btn.add', { title: '新对话', on: { click: event => { event.stopPropagation(); CF.app.go({ name: 'chat', projectId: project.id }); } } }, CF.icon('plus', 14));
+      const add = h('button.icon-btn.add', { title: '在 ' + project.name + ' 新建对话', on: { click: event => { event.stopPropagation(); CF.app.go({ name: 'chat', projectId: project.id }); } } }, CF.icon('plus', 14));
       const head = h('div.project-group-head', {
-        role: 'button', tabIndex: 0, title: project.name + ' · ' + CF.stateText(project.state),
+        role: 'button', tabIndex: 0, title: project.name + ' · ' + project.typeLabel + ' · ' + CF.stateText(project.state),
         on: { click: () => { folded ? collapsed.delete(project.id) : collapsed.add(project.id); renderConversations(); } },
       }, h('span.chev', CF.icon('down', 12)), h('span.name', project.name),
-        project.state === 'running' ? null : h('span.dot', { title: CF.stateText(project.state) }), add, h('span.count', String(all.length)));
+        project.state === 'running' ? null : h('span.dot', { title: CF.stateText(project.state) }), add);
       const newItem = view.name === 'chat' && !view.conversationId && view.projectId === project.id
         ? h('button.conv-item.selected', h('span.title', '新对话')) : null;
       return [h('div.project-group' + (folded ? '.collapsed' : ''), head, folded ? null : h('div.conv-list',
@@ -181,7 +181,7 @@
           title: item.name, on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
         }, h('span.title', item.name), conversationMeta(item))),
         !items.length && !newItem ? h('button.conv-more', { on: { click: () => CF.app.go({ name: 'chat', projectId: project.id }) } }, '开始第一个对话') : null,
-        items.length > 6 && !filter ? h('button.conv-more', { on: { click: () => { showAll ? expanded.delete(project.id) : expanded.add(project.id); renderConversations(); } } }, showAll ? '收起' : '还有 ' + (items.length - 6) + ' 个') : null))];
+        items.length > 6 && !filter ? h('button.conv-more', { on: { click: () => { showAll ? expanded.delete(project.id) : expanded.add(project.id); renderConversations(); } } }, showAll ? '收起' : '显示更多') : null))];
     });
     conversationsHost.replaceChildren(groups.length ? h('div', groups)
       : h('div.sidebar-empty', filter ? '没有匹配的对话。' : connected ? '添加 Claude、Codex 或 Antigravity 项目后，在这里开始对话。' : '连接后端后显示对话。'));
@@ -204,17 +204,17 @@
         CF.app.go({ name: 'chat', conversationId: next.id, projectId: next.projectId });
       } },
     }, h('span.dot.waiting'), h('strong', waiting.length + ' 个等你确认'), h('span.name', waiting[0].name), CF.icon('chevron', 12)) : null;
-    const newChat = h('button.new-chat', { title: '新对话', 'aria-label': '新对话', on: { click: () => {
+    const newChat = h('button.new-chat', { title: '新对话', on: { click: () => {
       const chatProjects = projects.filter(item => item.chat && item.active);
       const current = chatProjects.find(item => item.id === view.projectId);
       if (current || chatProjects.length === 1) { CF.app.go({ name: 'chat', projectId: (current ?? chatProjects[0]).id }); return; }
       if (!chatProjects.length) { CF.app.go({ name: 'projects' }); CF.toast('先新建一个项目'); return; }
       CF.menu(newChat, chatProjects.map(item => ({ label: item.name + ' · ' + item.typeLabel, icon: 'folder', run: () => CF.app.go({ name: 'chat', projectId: item.id }) })));
-    } } }, CF.icon('compose', 16));
+    } } }, CF.icon('compose', 15), h('span.label', '新对话'));
     const backendButton = h('button.backend-row', { title: '切换后端', on: { click: () => CF.menu(backendButton, [
       ...profiles.map(profile => ({ label: (profile.id === backendId ? '✓ ' : '　') + profile.name, run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
       '-',
-      { label: '管理连接…', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
+      { label: '设置与连接…', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
     ]) } }, h('span.backend-avatar', (current?.name || '?').slice(0, 1)),
       h('span.names', h('strong', current?.name || '未连接'), h('small', connected ? (current?.kind === 'local' ? '这台电脑' : current?.kind === 'ssh' ? '远程 · ' + current.host : '远端') + ' · ' + running + ' 个容器运行中' : '未连接')),
       CF.icon('down', 13));
@@ -223,12 +223,12 @@
     const typing = document.activeElement === search ? [search.selectionStart, search.selectionEnd] : null;
     sidebar.replaceChildren(
       h('div.sidebar-top',
-        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet')), newChat),
+        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet'))),
+        newChat,
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),
       attention,
       h('div.sidebar-scroll',
-        h('div.sidebar-label', '工作台'),
-        nav('projects', 'folder', '项目', connected ? projects.length : undefined), nav('accounts', 'user', '账号', connected ? accounts.length : undefined), nav('settings', 'gear', '设置'),
+        h('nav.sidebar-nav', nav('projects', 'folder', '项目', connected ? projects.length : undefined), nav('accounts', 'user', '账号', connected ? accounts.length : undefined), nav('settings', 'gear', '设置')),
         h('div.sidebar-label', '对话'),
         conversationsHost),
       h('div.sidebar-foot', backendButton),

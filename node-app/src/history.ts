@@ -9,7 +9,7 @@ type Event = RecordValue;
 
 const delta = (value: string): Event => ({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: value } } });
 const toolUse = (id: string, name: string, input: unknown): Event => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input: record(input) }] } });
-const toolResult = (id: string, isError: boolean): Event => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError }] } });
+const toolResult = (id: string, isError: boolean, content: unknown = ''): Event => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content }] } });
 const session = (id: string): Event => ({ type: 'system', subtype: 'coderfleet_session', session_id: id, history: true });
 
 function args(value: unknown): RecordValue {
@@ -44,7 +44,7 @@ function codex(): Converter {
           : value.type === 'web_search' ? { query: value.query } : { arguments: value.arguments };
         const events: Event[] = [];
         if (!started.has(id)) { started.add(id); events.push(toolUse(id, name, input)); }
-        if (completed) events.push(toolResult(id, value.status === 'failed' || (typeof value.exit_code === 'number' && value.exit_code !== 0)));
+        if (completed) events.push(toolResult(id, value.status === 'failed' || (typeof value.exit_code === 'number' && value.exit_code !== 0), value.aggregated_output ?? value.result ?? value.error ?? ''));
         return events;
       }
       default: return [];
@@ -57,7 +57,7 @@ function codex(): Converter {
       if (type === 'item.started' || type === 'item.completed') return item(record(event.item), type === 'item.completed');
       // The flat tool_call / tool_result pair from older Codex versions.
       if (type === 'tool_call') return [toolUse(text(event.id), text(event.name), args(event.arguments ?? event.input))];
-      if (type === 'tool_result') return [toolResult(text(event.tool_call_id), event.is_error === true)];
+      if (type === 'tool_result') return [toolResult(text(event.tool_call_id), event.is_error === true, event.result ?? event.output ?? '')];
       if (type === 'message' && event.role === 'assistant') return entries(event.content).filter(block => block.type === 'text').map(block => delta(text(block.text)));
       if (type === 'turn.failed') return [{ type: 'error', message: text(record(event.error).message) || 'Codex turn failed' }];
       return [];
@@ -78,7 +78,7 @@ function opencode(): Converter {
         const call = text(part.callID) || text(part.id);
         const state = record(part.state);
         if (!started.has(call)) { started.add(call); events.push(toolUse(call, text(part.tool) || 'tool', state.input)); }
-        if (state.status === 'completed' || state.status === 'error') events.push(toolResult(call, state.status === 'error'));
+        if (state.status === 'completed' || state.status === 'error') events.push(toolResult(call, state.status === 'error', state.output ?? state.error ?? ''));
       } else if (event.type === 'text' && part.type === 'text' && text(part.text)) events.push(delta(text(part.text)));
       else if (event.role === 'assistant' || event.type === 'message' || event.type === 'assistant') {
         if (typeof event.content === 'string') events.push(delta(event.content));
@@ -94,7 +94,7 @@ function kimi(): Converter {
     line: event => {
       if (event.role === 'meta' && event.type === 'session.resume_hint' && text(event.session_id)) return [session(text(event.session_id))];
       // Kimi's tool results carry no error flag.
-      if (event.role === 'tool') return [toolResult(text(event.tool_call_id), false)];
+      if (event.role === 'tool') return [toolResult(text(event.tool_call_id), false, event.content ?? '')];
       if (event.role !== 'assistant') return [];
       const events: Event[] = [];
       if (typeof event.content === 'string' && event.content) events.push(delta(event.content));
@@ -129,7 +129,10 @@ function pi(): Converter {
     line: event => {
       if (event.type === 'session' && text(event.id)) return [session(text(event.id))];
       if (event.type === 'tool_execution_start') return [toolUse(text(event.toolCallId), text(event.toolName), event.args)];
-      if (event.type === 'tool_execution_end') return [toolResult(text(event.toolCallId), event.isError === true)];
+      if (event.type === 'tool_execution_end') {
+        const result = record(event.result);
+        return [toolResult(text(event.toolCallId), event.isError === true, typeof event.result === 'string' ? event.result : result.content ?? '')];
+      }
       if (event.type !== 'message_end' || record(event.message).role !== 'assistant') return [];
       return entries(record(event.message).content).filter(block => block.type === 'text').map(block => delta(text(block.text)));
     },

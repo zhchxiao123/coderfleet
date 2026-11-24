@@ -99,6 +99,22 @@ export function toolDetail(input: unknown): string {
   return '';
 }
 
+const MAX_TOOL_OUTPUT = 64 * 1024;
+const MAX_TOOL_INPUT = 16 * 1024;
+
+/** A tool result's text: a string, or the text blocks of a content array (images are skipped). */
+export function resultText(content: unknown): string {
+  const value = typeof content === 'string' ? content
+    : Array.isArray(content) ? content.map(block => record(block).type === 'text' || typeof record(block).text === 'string' ? text(record(block).text) : '').filter(Boolean).join('\n')
+      : content && typeof content === 'object' ? JSON.stringify(content, null, 2) : '';
+  return value.length > MAX_TOOL_OUTPUT ? value.slice(0, MAX_TOOL_OUTPUT) + '\n…（输出过长，已截断）' : value;
+}
+
+function capInput(input: unknown): unknown {
+  const serialized = JSON.stringify(input ?? {});
+  return serialized.length > MAX_TOOL_INPUT ? { truncated: serialized.slice(0, MAX_TOOL_INPUT) + '…' } : input ?? {};
+}
+
 function setTool(turn: Turn, id: string, status: ToolStatus): boolean {
   const index = turn.tools.findIndex(tool => tool.id === id);
   const current = turn.tools[index];
@@ -177,11 +193,17 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       if (item.type === 'tool_use' && text(item.id) && !turn.tools.some(tool => tool.id === item.id)) {
         // The approval can arrive before the tool call itself.
         const status: ToolStatus = turn.permission?.toolId === item.id ? 'waiting' : 'running';
-        turn.tools.push({ id: text(item.id), title: text(item.name) || 'Tool', status, detail: toolDetail(item.input) });
+        turn.tools.push({ id: text(item.id), title: text(item.name) || 'Tool', status, detail: toolDetail(item.input), input: capInput(item.input) });
         (turn.blocks ??= []).push({ kind: 'tool', id: text(item.id) });
         changed = true;
       } else if (item.type === 'tool_result') {
         const current = turn.tools.find(tool => tool.id === item.tool_use_id);
+        const output = resultText(item.content);
+        if (current && output) {
+          const index = turn.tools.indexOf(current);
+          turn.tools[index] = { ...current, output };
+          changed = true;
+        }
         // A rejected call reports an error result; it stays "denied", not "failed".
         if (current && current.status !== 'denied') changed = setTool(turn, current.id, item.is_error ? 'failed' : 'completed') || changed;
       }

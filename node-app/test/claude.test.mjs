@@ -30,7 +30,10 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     assert.equal((await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, decision: 'allow' })).status, 200);
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'approved turn');
     assert.equal(turn.answer, 'ran');
-    assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status, tool.detail]), [['Bash', 'completed', 'ls']]);
+    assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status, tool.detail, tool.hasDetail]), [['Bash', 'completed', 'ls', true]]);
+    assert.equal(turn.tools[0].output, undefined, 'turn lists stay small');
+    const detail = (await env.get('turns/' + turn.id + '/tools/' + encodeURIComponent(turn.tools[0].id))).body;
+    assert.deepEqual([detail.input, detail.output, detail.status], [{ command: 'ls' }, 'x', 'completed']);
 
     await env.post('conversations/' + conversation + '/turns', { prompt: 'tool' });
     turn = await until(() => lastTurn(env, conversation), value => value.permission, 'second permission');
