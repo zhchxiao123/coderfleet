@@ -299,20 +299,66 @@
     void poll();
   };
 
-  /** Waits for an operation and reports it with a toast that can open the log. */
-  CF.trackOperation = async (operation, label, refresh) => {
-    for (;;) {
-      await new Promise(resolve => setTimeout(resolve, 800));
-      let current;
-      try { current = await CF.get('operations/' + operation.id); } catch { return; }
-      refresh?.();
-      if (current.status === 'running') continue;
-      const action = { label: '日志', run: () => CF.operationLog(operation, label) };
-      if (current.status === 'succeeded') CF.toast(label + '：完成', { action });
-      else CF.toast(label + '：失败', { error: true, action, timeout: 8000 });
-      refresh?.();
-      return current;
-    }
+  /** How an operation reads in lists and notifications. */
+  CF.operationLabel = operation => operation.kind === 'build' ? '构建镜像'
+    : ({ start: '启动', stop: '停止', restart: '重启', remove: '删除' }[operation.kind] || operation.kind) + ' ' + operation.target;
+  CF.operationProgress = operation => operation.status !== 'running' ? { succeeded: '已完成', failed: '失败' }[operation.status]
+    : operation.step ? '第 ' + operation.step.current + '/' + operation.step.total + ' 步' : '进行中';
+
+  /**
+   * Background operations of the connected backend (image builds, container
+   * starts…). Polls while any runs, reports each one that finishes with a toast
+   * and, when the window is in the background, a system notification.
+   */
+  CF.activity = (() => {
+    let operations = [];
+    let backend = '';
+    let timer = 0;
+    const listeners = new Set();
+    const waiters = new Map(); // operation id → resolve(final operation)
+    const notify = (title, body) => {
+      if (document.hasFocus() || typeof Notification === 'undefined') return;
+      try { const note = new Notification(title, { body, silent: false }); note.onclick = () => window.focus(); } catch { /* notifications unavailable */ }
+    };
+    const poll = async () => {
+      clearTimeout(timer);
+      const current = CF.state.backendId;
+      if (!current || !CF.state.connected) { timer = setTimeout(poll, 5000); return; }
+      let next;
+      try { next = await CF.get('operations'); } catch { timer = setTimeout(poll, 5000); return; }
+      if (current !== CF.state.backendId) return;
+      const before = backend === current ? new Map(operations.map(item => [item.id, item.status])) : null;
+      backend = current;
+      operations = next;
+      for (const operation of next) {
+        if (operation.status === 'running') continue;
+        waiters.get(operation.id)?.(operation);
+        waiters.delete(operation.id);
+        // Report what finished since the last poll (not what was already done when we connected).
+        if (before?.get(operation.id) !== 'running') continue;
+        const label = CF.operationLabel(operation);
+        const action = { label: '日志', run: () => CF.operationLog(operation, label) };
+        if (operation.status === 'succeeded') { CF.toast(label + '：完成', { action }); notify('CoderFleet · ' + label + '完成', operation.lastLine || ''); }
+        else { CF.toast(label + '：失败', { error: true, action, timeout: 10000 }); notify('CoderFleet · ' + label + '失败', operation.error || operation.lastLine || ''); }
+      }
+      for (const listener of listeners) listener(operations);
+      timer = setTimeout(poll, operations.some(item => item.status === 'running') ? 1500 : 15000);
+    };
+    return {
+      list: () => (backend === CF.state.backendId ? operations : []),
+      running: () => (backend === CF.state.backendId ? operations.filter(item => item.status === 'running') : []),
+      subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      /** Poll now (an operation just started, or the backend changed). */
+      refresh: () => { void poll(); },
+      /** Resolves with the operation once it has finished. */
+      wait: operation => new Promise(resolve => { waiters.set(operation.id, resolve); void poll(); }),
+    };
+  })();
+
+  /** Waits for an operation; the activity watcher reports how it ended. */
+  CF.trackOperation = async (operation, _label, refresh) => {
+    const timer = setInterval(() => refresh?.(), 2000);
+    try { return await CF.activity.wait(operation); } finally { clearInterval(timer); refresh?.(); }
   };
 
   /** A path short enough for a row: the last segments, with the full path as tooltip text. */

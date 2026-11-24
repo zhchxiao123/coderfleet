@@ -814,3 +814,17 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
   background: linear-gradient(135deg, #e7ecff, #cfd8ff); color: #3d4fd6;
 }
 .menu.wide { min-width: 0; }
+
+/* ── Background operations above the backend row ───── */
+.activity-host:empty { display: none; }
+.activity-row {
+  position: relative; display: flex; align-items: center; gap: 10px; width: 100%; margin-bottom: 6px; padding: 8px 10px; overflow: hidden;
+  border: 0; border-radius: 10px; background: var(--accent-soft); color: var(--text); text-align: left;
+}
+.activity-row:hover { filter: brightness(0.98); }
+.activity-row .spinner { flex: none; }
+.activity-text { flex: 1; min-width: 0; display: grid; line-height: 1.3; }
+.activity-text strong { font-size: 12.5px; font-weight: 620; }
+.activity-text small { font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.activity-bar span { display: block; height: 100%; background: var(--accent); transition: width 0.4s ease; }

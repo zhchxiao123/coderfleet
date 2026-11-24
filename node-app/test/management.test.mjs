@@ -25,9 +25,15 @@ test('the App initializes the workspace and manages accounts, projects, containe
     assert.match(readFileSync(join(env.workspace, 'config.conf'), 'utf8'), /^PROXY_HTTP_PORT=10808$/m);
     assert.equal((await env.put('settings', { PROXY_HOST: 'a b' })).status, 400);
 
-    // Image build runs as an operation.
+    // Image build runs as a background operation; asking again returns the running one.
+    process.env.FAKE_BUILD_STEPS = '4';
     const build = (await env.post('image/build')).body;
+    assert.equal((await env.post('image/build')).body.id, build.id);
+    const listed = await until(() => env.get('operations'), value => value.body[0]?.step, 'build step');
+    assert.deepEqual([listed.body[0].id, listed.body[0].status, listed.body[0].output], [build.id, 'running', undefined]);
+    assert.equal(listed.body[0].step.total, 4);
     assert.equal((await operation(env, build.id)).body.status, 'succeeded');
+    delete process.env.FAKE_BUILD_STEPS;
     assert.match((await env.get('operations/' + build.id)).body.output, /--tag coderfleet:latest/);
 
     // Accounts.

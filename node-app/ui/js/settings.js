@@ -13,12 +13,12 @@
     IMAGE_TAG: ['镜像标签', ''],
   };
 
+  /** Starts a build, or shows the running one: the build continues in the background either way. */
   async function build(button) {
     const operation = await CF.busy(button, () => CF.api('POST', 'image/build'));
-    if (operation) {
-      CF.operationLog(operation, '构建镜像');
-      void CF.trackOperation(operation, '构建镜像', () => undefined).then(() => CF.app.refreshOverview());
-    }
+    if (!operation) return;
+    CF.operationLog(operation, '构建镜像');
+    CF.activity.refresh();
   }
 
   async function init(button) {
@@ -110,22 +110,47 @@
       if (!current || !overview) return;
 
       // Workspace & image
-      const image = overview.image;
+      let image = overview.image;
+      // These parts follow background operations live; the rest of the page (and what is typed in it) stays.
+      const buildButton = overview.initialized && overview.docker ? h('button.btn.small', { on: { click: event => build(event.currentTarget) } }) : null;
+      const imageValue = h('dd');
+      const operationsValue = h('dd');
+      const drawImage = () => imageValue.replaceChildren(...(image ? [h('span.mono', image.name), ' · ', image.exists ? '已构建' : '未构建'] : ['—']));
+      let lastBuild = '';
+      const drawOperations = operations => {
+        if (!page.isConnected && lastBuild) return false;
+        const building = operations.find(item => item.kind === 'build' && item.status === 'running');
+        if (buildButton) buildButton.replaceChildren(...(building
+          ? [h('span.spinner'), '构建中 · ' + CF.operationProgress(building)]
+          : [CF.icon('box', 13), image?.exists ? '重新构建镜像' : '构建镜像']));
+        // A build just finished: read the image state again.
+        const latest = operations.find(item => item.kind === 'build');
+        const key = latest ? latest.id + latest.status : '';
+        if (lastBuild && key !== lastBuild && latest?.status !== 'running') {
+          void CF.get('overview').then(next => { CF.state.overview = next; image = next.image; drawImage(); }).catch(() => undefined);
+        }
+        lastBuild = key || 'none';
+        operationsValue.replaceChildren(operations.length
+          ? h('div', { style: 'display:grid;gap:4px' }, operations.slice(0, 5).map(operation => h('button.btn.ghost.small', {
+            style: 'justify-content:flex-start', on: { click: () => CF.operationLog(operation, CF.operationLabel(operation)) },
+          }, operation.status === 'running' ? h('span.spinner') : h('span.dot' + (operation.status === 'failed' ? '.failed' : '.running')),
+            CF.operationLabel(operation), h('span', { style: 'color:var(--text-3)' }, operation.status === 'running' ? CF.operationProgress(operation) : CF.relative(operation.startedAt)))))
+          : '无');
+        return true;
+      };
+      drawImage();
+      drawOperations(CF.activity.list().length ? CF.activity.list() : overview.operations);
+      const unsubscribe = CF.activity.subscribe(operations => { if (!drawOperations(operations)) unsubscribe(); });
       page.append(h('div.card',
         h('div.card-head', h('h2', '工作区与镜像'),
           h('div.btn-row',
             overview.initialized ? null : h('button.btn.small.primary', { on: { click: event => init(event.currentTarget) } }, '初始化工作区'),
-            overview.initialized && overview.docker ? h('button.btn.small', { on: { click: event => build(event.currentTarget) } }, CF.icon('box', 13), image?.exists ? '重新构建镜像' : '构建镜像') : null)),
+            buildButton)),
         h('div.card-body', h('dl.kv',
           h('dt', '工作区'), h('dd.mono', overview.workspace),
           h('dt', 'Docker'), h('dd', overview.docker ? '已连接 · ' + overview.docker : '未连接'),
-          h('dt', '镜像'), h('dd', image ? [h('span.mono', image.name), ' · ', image.exists ? '已构建' : '未构建'] : '—'),
-          h('dt', '最近操作'), h('dd', overview.operations.length
-            ? h('div', { style: 'display:grid;gap:4px' }, overview.operations.slice(0, 5).map(operation => h('button.btn.ghost.small', {
-              style: 'justify-content:flex-start', on: { click: () => CF.operationLog(operation, operation.target) },
-            }, h('span.dot' + (operation.status === 'failed' ? '.failed' : operation.status === 'running' ? '.busy' : '.running')),
-              { build: '构建', start: '启动', stop: '停止', restart: '重启', remove: '删除' }[operation.kind] + ' ' + operation.target, h('span', { style: 'color:var(--text-3)' }, CF.relative(operation.startedAt)))))
-            : '无')))));
+          h('dt', '镜像'), imageValue,
+          h('dt', '最近操作'), operationsValue))));
 
       // Proxy & containers
       if (!overview.initialized) return;

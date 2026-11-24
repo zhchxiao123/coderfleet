@@ -215,6 +215,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return readSettings(workspace);
     }],
     ['POST', /^image\/build$/, async () => lifecycle.build()],
+    // Background operations (image builds, container starts…) without their logs, newest first.
+    ['GET', /^operations$/, async () => lifecycle.recent()],
     ['GET', /^operations\/([\w-]+)$/, async (_request, [id]) => {
       const operation = lifecycle.operation(id as string);
       if (!operation) throw new HttpError(404, '操作不存在');

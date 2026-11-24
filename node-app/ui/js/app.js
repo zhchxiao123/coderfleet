@@ -81,6 +81,7 @@
       await CF.transport.connect(id);
       const [overview, projects, accounts, conversations] = await Promise.all(['overview', 'projects', 'accounts', 'conversations'].map(path => CF.get(path)));
       Object.assign(CF.state, { overview, projects, accounts, conversations, connected: true });
+      CF.activity.refresh();
     } catch (error) {
       const profile = CF.state.profiles.find(item => item.id === id);
       const [summary, ...details] = CF.errorText(error).split('\n\n');
@@ -147,6 +148,27 @@
   const collapsed = new Set();
   const search = h('input', { placeholder: '搜索对话…', spellcheck: false, 'aria-label': '搜索对话', on: { input: () => { filter = search.value.trim().toLowerCase(); renderConversations(); } } });
   const conversationsHost = h('div');
+  // Background operations (image builds, container starts): a progress row above the backend row.
+  const activityHost = h('div.activity-host');
+  const renderActivity = () => {
+    const running = CF.activity.running();
+    if (!running.length) { activityHost.replaceChildren(); return; }
+    const first = running[0];
+    const percent = first.step ? Math.round(first.step.current / first.step.total * 100) : null;
+    const row = h('button.activity-row', {
+      title: running.map(item => CF.operationLabel(item) + ' · ' + CF.operationProgress(item)).join('\n'),
+      on: { click: () => {
+        if (running.length === 1) { CF.operationLog(first, CF.operationLabel(first)); return; }
+        CF.menu(row, running.map(item => ({ label: CF.operationLabel(item), hint: CF.operationProgress(item) + (item.lastLine ? ' · ' + item.lastLine : ''), icon: 'box',
+          run: () => CF.operationLog(item, CF.operationLabel(item)) })), { matchWidth: true });
+      } },
+    }, h('span.spinner'),
+      h('span.activity-text', h('strong', running.length > 1 ? running.length + ' 个后台任务' : CF.operationLabel(first)),
+        h('small', running.length > 1 ? running.map(CF.operationLabel).join('、') : CF.operationProgress(first) + (first.lastLine ? ' · ' + first.lastLine : ''))),
+      percent === null ? null : h('span.activity-bar', h('span', { style: 'width:' + percent + '%' })));
+    activityHost.replaceChildren(row);
+  };
+  CF.activity.subscribe(renderActivity);
   // The sidebar can be hidden (⌘\ / Ctrl+\), remembered across launches.
   const appNode = document.getElementById('app');
   const setSidebar = open => {
@@ -280,7 +302,7 @@
         h('nav.sidebar-nav', nav('projects', 'folder', '项目', connected ? projects.length : undefined), nav('accounts', 'user', '账号', connected ? accounts.length : undefined), nav('settings', 'gear', '设置')),
         h('div.sidebar-label', '对话'),
         conversationsHost),
-      h('div.sidebar-foot', backendButton),
+      h('div.sidebar-foot', activityHost, backendButton),
     );
     if (typing) { search.focus(); search.setSelectionRange(typing[0], typing[1]); }
   }
