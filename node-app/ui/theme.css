@@ -888,3 +888,30 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .settings-bar + .view .page-inner { padding-top: 26px; }
 .app.sidebar-hidden .settings-bar + .view .page-inner { padding-top: 26px; }
 .menu .menu-trail { flex: none; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* ── Conversation map (left edge of the chat) ────────── */
+.chat { position: relative; }
+.turn-rail {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%); z-index: 4;
+  display: flex; flex-direction: column; gap: 0; max-height: 70%; padding: 6px 4px;
+}
+.turn-rail[hidden] { display: none; }
+.rail-dash { display: flex; align-items: center; height: 12px; min-height: 5px; flex: 0 1 12px; padding: 0 2px; border: 0; background: none; cursor: default; }
+.rail-dash span { display: block; width: 12px; height: 2px; border-radius: 2px; background: var(--line-strong); transition: width 0.15s ease, background 0.15s; }
+.turn-rail:hover .rail-dash span { width: 18px; }
+.rail-dash:hover span, .rail-dash:focus-visible span { width: 26px !important; background: var(--text-2); }
+.rail-dash.current span { width: 22px; background: var(--text); }
+.rail-dash.marked span { background: var(--accent); }
+.rail-dash.live span { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.turn-peek {
+  position: absolute; left: 46px; width: 340px; padding: 12px 14px; border-radius: 14px; cursor: default;
+  background: var(--surface); box-shadow: var(--shadow-lg); z-index: 6;
+}
+.turn-peek[hidden] { display: none; }
+.peek-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.peek-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peek-mark { flex: none; color: var(--text-3); }
+.peek-mark.on { color: var(--accent); }
+.peek-mark.on svg { fill: currentColor; }
+.peek-body { font-size: 12.5px; line-height: 1.6; color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+@media (max-width: 1000px) { .turn-rail { left: 4px; } }

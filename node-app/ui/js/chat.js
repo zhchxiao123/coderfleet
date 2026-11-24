@@ -495,6 +495,81 @@
       };
       let bannerNode = null;
       let dividerNode = null;
+      // The conversation map at the left edge (like Codex): one dash per turn, the one in view
+      // darker; hover shows the question and the start of the reply; click jumps there.
+      const rail = h('nav.turn-rail', { 'aria-label': '对话导航' });
+      const peek = h('div.turn-peek', { hidden: true });
+      const bookmarkKey = () => 'cf.bookmarks:' + CF.state.backendId + ':' + current.conversationId;
+      const bookmarks = () => { try { return new Set(JSON.parse(localStorage.getItem(bookmarkKey()) || '[]')); } catch { return new Set(); } };
+      const toggleBookmark = id => {
+        const marks = bookmarks();
+        marks.has(id) ? marks.delete(id) : marks.add(id);
+        try { localStorage.setItem(bookmarkKey(), JSON.stringify([...marks])); } catch { /* storage unavailable */ }
+        renderRail();
+      };
+      let railCurrent = '';
+      let jumpUntil = 0;
+      // A jump from the map marks its turn current, even when the view cannot scroll it to the top.
+      const jumpTo = id => {
+        const node = nodes.get(id)?.node;
+        if (!node) return;
+        jumpUntil = Date.now() + 1200;
+        railCurrent = id;
+        for (const dash of rail.querySelectorAll('.rail-dash')) dash.classList.toggle('current', dash.dataset.turn === id);
+        node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+      let peekTurn = '';
+      let peekTimer = 0;
+      // Reply text without Markdown markup: code blocks, heading/quote/list markers, emphasis, table bars.
+      const plain = value => String(value || '').replace(/```[\s\S]*?```/g, ' ').replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+        .replace(/\*\*|__|`|\|/g, ' ').replace(/^\s*-{3,}\s*$/gm, ' ').replace(/\s+/g, ' ').trim();
+      const showPeek = (turn, dash) => {
+        clearTimeout(peekTimer);
+        peekTurn = turn.id;
+        const marked = bookmarks().has(turn.id);
+        const reply = plain(turn.answer) || (isActive(turn) ? '正在回答…' : turn.error ? '失败：' + turn.error : '没有文字回复');
+        peek.replaceChildren(
+          h('div.peek-head', h('span.peek-title', plain(turn.prompt) || '（图片或附件）'),
+            h('button.icon-btn.peek-mark' + (marked ? '.on' : ''), { title: marked ? '取消书签' : '加书签', on: { click: event => { event.stopPropagation(); toggleBookmark(turn.id); showPeek(turn, rail.querySelector('[data-turn="' + turn.id + '"]')); } } }, CF.icon('bookmark', 14))),
+          h('div.peek-body', reply.slice(0, 400)));
+        peek.hidden = false;
+        const railBox = rail.getBoundingClientRect();
+        const box = dash.getBoundingClientRect();
+        peek.style.top = Math.max(8, Math.min(box.top + box.height / 2 - railBox.top - peek.offsetHeight / 2, window.innerHeight - railBox.top - peek.offsetHeight - 8)) + 'px';
+      };
+      const hidePeek = () => { peekTimer = setTimeout(() => { peek.hidden = true; peekTurn = ''; }, 120); };
+      peek.addEventListener('mouseenter', () => clearTimeout(peekTimer));
+      peek.addEventListener('mouseleave', hidePeek);
+      peek.addEventListener('click', () => jumpTo(peekTurn));
+      const renderRail = () => {
+        const turns = current.turns;
+        rail.hidden = turns.length < 2;
+        if (rail.hidden) { peek.hidden = true; return; }
+        const marks = bookmarks();
+        rail.replaceChildren(...turns.map(turn => h('button.rail-dash' + (turn.id === railCurrent ? '.current' : '') + (marks.has(turn.id) ? '.marked' : '') + (isActive(turn) ? '.live' : ''), {
+          dataset: { turn: turn.id }, 'aria-label': plain(turn.prompt).slice(0, 60),
+          on: {
+            mouseenter: event => showPeek(turn, event.currentTarget), mouseleave: hidePeek, focus: event => showPeek(turn, event.currentTarget), blur: hidePeek,
+            click: () => jumpTo(turn.id),
+          },
+        }, h('span'))), peek);
+      };
+      // The turn whose top is nearest above the middle of the view is "current".
+      const trackCurrent = () => {
+        if (Date.now() < jumpUntil) return;
+        const top = transcript.getBoundingClientRect().top + transcript.clientHeight * 0.35;
+        let found = current.turns[0]?.id || '';
+        for (const turn of current.turns) {
+          const node = nodes.get(turn.id)?.node;
+          if (node && node.getBoundingClientRect().top <= top) found = turn.id;
+        }
+        if (found !== railCurrent) {
+          railCurrent = found;
+          for (const dash of rail.querySelectorAll('.rail-dash')) dash.classList.toggle('current', dash.dataset.turn === found);
+        }
+      };
+      transcript.addEventListener('scroll', () => requestAnimationFrame(trackCurrent), { passive: true });
+
       const renderTurns = () => {
         if (!current.turns.length) { if (!welcome.isConnected) transcript.replaceWith(welcome); return; }
         if (welcome.isConnected) welcome.replaceWith(transcript);
@@ -513,6 +588,8 @@
         }
         if (atBottom) transcript.scrollTop = transcript.scrollHeight;
         updateComposer();
+        renderRail();
+        trackCurrent();
       };
       const renderAttachments = () => {
         attachRow.hidden = !current.attachments.length;
@@ -675,7 +752,7 @@
       transcript.addEventListener('scroll', () => topbar.classList.toggle('scrolled', transcript.scrollTop > 4), { passive: true });
       container.replaceChildren(
         topbar,
-        h('div.chat', current.conversationId ? transcript : welcome,
+        h('div.chat', rail, current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, followHost, h('div.composer', {
             on: {
               dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
