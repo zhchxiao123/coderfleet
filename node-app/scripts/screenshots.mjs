@@ -36,10 +36,19 @@ try {
   await page.waitForSelector('.tool-panel .label');
   await shot('chat-tool-open');
   // Neither the sidebar nor the transcript may scroll sideways.
-  const overflow = await page.evaluate(() => ['.sidebar-scroll', '.transcript'].map(selector => {
-    const node = document.querySelector(selector);
-    return node && node.scrollWidth > node.clientWidth + 1 ? selector + ' ' + node.scrollWidth + '>' + node.clientWidth : null;
-  }).filter(Boolean));
+  const overflow = await page.evaluate(() => {
+    const found = ['.sidebar-scroll', '.transcript'].map(selector => {
+      const node = document.querySelector(selector);
+      return node && node.scrollWidth > node.clientWidth + 1 ? selector + ' ' + node.scrollWidth + '>' + node.clientWidth : null;
+    });
+    // Nothing in the transcript may stick out of the chat column (clipped overflow hides it from scrollWidth).
+    const column = document.querySelector('.transcript-inner')?.getBoundingClientRect();
+    for (const node of document.querySelectorAll('.turn *')) {
+      const rect = node.getBoundingClientRect();
+      if (column && rect.width && rect.right > column.right + 1) { found.push('sticks out: ' + node.className + ' ' + Math.round(rect.right) + '>' + Math.round(column.right)); break; }
+    }
+    return found.filter(Boolean);
+  });
   if (overflow.length) errors.push('horizontal overflow: ' + overflow.join(', '));
   await page.click('.conv-item:has-text("请帮我梳理")');
   await page.waitForSelector('.approval');

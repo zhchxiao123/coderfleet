@@ -108,6 +108,8 @@ async function handle(message) {
       const done = (id, error) => send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: id, content: '…', is_error: error }] } });
       tool('c1', 'Bash', { command: 'npm test' }); done('c1', true);
       tool('c2', 'Read', { file_path: '/workspace/test/server.test.ts' }); done('c2', false);
+      // A long command: rows must stay inside the chat column.
+      tool('c4', 'Bash', { command: 'export GIT_DIR=/workspace/.git/worktrees/node-electron-worktree GIT_WORK_TREE=$PWD && git add node-app/ui node-app/test && git commit -q -m "feat: a very long commit message that keeps going and going"' }); done('c4', false);
       say('有一个测试失败，我先修复再重新构建。');
       tool('c3', 'Bash', { command: 'npm run build' });
       await new Promise(resolve => { interrupt = resolve; });

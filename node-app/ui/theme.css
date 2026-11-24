@@ -679,3 +679,9 @@ button.flow-row.tool-toggle { cursor: default; }
 /* No menu may run off the window; long ones scroll inside. */
 .menu { max-height: calc(100vh - 24px); overflow-y: auto; }
 .menu.picker { overflow: hidden; }
+
+/* Tool rows never widen the chat column: grid tracks shrink, long details end in an ellipsis. */
+.flow, .flow-children { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.tool { max-width: 100%; }
+.flow-row { max-width: 100%; }
+.flow-row .detail { flex: 0 1 auto; }
