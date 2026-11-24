@@ -204,12 +204,12 @@
         CF.app.go({ name: 'chat', conversationId: next.id, projectId: next.projectId });
       } },
     }, h('span.dot.waiting'), h('strong', waiting.length + ' 个等你确认'), h('span.name', waiting[0].name), CF.icon('chevron', 12)) : null;
+    // New chat opens straight away in the current or last-used project;
+    // the project is switched from the chip in the composer.
     const newChat = h('button.new-chat', { title: '新对话', on: { click: () => {
-      const chatProjects = projects.filter(item => item.chat && item.active);
-      const current = chatProjects.find(item => item.id === view.projectId);
-      if (current || chatProjects.length === 1) { CF.app.go({ name: 'chat', projectId: (current ?? chatProjects[0]).id }); return; }
-      if (!chatProjects.length) { CF.app.go({ name: 'projects' }); CF.toast('先新建一个项目'); return; }
-      CF.menu(newChat, chatProjects.map(item => ({ label: item.name + ' · ' + item.typeLabel, icon: 'folder', run: () => CF.app.go({ name: 'chat', projectId: item.id }) })));
+      const target = CF.chat.defaultProject(view.projectId);
+      if (!target) { CF.app.go({ name: 'projects' }); CF.toast('先新建一个项目'); return; }
+      CF.app.go({ name: 'chat', projectId: target.id });
     } } }, CF.icon('compose', 15), h('span.label', '新对话'));
     const backendButton = h('button.backend-row', { title: '切换后端', on: { click: () => CF.menu(backendButton, [
       ...profiles.map(profile => ({ label: (profile.id === backendId ? '✓ ' : '　') + profile.name, run: () => { if (profile.id !== backendId) void connect(profile.id); } })),

@@ -649,3 +649,33 @@ button.flow-row.tool-toggle { cursor: default; }
 .tool-toggle .chev { opacity: 0; }
 .tool-toggle:hover .chev, .tool.open > .tool-toggle .chev, .tool-toggle:focus-visible .chev { opacity: 1; }
 .tool-panel { margin-left: 0; }
+
+/* ── Project chip + searchable picker ───────────────── */
+.project-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; max-width: 240px;
+  border: 0; border-radius: 999px; background: var(--fill); color: var(--text-2); font-size: 13px; font-weight: 540;
+}
+.project-chip:hover { background: var(--active); color: var(--text); }
+.project-chip .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-chip svg { flex: none; color: var(--text-3); }
+.composer-bar { gap: 6px; }
+.menu.picker { width: 320px; padding: 6px; display: flex; flex-direction: column; overflow: hidden; }
+.picker-search {
+  display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 10px; margin-bottom: 4px; flex: none;
+  border-radius: 8px; background: var(--fill); color: var(--text-3);
+}
+.picker-search input { flex: 1; min-width: 0; border: 0; background: none; box-shadow: none; padding: 0; height: 32px; font-size: 13px; }
+.picker-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.menu .picker-item { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 10px; font-size: 13px; }
+.menu .picker-item:hover { background: none; }
+.menu .picker-item.active { background: var(--hover); }
+.picker-item .dot { flex: none; width: 7px; height: 7px; background: var(--line-strong); }
+.picker-item .dot.running { background: var(--green); }
+.picker-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.picker-item.muted .name { color: var(--text-2); }
+.picker-item .hint { flex: none; color: var(--text-3); font-size: 12px; }
+.picker-item svg { flex: none; color: var(--accent); }
+.picker-empty { padding: 14px 10px; color: var(--text-3); font-size: 12.5px; }
+/* No menu may run off the window; long ones scroll inside. */
+.menu { max-height: calc(100vh - 24px); overflow-y: auto; }
+.menu.picker { overflow: hidden; }

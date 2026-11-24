@@ -119,12 +119,60 @@
     document.body.append(menu);
     const rect = anchor.getBoundingClientRect();
     const width = menu.offsetWidth;
-    menu.style.top = Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8) + 'px';
+    menu.style.top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8)) + 'px';
     menu.style.left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) + 'px';
     openMenu = menu;
     setTimeout(() => document.addEventListener('click', function close(event) {
       if (!menu.contains(event.target)) { menu.remove(); document.removeEventListener('click', close); }
     }), 0);
+  };
+
+  /**
+   * A searchable list popover (project pickers and the like). Opens above the
+   * anchor when there is more room there. Arrow keys move, Enter picks, Esc closes.
+   * items: [{ id, label, hint?, dot?, selected?, muted? }]
+   */
+  CF.picker = (anchor, { items, placeholder = '搜索…', empty = '没有匹配项', footer, onPick }) => {
+    openMenu?.remove();
+    const input = h('input', { placeholder, 'aria-label': placeholder });
+    const list = h('div.picker-list', { role: 'listbox' });
+    const pop = h('div.menu.picker', h('label.picker-search', CF.icon('search', 13), input), list, footer ? h('div.picker-foot', footer) : null);
+    let shown = [];
+    let index = 0;
+    const close = () => { pop.remove(); document.removeEventListener('mousedown', outside, true); if (openMenu === pop) openMenu = null; };
+    const pick = item => { close(); onPick(item); };
+    const draw = () => {
+      const query = input.value.trim().toLowerCase();
+      shown = items.filter(item => !query || (item.label + ' ' + (item.hint || '')).toLowerCase().includes(query));
+      index = Math.max(0, Math.min(index, shown.length - 1));
+      list.replaceChildren(...(shown.length ? shown.map((item, position) => h('button.picker-item' + (position === index ? '.active' : '') + (item.selected ? '.selected' : '') + (item.muted ? '.muted' : ''), {
+        role: 'option', 'aria-selected': String(Boolean(item.selected)),
+        on: { click: () => pick(item), mousemove: () => { if (index !== position) { index = position; draw(); } } },
+      }, h('span.dot' + (item.dot ? '.' + item.dot : '')), h('span.name', item.label), item.hint ? h('span.hint', item.hint) : null,
+        item.selected ? CF.icon('check', 13) : null)) : [h('div.picker-empty', empty)]));
+      list.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+    };
+    input.addEventListener('input', () => { index = 0; draw(); });
+    input.addEventListener('keydown', event => {
+      if (event.key === 'ArrowDown') { index = Math.min(index + 1, shown.length - 1); draw(); event.preventDefault(); }
+      else if (event.key === 'ArrowUp') { index = Math.max(index - 1, 0); draw(); event.preventDefault(); }
+      else if (event.key === 'Enter' && shown[index]) { pick(shown[index]); event.preventDefault(); }
+      else if (event.key === 'Escape') { close(); anchor.focus?.(); }
+    });
+    const outside = event => { if (!pop.contains(event.target) && !anchor.contains(event.target)) close(); };
+    index = Math.max(0, items.findIndex(item => item.selected));
+    draw();
+    document.body.append(pop);
+    const rect = anchor.getBoundingClientRect();
+    const above = rect.top > window.innerHeight - rect.bottom;
+    const room = (above ? rect.top : window.innerHeight - rect.bottom) - 16;
+    pop.style.maxHeight = Math.max(180, Math.min(420, room)) + 'px';
+    pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+    if (above) pop.style.bottom = (window.innerHeight - rect.top + 6) + 'px'; else pop.style.top = (rect.bottom + 6) + 'px';
+    openMenu = pop;
+    setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+    input.focus();
+    return { close };
   };
 
   /**

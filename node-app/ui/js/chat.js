@@ -238,7 +238,34 @@
     select.hidden = !list.length;
   }
 
+  const lastKey = () => 'cf.lastProject:' + CF.state.backendId;
+  const chatProjects = () => CF.state.projects.filter(item => item.chat && item.active);
+
+  /** The project chip of a new conversation: a searchable list of chat projects, running ones first. */
+  function projectChip(projectId) {
+    const info = CF.state.projects.find(item => item.id === projectId);
+    const chip = h('button.project-chip', { title: '选择项目', on: { click: () => {
+      const order = item => (item.state === 'running' ? 0 : 1);
+      const items = chatProjects().slice().sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, undefined, { numeric: true })).map(item => ({
+        id: item.id, label: item.name, selected: item.id === projectId, muted: item.state !== 'running',
+        hint: item.typeLabel + (item.state === 'running' ? '' : ' · ' + CF.stateText(item.state)),
+        dot: item.state === 'running' ? 'running' : '',
+      }));
+      CF.picker(chip, { items, placeholder: '搜索项目', empty: '没有匹配的项目', onPick: item => CF.app.go({ name: 'chat', projectId: item.id }) });
+    } } }, CF.icon('folder', 13), h('span.name', info ? info.name : '选择项目'), CF.icon('down', 11));
+    return chip;
+  }
+
   CF.chat = {
+    /** The project a new conversation starts in: the given one, the last used, or the first running. */
+    defaultProject(preferred) {
+      const list = chatProjects();
+      let last = null;
+      try { last = localStorage.getItem(lastKey()); } catch { /* storage unavailable */ }
+      return list.find(item => item.id === preferred) || list.find(item => item.id === last)
+        || list.find(item => item.state === 'running') || list[0] || null;
+    },
+
     stop() { if (session) { clearTimeout(session.timer); drafts.set(session.key, session.textarea.value); session = null; } },
 
     /** view: { conversationId?, projectId } */
@@ -258,6 +285,7 @@
       const meta = h('div.meta');
       const welcome = h('div.welcome-chat', h('div.hero', h('div.brand-mark', 'C'), h('h2'), h('p', '对话在项目容器里运行，可以读写这个项目的文件。')));
       session = { key, conversationId: conversation?.id || '', projectId, turns: [], timer: 0, textarea, sending: false };
+      if (projectId) { try { localStorage.setItem(lastKey(), projectId); } catch { /* storage unavailable */ } }
       const current = session;
       textarea.value = drafts.get(key) || '';
 
@@ -392,7 +420,7 @@
         topbar,
         h('div.chat', current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, h('div.composer', textarea,
-            h('div.composer-bar', modelSelect, h('span.hint', 'Enter 发送 · Shift+Enter 换行'), sendButton)))),
+            h('div.composer-bar', current.conversationId ? null : projectChip(projectId), modelSelect, h('span.hint', 'Enter 发送 · Shift+Enter 换行'), sendButton)))),
       );
       renderHeader();
       autosize();
