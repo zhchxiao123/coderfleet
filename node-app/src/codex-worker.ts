@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
-import { attachments, emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, withPaths, emit, errorMessage, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 function text(type: 'text' | 'thinking', value: string, id: string): void {
   if (!value) return;
@@ -103,7 +103,9 @@ export async function runCodex(spec: CodexSpec): Promise<number> {
     const codex = new sdk.Codex({ codexPathOverride: codexPath() });
     const sandboxMode = spec.auto ? 'danger-full-access' : 'workspace-write';
     const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode, ...(spec.auto ? { approvalPolicy: 'never' } : {}), ...(spec.model ? { model: spec.model } : {}) };
-    const images = attachments(spec.cwd, spec.images);
+    const files = attachments(spec.cwd, spec.images);
+    const images = files.filter(file => file.kind === 'image');
+    const prompt = withPaths(spec.prompt, files.filter(file => file.kind !== 'image'));
     const thread = spec.session_id ? codex.resumeThread(spec.session_id, options) : codex.startThread(options);
     mailbox.publish('accepting');
     system(spec, 'coderfleet_backend', { execution_backend: 'sdk' });
@@ -112,8 +114,8 @@ export async function runCodex(spec: CodexSpec): Promise<number> {
     // A resumed thread does not announce itself again; keep the saved ID.
     if (spec.session_id) system(spec, 'coderfleet_session', { session_id: spec.session_id });
     const { events } = await thread.runStreamed(images.length
-      ? [...(spec.prompt ? [{ type: 'text', text: spec.prompt }] : []), ...images.map(image => ({ type: 'local_image', path: image.path }))]
-      : spec.prompt, { signal: abort.signal });
+      ? [...(prompt ? [{ type: 'text', text: prompt }] : []), ...images.map(image => ({ type: 'local_image', path: image.path }))]
+      : prompt, { signal: abort.signal });
     for await (const event of events) failure = translate(spec, object(event)) ?? failure;
     if (interrupted) return 143;
     if (failure) throw new Error(failure);

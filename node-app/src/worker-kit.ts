@@ -92,29 +92,38 @@ export async function runMain<T extends BaseSpec>(moduleUrl: string, run: (spec:
 }
 
 export const IMAGE_TYPES: Readonly<Record<string, string>> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
-const MAX_IMAGE = 20 * 1024 * 1024;
+const MAX_ATTACHMENT = 20 * 1024 * 1024;
 
-export interface Attachment { readonly path: string; readonly mime: string; data(): string }
+/** `image` and `pdf` can go to a model natively; any other `file` is passed by its path. */
+export interface Attachment { readonly path: string; readonly mime: string; readonly kind: 'image' | 'pdf' | 'file'; data(): string }
 
 /**
  * Resolves the project uploads of a message (Python `_input_content`): each must be a file
- * directly in <cwd>/.coderfleet-uploads, an image, at most 20 MiB. `data()` reads it as base64.
+ * directly in <cwd>/.coderfleet-uploads, at most 20 MiB. `data()` reads it as base64.
  */
-export function attachments(cwd: string, images: readonly string[] | undefined): Attachment[] {
-  if (!images?.length) return [];
+export function attachments(cwd: string, uploads: readonly string[] | undefined): Attachment[] {
+  if (!uploads?.length) return [];
   const root = realpathSync(join(cwd, '.coderfleet-uploads'));
-  return images.map(reference => {
+  return uploads.map(reference => {
     if (dirname(reference) !== '/workspace/.coderfleet-uploads' && dirname(reference) !== join(cwd, '.coderfleet-uploads')) throw new Error('Attachments must be project uploads');
     const path = realpathSync(join(root, basename(reference)));
     if (dirname(path) !== root || !statSync(path).isFile()) throw new Error('Attachment does not belong to this project');
-    if (statSync(path).size > MAX_IMAGE) throw new Error('Attachment exceeds 20 MiB');
-    const mime = IMAGE_TYPES[path.slice(path.lastIndexOf('.')).toLowerCase()];
-    if (!mime) throw new Error('Only PNG, JPEG, WebP and GIF images can be attached');
-    return { path, mime, data: () => readFileSync(path).toString('base64') };
+    if (statSync(path).size > MAX_ATTACHMENT) throw new Error('Attachment exceeds 20 MiB');
+    const extension = path.slice(path.lastIndexOf('.')).toLowerCase();
+    const image = IMAGE_TYPES[extension];
+    const kind = image ? 'image' : extension === '.pdf' ? 'pdf' : 'file';
+    return { path, mime: image ?? (kind === 'pdf' ? 'application/pdf' : 'application/octet-stream'), kind, data: () => readFileSync(path).toString('base64') };
   });
 }
 
-/** The prompt with attached image paths listed, for agents that take only text. */
-export function withPaths(text: string, images: readonly Attachment[]): string {
-  return images.length ? (text ? text + '\n\n' : '') + '[Attached images:\n' + images.map(image => image.path).join('\n') + ']' : text;
+/** The prompt with attachments listed by path, for whatever the agent cannot take natively. */
+export function withPaths(text: string, files: readonly Attachment[]): string {
+  if (!files.length) return text;
+  const images = files.filter(file => file.kind === 'image');
+  const others = files.filter(file => file.kind !== 'image');
+  const lists = [
+    images.length ? '[Attached images:\n' + images.map(file => file.path).join('\n') + ']' : '',
+    others.length ? '[Attached files:\n' + others.map(file => file.path).join('\n') + ']' : '',
+  ].filter(Boolean).join('\n');
+  return (text ? text + '\n\n' : '') + lists;
 }

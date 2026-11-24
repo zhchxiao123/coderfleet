@@ -50,6 +50,8 @@
     copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-1A1.5 1.5 0 0 0 9 3H4a1.5 1.5 0 0 0-1.5 1.5V9A1.5 1.5 0 0 0 4 10.5h1.5"/>',
     translate: '<path d="M2.5 4h6M5.5 2.5V4M7.5 4c0 3-2.5 5.5-5 6.5M4 6.5c1 1.5 2.5 3 4.5 3.5M9 13.5l2.5-6 2.5 6M9.8 11.5h3.4"/>',
     fork: '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/><path d="M4.5 5v1.5a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2V5M8 8.5V11"/>',
+    clip: '<path d="M13 7.5 8.2 12.3a3 3 0 0 1-4.3-4.2l5.3-5.3a2 2 0 0 1 2.8 2.8L6.7 10.9a1 1 0 0 1-1.4-1.4L10 4.8"/>',
+    file: '<path d="M9 2.5H4.5A1.5 1.5 0 0 0 3 4v8a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 12V6.5z"/><path d="M9 2.5v4h4"/>',
     image: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.1"/><path d="M13.5 10.5 10.5 7.5 4 13"/>',
     bolt: '<path d="M9 2 3.5 9H8l-1 5 5.5-7H8z"/>',
     chat: '<path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H7l-3 2.5V11h0A1.5 1.5 0 0 1 3 9.5z"/>',
@@ -153,13 +155,28 @@
     const key = projectId + ':' + path;
     if (!uploadCache.has(key)) {
       const file = String(path).split('/').pop();
-      uploadCache.set(key, CF.get('projects/' + encodeURIComponent(projectId) + '/uploads/' + file)
+      uploadCache.set(key, CF.get('projects/' + encodeURIComponent(projectId) + '/uploads/' + encodeURIComponent(file))
         .then(image => 'data:' + image.mime + ';base64,' + image.data)
         .catch(error => { uploadCache.delete(key); throw error; }));
     }
     return uploadCache.get(key);
   };
   CF.seedUpload = (projectId, path, url) => uploadCache.set(projectId + ':' + path, Promise.resolve(url));
+
+  /** Upload paths are <16 hex>-<name>; the original name and size are remembered for this session. */
+  const uploadNames = new Map();
+  CF.rememberUpload = (path, name, size) => uploadNames.set(path, { name, size });
+  CF.uploadName = path => uploadNames.get(path)?.name || String(path).split('/').pop().replace(/^[a-f0-9]{16}[-.]/, '');
+  CF.uploadSize = path => uploadNames.get(path)?.size;
+  CF.isImageUpload = path => /\.(png|jpe?g|webp|gif)$/i.test(String(path));
+  const humanSize = size => size === undefined ? '' : size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(size < 10240 ? 1 : 0) + ' KB' : (size / 1048576).toFixed(1) + ' MB';
+  /** A file attachment: icon, name and size (extension shown as the icon label). */
+  CF.fileChip = (name, size) => {
+    const extension = /\.([A-Za-z0-9]{1,6})$/.exec(name)?.[1]?.toUpperCase() || '';
+    return h('span.file-chip', { title: name },
+      h('span.file-icon', CF.icon('file', 18), extension ? h('small', extension) : null),
+      h('span.file-meta', h('span.file-name', name), size !== undefined ? h('small', humanSize(size)) : null));
+  };
 
   /** A thumbnail of a project upload; clicking opens it full size. */
   CF.uploadThumb = (projectId, path, extra) => {

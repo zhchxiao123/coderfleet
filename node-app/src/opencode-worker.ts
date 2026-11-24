@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Command } from './control.js';
-import { attachments, emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
+import { attachments, withPaths, emit, errorMessage, list, object, openMailbox, pumpCommands, runMain, str, system, writeState, type BaseSpec, type Json } from './worker-kit.js';
 
 export interface OpencodeSpec extends BaseSpec { vendor_directory: string }
 
@@ -194,8 +194,8 @@ export async function runOpencode(spec: OpencodeSpec): Promise<number> {
     const model = spec.model && rest.length ? { providerID, modelID: rest.join('/') } : undefined;
     const result = await opencode.session.prompt({
       path: { id: sessionId }, body: { ...(model ? { model } : {}), parts: [
-        ...(spec.prompt ? [{ type: 'text', text: spec.prompt }] : []),
-        ...files.map(file => ({ type: 'file', mime: file.mime, filename: file.path.split('/').pop(), url: 'data:' + file.mime + ';base64,' + file.data() })),
+        ...(spec.prompt || files.some(file => file.kind === 'file') ? [{ type: 'text', text: withPaths(spec.prompt, files.filter(file => file.kind === 'file')) }] : []),
+        ...files.filter(file => file.kind !== 'file').map(file => ({ type: 'file', mime: file.mime, filename: file.path.split('/').pop(), url: 'data:' + file.mime + ';base64,' + file.data() })),
       ] },
     });
     // Let the stream deliver the final part updates before closing.

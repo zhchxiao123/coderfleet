@@ -102,7 +102,7 @@ async function handle(message) {
   if (Array.isArray(prompt)) {
     // Text plus base64 image blocks.
     const text = prompt.filter(block => block.type === 'text').map(block => block.text).join('');
-    const images = prompt.filter(block => block.type === 'image').map(block => block.source.media_type + ':' + block.source.data.length);
+    const images = prompt.filter(block => block.type === 'image' || block.type === 'document').map(block => block.source.media_type + ':' + block.source.data.length);
     say('images:' + images.join(',') + ':' + text);
     finish();
   } else if (prompt === 'forkme') {

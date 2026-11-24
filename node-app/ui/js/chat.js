@@ -221,7 +221,7 @@
   function userBubble(projectId, text, images, label) {
     return h('div.user-msg',
       label ? h('div.user-label', label) : null,
-      images?.length ? h('div.user-images', images.map(path => CF.uploadThumb(projectId, path))) : null,
+      images?.length ? h('div.user-images', images.map(path => CF.isImageUpload(path) ? CF.uploadThumb(projectId, path) : CF.fileChip(CF.uploadName(path), CF.uploadSize(path)))) : null,
       text ? h('div.bubble', text) : null);
   }
 
@@ -407,8 +407,8 @@
       const hint = h('span.hint');
       // Images: picked, pasted or dropped; uploaded into the project right away.
       const attachRow = h('div.attach-row', { hidden: true });
-      const fileInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', multiple: true, hidden: true });
-      const attachButton = h('button.composer-icon', { title: '添加图片（也可以粘贴或拖进来）', on: { click: () => fileInput.click() } }, CF.icon('image', 16));
+      const fileInput = h('input', { type: 'file', multiple: true, hidden: true });
+      const attachButton = h('button.composer-icon', { title: '添加附件：图片、PDF 或任意文件（也可以粘贴或拖进来）', on: { click: () => fileInput.click() } }, CF.icon('clip', 16));
       // Auto mode: tools run without asking (Python `auto`), remembered per project.
       const autoKey = 'cf.auto:' + CF.state.backendId + ':' + projectId;
       const autoButton = h('button.auto-toggle', {
@@ -516,8 +516,8 @@
       };
       const renderAttachments = () => {
         attachRow.hidden = !current.attachments.length;
-        attachRow.replaceChildren(...current.attachments.map(item => h('div.attach' + (item.path ? '' : '.uploading'),
-          h('img', { src: item.url, alt: item.name }),
+        attachRow.replaceChildren(...current.attachments.map(item => h('div.attach' + (item.path ? '' : '.uploading') + (item.image ? '' : '.file'), { title: item.name },
+          item.image ? h('img', { src: item.url, alt: item.name }) : CF.fileChip(item.name, item.size),
           item.path ? null : h('span.spinner'),
           h('button.remove', { title: '移除', on: { click: () => {
             current.attachments = current.attachments.filter(other => other !== item);
@@ -525,24 +525,26 @@
           } } }, CF.icon('x', 11)))));
         updateComposer();
       };
-      const TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      const IMAGES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      // Any file up to 20 MB, uploaded into the project right away (images also get a preview).
       const addFiles = files => {
         for (const file of files) {
-          if (!TYPES.includes(file.type)) { CF.toast('只支持 PNG、JPEG、WebP 和 GIF 图片'); continue; }
+          if (!file.size) { CF.toast((file.name || '这个文件') + ' 是空的'); continue; }
           if (file.size > 20 * 1024 * 1024) { CF.toast(file.name + ' 超过 20 MB'); continue; }
-          if (current.attachments.length >= 20) { CF.toast('一次最多 20 张图片'); break; }
-          const item = { name: file.name || 'image.' + file.type.split('/')[1], url: '', path: '' };
+          if (current.attachments.length >= 20) { CF.toast('一次最多 20 个附件'); break; }
+          const image = IMAGES.includes(file.type);
+          const name = file.name || (image ? 'image.' + file.type.split('/')[1].replace('jpeg', 'jpg') : 'file');
+          const item = { name, size: file.size, image, url: '', path: '' };
           current.attachments.push(item);
           const reader = new FileReader();
           reader.onload = async () => {
             item.url = String(reader.result);
             renderAttachments();
             try {
-              const extension = file.type.split('/')[1].replace('jpeg', 'jpg');
-              const name = /\.(png|jpe?g|webp|gif)$/i.test(item.name) ? item.name : item.name + '.' + extension;
               const saved = await CF.api('POST', 'projects/' + encodeURIComponent(projectId) + '/uploads', { name, data: item.url.split(',')[1] });
               item.path = saved.path;
-              CF.seedUpload(projectId, saved.path, item.url);
+              CF.rememberUpload(saved.path, name, file.size);
+              if (image) CF.seedUpload(projectId, saved.path, item.url);
             } catch (error) {
               current.attachments = current.attachments.filter(other => other !== item);
               CF.fail(error);
@@ -555,7 +557,7 @@
       };
       fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = ''; });
       textarea.addEventListener('paste', event => {
-        const files = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/'));
+        const files = [...(event.clipboardData?.files || [])];
         if (files.length) { event.preventDefault(); addFiles(files); }
       });
       const renderFollowUps = () => {

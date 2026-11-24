@@ -30,12 +30,16 @@ const INTERRUPT_GRACE = 15_000;
 /** Lifecycle states after which the CLI will not run a sent message (again). */
 const COMMAND_ENDED = new Set(['completed', 'cancelled', 'failed', 'discarded']);
 
-/** A user message: plain text, or text plus base64 image blocks (Python `_input_content`). */
-export function userContent(cwd: string, text: string, images: readonly string[] | undefined): string | Json[] {
-  const files = attachments(cwd, images);
+/**
+ * A user message (Python `_input_content`): plain text, or text plus base64 image and PDF
+ * blocks; any other attachment is named by its path for Claude to read.
+ */
+export function userContent(cwd: string, text: string, uploads: readonly string[] | undefined): string | Json[] {
+  const files = attachments(cwd, uploads);
   if (!files.length) return text;
   return [...(text ? [{ type: 'text', text }] : []),
-    ...files.map(file => ({ type: 'image', source: { type: 'base64', media_type: file.mime, data: file.data() } }))];
+    ...files.map(file => file.kind === 'file' ? { type: 'text', text: '[Attached file: ' + file.path + ']' }
+      : { type: file.kind === 'pdf' ? 'document' : 'image', source: { type: 'base64', media_type: file.mime, data: file.data() } })];
 }
 
 function cliPath(): string {

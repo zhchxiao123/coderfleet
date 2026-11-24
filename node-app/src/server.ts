@@ -154,13 +154,14 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
 
   const UPLOAD_TYPES: Readonly<Record<string, string>> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
-  const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}\.(png|jpe?g|webp|gif)$/;
+  // <16 hex>-<name> (or the older <16 hex>.<ext>); only characters the Python service also accepts.
+  const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}[-.][\p{L}\p{N}_.-]{0,120}$/u;
   /** Validated upload references of a message: at most 20, each a file of this project. */
   const uploads = (projectId: string, value: unknown): string[] => {
     const list = Array.isArray(value) ? value : [];
-    if (list.length > 20 || !list.every(item => typeof item === 'string' && UPLOAD_PATH.test(item))) throw new HttpError(400, '图片必须是这个项目里上传的文件');
+    if (list.length > 20 || !list.every(item => typeof item === 'string' && UPLOAD_PATH.test(item) && !item.includes('..'))) throw new HttpError(400, '附件必须是这个项目里上传的文件');
     const directory = join(project(projectId).path, '.coderfleet-uploads');
-    for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '图片已不存在，请重新添加');
+    for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '附件已不存在，请重新添加');
     return list as string[];
   };
 
@@ -425,20 +426,27 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     ['POST', /^projects\/([\w.-]+)\/uploads$/, async (request, [name]) => {
       const target = project(name as string);
       const input = await body(request, 28 * 1024 * 1024);
-      const extension = text(input.name).toLowerCase().split('.').pop() ?? '';
-      if (!UPLOAD_TYPES[extension]) throw new HttpError(400, '只支持 PNG、JPEG、WebP 和 GIF 图片');
       const data = Buffer.from(text(input.data), 'base64');
-      if (!data.length || data.length > 20 * 1024 * 1024) throw new HttpError(400, '图片不能超过 20 MB');
+      if (!data.length) throw new HttpError(400, '文件是空的');
+      if (data.length > 20 * 1024 * 1024) throw new HttpError(400, '附件不能超过 20 MB');
       const directory = join(target.path, '.coderfleet-uploads');
       mkdirSync(directory, { recursive: true });
-      const file = randomBytes(8).toString('hex') + '.' + (extension === 'jpeg' ? 'jpg' : extension);
+      // A unique prefix plus the name in characters every tool handles; the agent sees a readable file name.
+      const original = text(input.name).split(/[\\/]/).pop() ?? '';
+      const dot = original.lastIndexOf('.');
+      const extension = dot > 0 ? original.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
+      const stem = (dot > 0 ? original.slice(0, dot) : original).normalize('NFC').replace(/[^\p{L}\p{N}_.-]+/gu, '_').replace(/^[_.]+|[_.]+$/g, '').slice(0, 80) || 'file';
+      const file = randomBytes(8).toString('hex') + '-' + stem + (extension ? '.' + extension : '');
       writeFileSync(join(directory, file), data, { mode: 0o644 });
       return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size: data.length };
     }],
-    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}\.(?:png|jpe?g|webp|gif))$/, async (_request, [name, file]) => {
-      const path = join(project(name as string).path, '.coderfleet-uploads', file as string);
+    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}[-.%][^/]*\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) => {
+      let file = '';
+      try { file = decodeURIComponent(encoded as string); } catch { throw new HttpError(400, '无效的文件名'); }
+      if (!/^[a-f0-9]{16}[-.][\p{L}\p{N}_.-]*$/u.test(file)) throw new HttpError(400, '无效的文件名');
+      const path = join(project(name as string).path, '.coderfleet-uploads', file);
       if (!existsSync(path) || statSync(path).size > 20 * 1024 * 1024) throw new HttpError(404, '图片不存在');
-      return { mime: UPLOAD_TYPES[(file as string).split('.').pop() as string], data: readFileSync(path).toString('base64') };
+      return { mime: UPLOAD_TYPES[file.split('.').pop()?.toLowerCase() as string], data: readFileSync(path).toString('base64') };
     }],
     ['GET', /^turns\/([\w-]+)\/tools\/(.+)$/, async (_request, [id, toolId]) => {
       const turn = store.turn(identifier(id));
