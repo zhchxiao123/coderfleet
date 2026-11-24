@@ -39,6 +39,8 @@
       const { overview, profiles, backendId } = CF.state;
       const page = h('div.page-inner', h('div.page-head', h('div', h('div.eyebrow', '连接、工作区与容器'), h('h1', '设置'))));
       container.replaceChildren(h('div.page', page));
+      const notice = CF.pythonNotice(overview);
+      if (notice) page.append(notice);
 
       // Connections
       const current = profiles.find(item => item.id === backendId);
@@ -56,7 +58,9 @@
         const result = await CF.addSshBackend();
         if (result?.id) await CF.app.loadProfiles(result.id);
       } } }, CF.icon('plus', 13), '通过 SSH 添加');
-      const describe = profile => profile.kind === 'local' ? '这台电脑 · 由 App 启动'
+      const local = overview?.backend;
+      const describe = profile => profile.kind === 'local'
+        ? '这台电脑 · Node 后端' + (profile.id === backendId && local ? ' ' + local.build + ' · 端口 ' + local.port : '') + ' · 由 App 启动'
         : profile.kind === 'ssh' ? 'SSH · ' + profile.host + (profile.version ? ' · 后端 ' + profile.version : '') : '服务地址 · ' + profile.url;
       const reinstall = async (profile, button) => {
         const jobId = await CF.busy(button, () => CF.transport.reinstallSsh(profile.id));

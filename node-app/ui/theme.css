@@ -685,3 +685,8 @@ button.flow-row.tool-toggle { cursor: default; }
 .tool { max-width: 100%; }
 .flow-row { max-width: 100%; }
 .flow-row .detail { flex: 0 1 auto; }
+
+/* Python service still running on this workspace. */
+.python-notice { margin-bottom: 18px; align-items: flex-start; }
+.python-notice .text { display: grid; gap: 4px; }
+.python-notice code { justify-self: start; font: 12.5px var(--mono); background: var(--fill); padding: 2px 8px; border-radius: 6px; color: var(--text); }

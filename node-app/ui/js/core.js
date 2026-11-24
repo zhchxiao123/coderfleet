@@ -128,6 +128,28 @@
   };
 
   /**
+   * Warning shown while the original Python service runs on the same workspace:
+   * both would pick up the same tasks, so the desktop App asks to stop it.
+   */
+  CF.pythonNotice = overview => {
+    const python = overview?.python;
+    if (!python) return null;
+    const command = python.pid ? 'coderfleet server --stop' : '';
+    const copy = command ? h('button.btn.small', { on: { click: async event => {
+      await navigator.clipboard.writeText(command);
+      event.currentTarget.textContent = '已复制';
+    } } }, '复制命令') : null;
+    return h('div.banner.python-notice',
+      h('span.banner-icon', CF.icon('box', 16)),
+      h('div.text',
+        h('strong', '原来的 Python 服务也在用这个工作区'),
+        h('span', '桌面版只用 Node 后端。两个同时运行会争抢同一批任务（Python 服务重启时会接管这里正在运行的对话），建议停掉它'
+          + (command ? '：' : '：在运行 coderfleet server 的终端里按 Ctrl+C。')),
+        command ? h('code', command) : null),
+      copy);
+  };
+
+  /**
    * A searchable list popover (project pickers and the like). Opens above the
    * anchor when there is more room there. Arrow keys move, Enter picks, Esc closes.
    * items: [{ id, label, hint?, dot?, selected?, muted? }]

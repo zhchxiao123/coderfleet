@@ -117,7 +117,7 @@
         h('div.page-head', h('div', h('div.eyebrow', new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) + ' · ' + running + ' 个容器运行中'),
           h('h1', '项目')),
           h('button.btn.primary', { on: { click: () => CF.projects.create() } }, CF.icon('plus', 14), '新建项目')),
-        banners,
+        CF.pythonNotice(CF.state.overview), banners,
         h('div.stats',
           stat('box', 'green', '运行中', running, projects.length, '个项目容器'),
           stat('user', '', '账号', CF.state.accounts.length, undefined, CF.state.accounts.filter(item => item.auth === 'env' || item.hasLogin).length + ' 个已登录或已配置密钥'),

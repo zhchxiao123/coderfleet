@@ -10,6 +10,7 @@ import {
 } from './conf.js';
 import { assertContainer, models } from './docker.js';
 import { Lifecycle } from './lifecycle.js';
+import { findPythonService, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Turn } from './state.js';
 import { WorkspaceStore } from './store.js';
 import { chatSupported, TaskRunner } from './tasks.js';
@@ -66,6 +67,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     return projectPaths.map.get(path.replace(/\/+$/, ''));
   };
   const store = new WorkspaceStore(workspace, projectForPath);
+  let python: { checked: number; value: PythonService | undefined } = { checked: 0, value: undefined };
   const token = Buffer.from('Bearer ' + config.token);
   const lifecycle = new Lifecycle(workspace, config.dockerPath);
   const terminals = new Terminals(workspace, config.dockerPath);
@@ -97,8 +99,11 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     ['GET', /^overview$/, async () => {
       const initialized = existsSync(join(workspace, 'config.conf')) && existsSync(join(workspace, 'Dockerfile'));
       const docker = await lifecycle.dockerAvailable();
+      if (Date.now() - python.checked > 10_000) python = { checked: Date.now(), value: await findPythonService(workspace) };
       return {
         workspace, initialized, docker, image: docker ? await lifecycle.image() : undefined,
+        backend: { build: VERSION, pid: process.pid, host: config.host, port: config.port },
+        python: python.value ?? null,
         accountTypes: Object.values(ACCOUNT_TYPES).map(({ id, label, envAuth, envHint, chat }) => ({ id, label, envAuth, envHint, chat })),
         operations: lifecycle.recent(),
       };
