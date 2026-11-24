@@ -28,6 +28,7 @@ interface Profile {
 interface Job { status: 'running' | 'succeeded' | 'failed'; log: string; result?: unknown; error?: string }
 
 const uiPath = fileURLToPath(new URL('../ui/index.html', import.meta.url));
+const appIcon = fileURLToPath(new URL('../ui/brand/app-icon.png', import.meta.url));
 const cliPath = fileURLToPath(new URL('./cli.js', import.meta.url));
 let mainWindow: BrowserWindow | undefined;
 let profiles: Profile[] = [];
@@ -332,7 +333,7 @@ function register(): void {
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1280, height: 840, minWidth: 900, minHeight: 600, title: 'CoderFleet',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', backgroundColor: '#f6f5f2',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', backgroundColor: '#f6f5f2', icon: appIcon,
     webPreferences: {
       sandbox: true, contextIsolation: true, nodeIntegration: false,
       preload: fileURLToPath(new URL('../ui/preload.cjs', import.meta.url)),
@@ -355,6 +356,8 @@ async function startDesktop(): Promise<void> {
     }
   }
   register();
+  // A packaged App gets its Dock icon from the bundle; `npm run desktop` would otherwise show Electron's.
+  if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(appIcon);
   await createWindow();
   app.on('activate', () => { if (!mainWindow) void createWindow(); });
   app.on('second-instance', () => { mainWindow?.focus(); });

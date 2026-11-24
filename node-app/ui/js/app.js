@@ -138,7 +138,7 @@
       await CF.app.loadProfiles(id);
     }) } }, '使用这台电脑');
     main.replaceChildren(h('div.welcome', h('div.welcome-card',
-      h('div.brand-mark', 'C'),
+      CF.brandMark(),
       h('h1', '欢迎使用 CoderFleet'),
       h('p', '把多个 AI 编程账号放进各自的容器里，一起用它们的额度。'),
       h('div.welcome-actions', local,
@@ -305,7 +305,7 @@
     const scrollTop = sidebar.querySelector('.sidebar-scroll')?.scrollTop ?? 0;
     sidebar.replaceChildren(
       h('div.sidebar-top',
-        h('div.workspace-head', h('span.brand-mark', 'C'), h('div.names', h('strong', 'CoderFleet')),
+        h('div.workspace-head', CF.brandMark(), h('div.names', h('strong', 'CoderFleet')),
           h('button.icon-btn.sidebar-toggle', { title: '隐藏侧边栏（' + (CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+') + '\\）', on: { click: () => CF.app.toggleSidebar() } }, CF.icon('sidebar', 16))),
         newChat,
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),

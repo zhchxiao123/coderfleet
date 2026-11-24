@@ -454,7 +454,7 @@
       const chip = conversation ? null : projectChip(projectId);
       const title = h('div.title');
       const meta = h('div.meta');
-      const welcome = h('div.welcome-chat', h('div.hero', h('div.brand-mark', 'C'), h('h2'), h('p', '对话在项目容器里运行，可以读写这个项目的文件。')));
+      const welcome = h('div.welcome-chat', h('div.hero', CF.brandMark(), h('h2'), h('p', '对话在项目容器里运行，可以读写这个项目的文件。')));
       session = { key, conversationId: conversation?.id || '', projectId, turns: [], followUps: [], attachments: [], timer: 0, textarea, sending: false };
       if (projectId) { try { localStorage.setItem(lastKey(), projectId); } catch { /* storage unavailable */ } }
       const current = session;

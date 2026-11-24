@@ -382,6 +382,8 @@
   };
 
   /** A path short enough for a row: the last segments, with the full path as tooltip text. */
+  CF.brandMark = () => h('img.brand-mark', { src: 'brand/mark.png', alt: '', draggable: 'false' });
+
   CF.shortPath = path => {
     const parts = String(path || '').split('/').filter(Boolean);
     return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : String(path || '');
