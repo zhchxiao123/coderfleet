@@ -196,6 +196,9 @@ class ConversationFeed extends Feed {
     notifyListeners();
   }
 
+  /// Asks for the whole list on the next step, even when it has not changed.
+  void resync() => _etag = '';
+
   Future<void> refreshProjects() async {
     projects = await client.projects();
     _projectsAt = DateTime.now();

@@ -1,20 +1,24 @@
 // Home: the backend's conversations, newest first, with status dots; search;
 // a new conversation starts from a project picker.
+import 'dart:async';
+
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 
 import '../backend.dart';
 import '../models.dart';
+import '../notifications.dart';
 import '../state.dart';
 import 'chat_screen.dart';
 import 'connect_screen.dart';
 import 'theme.dart';
 
 class ConversationsScreen extends StatefulWidget {
-  const ConversationsScreen({super.key, required this.state, this.feedWait = const Duration(seconds: 25)});
+  const ConversationsScreen({super.key, required this.state, this.feedWait = const Duration(seconds: 25), this.notifier});
   final AppState state;
   final Duration feedWait;
+  final Notifier? notifier;
   @override
   State<ConversationsScreen> createState() => _ConversationsScreenState();
 }
@@ -23,12 +27,18 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
   ConversationFeed? feed;
   String query = '';
   bool searching = false;
+  bool _chatOpen = false;
+  late final BackgroundWatch? _watch = widget.notifier == null ? null : BackgroundWatch(widget.notifier!);
+  StreamSubscription<String>? _taps;
+  String? _pendingOpen;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _attach();
+    _taps = widget.notifier?.taps.listen(_openTapped);
+    unawaited(widget.notifier?.init().catchError((_) {}));
   }
 
   @override
@@ -38,34 +48,70 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
   }
 
   void _attach() {
+    _watch?.stop();
+    feed?.removeListener(_openPending);
     feed?.dispose();
     final client = widget.state.client;
-    feed = client == null ? null : (ConversationFeed(client, wait: widget.feedWait)..start());
+    feed = client == null ? null : (ConversationFeed(client, wait: widget.feedWait)..addListener(_openPending)..start());
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      feed?.start();
+      _watch?.stop();
+      _chatOpen ? feed?.stop() : feed?.start();
     } else if (state == AppLifecycleState.paused) {
-      feed?.stop();
+      // In the background the list keeps polling (as long as the OS lets the app run) to notify.
+      if (_watch == null) {
+        feed?.stop();
+      } else if (feed != null) {
+        _watch.start(feed!, current: !_chatOpen);
+        if (_chatOpen) feed!.resync();
+        feed!.start();
+      }
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _taps?.cancel();
+    _watch?.stop();
     feed?.dispose();
     super.dispose();
+  }
+
+  /// A tapped notification: back to the list, then into its conversation once the list has it.
+  void _openTapped(String conversationId) {
+    if (!mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    _pendingOpen = conversationId;
+    _openPending();
+  }
+
+  void _openPending() {
+    final id = _pendingOpen, current = feed;
+    if (id == null || current == null || !current.loaded || !mounted) return;
+    _pendingOpen = null;
+    final conversation = current.conversations.where((item) => item.id == id).firstOrNull;
+    if (conversation == null) {
+      showMessage(context, '这个对话已不存在，或不在当前后端上');
+      return;
+    }
+    _open(conversation: conversation);
   }
 
   void _open({Conversation? conversation, Project? project}) {
     final client = widget.state.client, current = feed;
     if (client == null || current == null) return;
     feed?.stop();
+    _chatOpen = true;
     Navigator.of(context)
         .push(MaterialPageRoute(builder: (_) => ChatScreen(client: client, feed: current, conversation: conversation, projectId: project?.id ?? conversation!.projectId)))
-        .then((_) { if (mounted) feed?.start(); });
+        .then((_) {
+          _chatOpen = false;
+          if (mounted) feed?.start();
+        });
   }
 
   Future<void> _newChat() async {

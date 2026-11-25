@@ -17,5 +17,7 @@ contextBridge.exposeInMainWorld('coderFleet', {
   reinstallSsh: id => ipcRenderer.invoke('remote:reinstall', id),
   job: id => ipcRenderer.invoke('jobs:get', id),
   bundle: () => ipcRenderer.invoke('remote:bundle'),
+  /** A clicked system notification: { backendId, conversationId, projectId }. */
+  onOpenConversation: callback => ipcRenderer.on('notifications:open', (_event, target) => callback(target)),
   platform: process.platform,
 });

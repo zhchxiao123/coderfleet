@@ -19,6 +19,7 @@ CoderFleet runs several AI coding accounts (Claude Code, Codex, Antigravity and 
   | Antigravity, Kimi Code, Grok | Agent Client Protocol over stdio (`agy acp`, `kimi acp`, `grok agent stdio`): tool approvals, interrupt, resume |
   | Hermes | `hermes chat -q --format stream-json` (no TypeScript SDK); plain text on CLIs without that flag |
 
+- **Notifications.** The App's main process long-polls the connected backend's conversation list (`src/notifications.ts`) and shows a system notification when a conversation waits for an approval or an answer, finishes, or fails, unless the App window has focus. Clicking one opens that conversation.
 - **Terminals.** Login and project shells run inside containers through `script`, so the host needs no native terminal module. The App shows them with xterm.js.
 
 ## Develop

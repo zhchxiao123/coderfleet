@@ -5,11 +5,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, safeStorage, type IpcMainInvokeEvent } from 'electron';
 import { findBundle, freePort, install, probe, Tunnel, validateTarget, type SshTarget } from './remote.js';
 import { atomicJSON, LOCAL_HOSTS, localUrl, message, readConfig, record, text } from './state.js';
 import { BUILD_ID } from './version.js';
 import { ensureLocal } from './local-backend.js';
+import { notificationText, watchConversations, type ConversationEvent } from './notifications.js';
 
 interface Profile {
   readonly id: string;
@@ -37,6 +38,9 @@ const tunnels = new Map<string, Tunnel>();
 const jobs = new Map<string, Job>();
 const bundlesDirectory = fileURLToPath(new URL('../bundles/', import.meta.url));
 const SSH = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
+let watching: { id: string; controller: AbortController } | undefined;
+// Electron drops a notification's click handler once the object is garbage-collected.
+const shown = new Set<Notification>();
 
 function backendUrl(value: string): string {
   const url = new URL(value.trim());
@@ -104,6 +108,49 @@ async function api(profile: Profile, method: string, path: string, data?: unknow
   const result: unknown = await response.json();
   if (!response.ok) throw new Error(text(record(result).error) || 'Backend returned HTTP ' + response.status);
   return result;
+}
+
+/**
+ * Notifies about the backend the window is connected to (one at a time): a conversation
+ * waits for the user, finished, or failed. Nothing is shown while the window has focus.
+ */
+function watch(profile: Profile): void {
+  if (watching?.id === profile.id) return;
+  unwatch();
+  const controller = new AbortController();
+  watching = { id: profile.id, controller };
+  void watchConversations({
+    signal: controller.signal,
+    changes: (since, wait) => api(profile, 'GET', '/v1/conversations/changes?since=' + encodeURIComponent(since) + '&wait=' + wait),
+    onEvent: event => notify(profile.id, event),
+  });
+}
+
+function unwatch(): void {
+  watching?.controller.abort();
+  watching = undefined;
+}
+
+function notify(backendId: string, event: ConversationEvent): void {
+  if (mainWindow?.isFocused() || !Notification.isSupported()) return;
+  const notification = new Notification(notificationText(event));
+  shown.add(notification);
+  notification.on('close', () => shown.delete(notification));
+  notification.on('click', () => {
+    shown.delete(notification);
+    void openConversation({ backendId, conversationId: event.conversation.id, projectId: event.conversation.projectId });
+  });
+  notification.show();
+}
+
+async function openConversation(target: { backendId: string; conversationId: string; projectId: string }): Promise<void> {
+  if (!mainWindow) await createWindow();
+  const window = mainWindow;
+  if (!window) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  window.webContents.send('notifications:open', target);
 }
 
 async function connect(profile: Profile, restart = false): Promise<unknown> {
@@ -249,6 +296,7 @@ function register(): void {
   });
   ipcMain.handle('backends:remove', (event, id: unknown) => {
     guard(event);
+    if (watching?.id === text(id)) unwatch();
     tunnels.get(text(id))?.stop();
     tunnels.delete(text(id));
     profiles = profiles.filter(profile => profile.id !== id);
@@ -257,7 +305,10 @@ function register(): void {
   });
   ipcMain.handle('backends:connect', (event, id: unknown) => {
     guard(event);
-    return connect(findProfile(id));
+    const profile = findProfile(id);
+    // Watch the backend the window chose even if it is down now: the watcher retries.
+    watch(profile);
+    return connect(profile);
   });
   ipcMain.handle('backends:restartLocal', (event, id: unknown) => {
     guard(event);
@@ -346,6 +397,8 @@ async function createWindow(): Promise<void> {
 }
 
 async function startDesktop(): Promise<void> {
+  // Windows shows toasts only for an app with an AppUserModelID.
+  if (process.platform === 'win32') app.setAppUserModelId('dev.coderfleet.desktop');
   await app.whenReady();
   try {
     profiles = JSON.parse(readFileSync(join(app.getPath('userData'), 'backends.json'), 'utf8'));
@@ -362,7 +415,7 @@ async function startDesktop(): Promise<void> {
   app.on('activate', () => { if (!mainWindow) void createWindow(); });
   app.on('second-instance', () => { mainWindow?.focus(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-  app.on('before-quit', () => { for (const tunnel of tunnels.values()) tunnel.stop(); });
+  app.on('before-quit', () => { unwatch(); for (const tunnel of tunnels.values()) tunnel.stop(); });
 }
 
 if (!app.requestSingleInstanceLock()) app.quit();

@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 
 import 'package:coderfleet_mobile/main.dart';
 import 'package:coderfleet_mobile/src/backend.dart';
+import 'package:coderfleet_mobile/src/notifications.dart';
 import 'package:coderfleet_mobile/src/state.dart';
 import 'package:flutter/services.dart';
 // ignore: deprecated_member_use
@@ -53,12 +54,12 @@ Future<void> screenshot(WidgetTester tester, String path) async {
 }
 
 /// The app, signed in to [backend] (unless [signedIn] is false).
-Future<AppState> pumpApp(WidgetTester tester, FakeBackend backend, {bool signedIn = true, ThemeMode mode = ThemeMode.light}) async {
+Future<AppState> pumpApp(WidgetTester tester, FakeBackend backend, {bool signedIn = true, ThemeMode mode = ThemeMode.light, Notifier? notifier}) async {
   await loadFonts();
   final store = MemoryProfileStore(signedIn ? [Profile(id: profile.id, name: '本机', token: backend.token, addresses: [profile.address])] : []);
   final state = AppState(store: store, clientFactory: (item) => BackendClient(item, client: backend.client));
   await state.load();
-  await tester.pumpWidget(RepaintBoundary(key: appKey, child: CoderFleetApp(state: state, themeMode: mode, fontFamily: 'Roboto', fontFamilyFallback: const ['NotoCJK'])));
+  await tester.pumpWidget(RepaintBoundary(key: appKey, child: CoderFleetApp(state: state, themeMode: mode, fontFamily: 'Roboto', fontFamilyFallback: const ['NotoCJK'], notifier: notifier)));
   await settle(tester);
   return state;
 }

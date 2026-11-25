@@ -445,6 +445,21 @@
     main.textContent = 'CoderFleet must run inside the desktop App.';
     return;
   }
+  // A clicked system notification opens its conversation, on the backend that sent it.
+  CF.transport.onOpenConversation?.(async ({ backendId, conversationId, projectId }) => {
+    const view = { name: 'chat', conversationId, projectId };
+    if (backendId === CF.state.backendId && CF.state.connected) {
+      await CF.app.refreshConversations();
+      if (CF.state.conversations.some(item => item.id === conversationId)) CF.app.go(view);
+      else CF.toast('这个对话已不存在', { error: true });
+      return;
+    }
+    remember(view);
+    // Still connecting to that backend: connect() opens the remembered view when it is done.
+    if (backendId === CF.state.backendId) return;
+    await connect(backendId);
+    if (CF.state.view.conversationId !== conversationId) CF.toast('这个对话已不存在', { error: true });
+  });
   void CF.app.loadProfiles().catch(error => {
     main.replaceChildren(h('div.welcome', h('div.welcome-card', h('h1', '启动失败'), h('p', CF.errorText(error)))));
   });
