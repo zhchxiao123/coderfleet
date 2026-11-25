@@ -1,0 +1,8 @@
+PASS  wrong token is rejected  HTTP 401
+PASS  missing token is rejected  HTTP 401
+PASS  tools listed  ['host_info', 'run_command', 'screenshot', 'serial_ports']
+PASS  allowed command runs  {"ran": true, "exit_code": 0, "stdout": "Linux\n", "stderr": ""}
+PASS  efuse burn is denied  {"ran": false, "verdict": "deny", "rule": "\\bespefuse(\\.py)?\\b.*\\b(burn|write-protect|read-protect)"}
+PASS  flash without a human's approval does not run  {"ran": false, "verdict": "deny-unconfirmed", "rule": "\\bwrite[-_]flash\\b"}
+PASS  unlisted command is denied  {"ran": false, "verdict": "deny", "rule": "(no rule matched)"}
+PASS  screenshot returns an image block  image 12212 base64 chars
