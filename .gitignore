@@ -69,3 +69,8 @@ skills-lock.json
 
 # ── TokenSave MCP 缓存（本地代码图，无需入库）──────────
 .tokensave/
+
+# 机器助手：构建产物和验证用的临时副本
+.helper-build/
+node-app/dist/
+node-app/node_modules/

@@ -1,0 +1,7 @@
+tool calls: ["ToolSearch","mcp__machine__machine_info","mcp__machine__run_command","mcp__machine__run_command"]
+SYSTEM=Linux
+STAMP=stamp 402867 Linux
+SUDO=deny/builtin:sudo
+expected stamp code: 402867
+audit: [["machine_info","allow",null,null],["run_command","allow","stamp",0],["run_command","deny","builtin:sudo",null]]
+RESULT: PASS

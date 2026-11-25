@@ -405,7 +405,7 @@ Mac 上才能验：
 ## 15. 这份设计里没有验证的
 
 - §12 里所有「Mac 上才能验」的条目。
-- 我只读了 `node-app/` 的代码，没有改它，也**没有跑它的测试**（装依赖和构建会往那个目录里写文件，超出这次允许改动的范围）。文中点到的文件名和函数名是用 `grep` 在 `61af9ed` 上核对的。
+- 写设计时我只读了 `node-app/` 的代码。实现之后的情况见 §17：改动是在那边代码的一份副本上做的，构建和全部测试在副本上跑过，没有写回那个目录。
 - gost 改了配置文件后是否必须重启才生效，我是按「启动时读一次」写的，没有查它有没有热加载。有的话「重启网络中转」这一步可以换成更轻的做法。
 - 重启 relay 对正在跑的任务的实际影响（断网几秒后能不能自己恢复）没有测。
 - `host.docker.internal` 在 Linux 上指向网桥地址、在 Mac 上能到本机回环，这是 Docker 的通常行为，这次没有逐个实测。
@@ -417,3 +417,38 @@ Mac 上才能验：
 - 研究文档及其来源清单：`docs/research/mac-helper-for-container-agents-20261125.md` §11。
 - Cua Driver README「macOS process identity and permissions」「Permission modes」「Claude Code registration」三节（2026-11-25 取回）：https://github.com/trycua/cua/blob/main/libs/cua-driver/README.md
 - `node-app/`（分支 `codex/node-electron-migration`，提交 `61af9ed`）：`src/compose.ts`（`gostConfig`、`generateCompose`、`service-bridge`、`CODERFLEET_MCP_BRIDGE_PORT`、`proxy-relay-config.yaml`）、`src/lifecycle.ts`（`Lifecycle`、`startProject`、`restartProject`）、`src/tasks.ts`（`TaskRunner`、`launch`、`finish`、`cancel`、`decide`、`PERMISSION_TIMEOUT_SECONDS`）、`src/claude-worker.ts`（`runClaude`、`canUseTool`）、`src/docker.ts`（`execDetached`）、`src/server.ts`（`DEVICE_ROUTES`、`turns/<id>/permission` 路由）、`src/state.ts`（`Permission`）、`src/conf.ts`（`rewriteConf`、`projectMountSpecs`、`setProjectMounts`、`WorkspaceProject`）、`src/local-backend.ts`（`ensureLocal`、`probeLocal`）、`src/remote.ts`（`install`、`Tunnel`）、`src/cli.ts`、`scripts/package-backend.mjs`、`ui/js/projects.js`、`ui/js/settings.js`、`test/compose.test.mjs`、`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`（`McpHttpServerConfig`）。
+
+## 17. 实现记录（2026-11-25）
+
+已经写完的：辅助程序本身（`node-app/helper/`，在这个仓库里）和 CoderFleet 这一侧的接入（`docs/plans/machine-helper/coderfleet-side.patch`，是对 App 分支 `node-app/` 的补丁）。第一期（命令）和串口两个工具做了，第三期（屏幕）没做。
+
+怎么复核：`bash docs/plans/machine-helper/verify.sh` 把 App 分支的 `node-app/` 抄到临时目录、打上补丁、放进辅助程序，再构建并跑全部测试；上一次的输出在 `docs/plans/machine-helper/test-output.txt`。真实 Claude Code 连辅助程序的记录在 `docs/plans/machine-helper/claude-check/`，界面截图在 `docs/plans/machine-helper/ui/`。
+
+补丁的基线是 App 分支提交 `c1dd92e` **加上当时那个目录里别人还没提交的改动**（`projectMountSpecs`、`setProjectMounts` 就在那些没提交的改动里，§2.2 说它们在 `61af9ed` 上已有是错的）。那边再变，补丁可能要重新对一遍。
+
+和前文不一样的地方：
+
+| 前文 | 实际 | 为什么 |
+|---|---|---|
+| 确认卡片的编号前缀没定 | `helper-` + 辅助程序给的编号 | 回答按前缀分给辅助程序，不进任务自己的审批通道 |
+| 令牌怎么到任务手里没定 | 地址和令牌放在这一次 `docker exec` 的环境变量里，任务进程读到后立刻从自己的环境里删掉 | 不落盘，Turn 上不加字段 |
+| relay 没转发时不发令牌 | 只在界面和命令行里提示，令牌照发 | 探测结果不总是可靠，发了也只是连不上 |
+| 所有账号都能用 | 只有容器里、走 relay 的 Claude Code 账号 | 直连账号到不了 relay 的转发口；别的 CLI 还没接 MCP 配置 |
+| `gui` 这一档 | 接口直接拒绝，提示还没做 | 第三期没做，不留半截开关 |
+| 辅助程序单独打包 | 随后端一起编译到 `dist/helper`，安装就是抄到 `~/.coderfleet-helper/bin` | 少一套打包；升级跟着后端版本走 |
+| 监听地址 | 默认 `127.0.0.1`，Linux 上用 `HELPER_HOST` 改成网桥地址 | Mac 的 `host.docker.internal` 到得了回环，Linux 到不了 |
+| 待确认的调用怎么到界面 | 后端每秒问一次辅助程序，自己不存 | 后端重启后卡片会从辅助程序那边重新出现 |
+| 项目开了、辅助程序没在跑 | 任务照常跑，只是没有这组工具，原因写进后端日志 | 不因为一个可选能力挡住任务 |
+| 规则里的程序 | 只认不带路径的程序名；去哪些目录找（`path`）只能手改规则文件 | 接口改不了查找目录，就没法靠改规则把别的程序换进来 |
+
+子进程的环境变量在设计的最小集之外多给了 `USER`、`LOGNAME`、`TMPDIR`。
+
+实现之后仍然没有验证的：
+
+- §12 里所有「Mac 上才能验」的条目；真的 relay 转发（测试里把「relay 地址」直接指到本机上的辅助程序）。
+- 容器里的 Claude Code 访问 relay 地址时会不会被 `HTTP_PROXY` 带去走代理（要看它认不认 `NO_PROXY` 里的网段写法）。
+- 一条命令跑过 5 分钟时，连接靠心跳能不能一直不断。
+- 串口：复位之后最早的几行启动日志可能读不到。
+- 自己另起会话（`setsid`）的程序，按进程组杀不到。
+- 令牌在容器里对这个任务的 agent 是可见的（设计上接受：它能做的事本来就以这个令牌为限）。
+- 聊天里的确认卡片只改了标题和去掉自由输入，没有截图看过。

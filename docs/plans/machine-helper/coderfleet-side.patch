@@ -1,0 +1,1021 @@
+--- a/node-app/package.json
++++ b/node-app/package.json
+@@ -9,11 +9,11 @@
+     "node": ">=22.18"
+   },
+   "scripts": {
+-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node scripts/vendor.mjs",
+-    "test": "npm run build && node --test test/*.test.mjs",
++    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && tsc -p helper/tsconfig.json && node scripts/vendor.mjs",
++    "test": "npm run build && node --test test/*.test.mjs helper/test/*.test.mjs",
+     "backend": "node dist/cli.js",
+     "desktop": "node scripts/dev-app-name.mjs && electron .",
+-    "package": "npm run package:backend && electron-packager . CoderFleet --no-asar --icon=icons/coderfleet --out out --ignore='^/(src|test|out|scripts|backend|icons|\\.cache|tsconfig.json|node_modules)'",
++    "package": "npm run package:backend && electron-packager . CoderFleet --no-asar --icon=icons/coderfleet --out out --ignore='^/(src|helper|test|out|scripts|backend|icons|\\.cache|tsconfig.json|node_modules)'",
+     "package:backend": "npm run build && node scripts/package-backend.mjs --arch x64 && node scripts/package-backend.mjs --arch arm64"
+   },
+   "devDependencies": {
+--- a/node-app/src/claude-worker.ts
++++ b/node-app/src/claude-worker.ts
+@@ -64,7 +64,16 @@
+   catch { return ''; }
+ }
+ 
++/** The MCP server name of the machine helper; its tools are `mcp__machine__…`. */
++const MACHINE = 'machine';
++
+ export async function runClaude(spec: ClaudeSpec): Promise<number> {
++  // The machine helper's connection for this task, when the project may use it. Taken out of
++  // the environment so that what the agent runs in the container does not inherit the token.
++  const helper = process.env.CODERFLEET_HELPER_URL && process.env.CODERFLEET_HELPER_TOKEN
++    ? { url: process.env.CODERFLEET_HELPER_URL, token: process.env.CODERFLEET_HELPER_TOKEN } : undefined;
++  delete process.env.CODERFLEET_HELPER_URL;
++  delete process.env.CODERFLEET_HELPER_TOKEN;
+   const mailbox = openMailbox(spec);
+   writeState(spec);
+   const pending = new Map<string, (decision: Decision) => void>();
+@@ -210,8 +219,12 @@
+         permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}),
+         ...(spec.read_only ? { disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
+         systemPrompt: { type: 'preset', preset: 'claude_code', append: CF_SEND_HINT },
+-        canUseTool: (toolName: string, toolInput: Json, context: Json) =>
+-          ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),
++        // A call may wait for a person on the helper's side (10 minutes) and then run for up to 30.
++        ...(helper ? { mcpServers: { [MACHINE]: { type: 'http', url: helper.url, headers: { Authorization: 'Bearer ' + helper.token }, timeout: 2_500_000 } } } : {}),
++        // The helper applies its own rules and asks the person itself: asking here too would ask twice.
++        canUseTool: (toolName: string, toolInput: Json, context: Json) => helper && toolName.startsWith('mcp__' + MACHINE + '__')
++          ? Promise.resolve<PermissionResult>({ behavior: 'allow', updatedInput: toolInput })
++          : ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),
+         stderr: (data: string) => process.stderr.write(data),
+       },
+     });
+--- a/node-app/src/cli.ts
++++ b/node-app/src/cli.ts
+@@ -8,6 +8,9 @@
+ //                    做完为止 jobs of the running service (config: --config <path>)
+ //   schedule list | show <id> | add <project> <rule> <prompt> [--job] | edit <id> … | on|off|run|remove <id>
+ //                    定时: things the service starts by itself (rule: daily HH:MM | weekly 1,3 HH:MM | every <hours>)
++//   helper status | install | start | stop | upgrade | restart-relay | access <project> off|command
++//          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | audit [n]
++//                    机器助手: the separate program that runs listed commands on this machine for tasks
+ import { randomBytes } from 'node:crypto';
+ import { existsSync, mkdirSync } from 'node:fs';
+ import { homedir } from 'node:os';
+@@ -22,7 +25,7 @@
+ const flag = argv.indexOf('--config');
+ const flagged = flag >= 0 ? argv.splice(flag, 2)[1] : undefined;
+ const [mode, rawPath] = argv;
+-const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' ? '' : rawPath) || join(home, 'config.json'));
++const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' || mode === 'helper' ? '' : rawPath) || join(home, 'config.json'));
+ 
+ const JOB_STATES: Readonly<Record<string, string>> = { working: '在做', waiting: '等你', review: '待验收', accepted: '已收下', discarded: '已丢弃' };
+ interface JobView { conversationId: string; projectId: string; title: string; branch: string; state: string; error?: string; mergeError?: string; mergedInto?: string; createdAt: string;
+@@ -145,6 +148,50 @@
+   } else throw new Error(SCHEDULE_USAGE);
+ }
+ 
++const HELPER_USAGE = 'Usage: coderfleet-backend helper status | install | start | stop | upgrade | restart-relay | access <project> off|command'
++  + ' | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | audit [n] [--config config.json]';
++interface HelperView { bundled: string; installed: string; running: boolean; version: string; compatible: boolean; upgrade: boolean; host: string; port: number; url: string;
++  relay: string; home: string; tasks: number; pending: number; policyError: string; machine: string }
++
++function helperLines(view: HelperView): string {
++  const state = !view.installed ? '没有安装' : !view.running ? '装了，没有在运行' : !view.compatible ? '在运行，但版本对不上，要先升级' : '在运行';
++  const relay: Record<string, string> = { ready: '有', missing: '没有，运行 helper restart-relay', stopped: 'relay 没有在运行，启动项目时会带上', unknown: '不确定' };
++  return [
++    '机器助手  ' + state + (view.running ? '  ' + view.version + '  ' + view.host + ':' + view.port + (view.machine ? '  ' + view.machine : '') : view.installed ? '  ' + view.installed : ''),
++    ...(view.upgrade ? ['可升级到 ' + view.bundled + '：helper upgrade'] : []),
++    ...(view.running ? ['容器里的地址  ' + view.url, 'relay 转发  ' + (relay[view.relay] ?? view.relay), '有令牌的任务 ' + view.tasks + '  等确认 ' + view.pending] : []),
++    ...(view.policyError ? ['规则文件有错，所有命令都会被拒绝：' + view.policyError] : []),
++    '目录  ' + view.home,
++  ].join('\n');
++}
++
++async function helperCommand(verb: string | undefined, args: string[]): Promise<void> {
++  if (verb === 'status') console.log(helperLines(await call<HelperView>('GET', 'helper')));
++  else if (verb === 'install' || verb === 'start' || verb === 'stop' || verb === 'upgrade') console.log(helperLines(await call<HelperView>('POST', 'helper/' + verb, {})));
++  else if (verb === 'restart-relay') {
++    let operation = await call<{ id: string; status: string; error?: string }>('POST', 'helper/restart-relay', {});
++    while (operation.status === 'running') {
++      await new Promise(resolve => setTimeout(resolve, 500));
++      operation = await call('GET', 'operations/' + operation.id);
++    }
++    if (operation.status !== 'succeeded') throw new Error(operation.error || 'relay 没有重启成功');
++    console.log('relay 已重启');
++  } else if (verb === 'access' && args[0] && args[1]) {
++    console.log(args[0] + '  ' + (await call<{ helper: string }>('PUT', 'projects/' + args[0] + '/helper', { access: args[1] })).helper);
++  } else if (verb === 'policy' && (args[0] === 'show' || (args[0] === 'set' && args[1] && args[2]) || (args[0] === 'remove' && args[1]))) {
++    const words = args.slice(args[0] === 'set' ? 3 : 2);
++    const rule = { program: args[1], ...(args[0] === 'set' ? { action: args[2] } : {}), ...(words.length ? { args_any: words } : {}) };
++    const answer = args[0] === 'show' ? await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('GET', 'helper/policy')
++      : await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('POST', 'helper/policy', { [args[0] as string]: rule });
++    console.log(answer.policy ? JSON.stringify(answer.policy, null, 2) : '规则文件有错：' + answer.error);
++    if (answer.file) console.log('文件  ' + answer.file);
++    if (answer.built_in) console.log('不管规则怎么写都拒绝：\n' + answer.built_in.map(line => '  - ' + line).join('\n'));
++  } else if (verb === 'audit') {
++    const { records } = await call<{ records: unknown[] }>('GET', 'helper/audit?n=' + (Number(args[0]) || 50));
++    console.log(records.length ? records.map(item => JSON.stringify(item)).join('\n') : '还没有操作记录');
++  } else throw new Error(HELPER_USAGE);
++}
++
+ try {
+   if (mode === 'serve') {
+     // Turns run in containers, so stopping the service never stops their work.
+@@ -181,9 +228,11 @@
+     await jobCommand(argv[1], argv.slice(2));
+   } else if (mode === 'schedule') {
+     await scheduleCommand(argv[1], argv.slice(2));
++  } else if (mode === 'helper') {
++    await helperCommand(argv[1], argv.slice(2));
+   } else if (mode === 'version') {
+     console.log(VERSION);
+-  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | version');
++  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | helper … | version');
+ } catch (error) {
+   console.error(message(error));
+   process.exitCode = 1;
+--- a/node-app/src/compose.ts
++++ b/node-app/src/compose.ts
+@@ -24,7 +24,7 @@
+ }
+ 
+ function gostConfig(relayPort: string, dnsPort: string, dnsUpstream: string, upstreamHost: string, upstreamPort: string,
+-  bypass: string[], bridgePort: string, bridgeTarget: string): Json {
++  bypass: string[], bridgePort: string, bridgeTarget: string, helperPort: string, helperTarget: string): Json {
+   return {
+     services: [
+       { name: 'service-0', addr: ':' + relayPort, handler: { type: 'http', chain: 'chain-0' }, listener: { type: 'tcp' } },
+@@ -36,6 +36,11 @@
+         name: 'service-bridge', addr: ':' + bridgePort, handler: { type: 'tcp' }, listener: { type: 'tcp' },
+         forwarder: { nodes: [{ name: 'bridge', addr: bridgeTarget }] },
+       },
++      // Tasks reach the machine helper on the host through this port; the helper asks for a task token.
++      {
++        name: 'helper-bridge', addr: ':' + helperPort, handler: { type: 'tcp' }, listener: { type: 'tcp' },
++        forwarder: { nodes: [{ name: 'helper', addr: helperTarget }] },
++      },
+     ],
+     chains: [{
+       name: 'chain-0',
+@@ -45,6 +50,10 @@
+   };
+ }
+ 
++/** Where the machine helper listens on the host, and the relay port forwarded to it. */
++export function helperPort(config: ConfRecord): string { return config.HELPER_PORT || '8790'; }
++export function helperBridgePort(config: ConfRecord): string { return config.HELPER_BRIDGE_RELAY_PORT || '8767'; }
++
+ interface DockerSocket { host: string; container: string }
+ 
+ function pathFromEndpoint(value: string): string {
+@@ -293,7 +302,8 @@
+       healthcheck: { test: ['CMD', 'sh', '-c', 'nc -z localhost ' + relayPort], interval: '8s', timeout: '4s', retries: 5, start_period: '5s' },
+     };
+     if (proxyMode === 'xray') relay.depends_on = { 'xray-proxy': { condition: 'service_started' } };
+-    gost = gostConfig(relayPort, dnsPort, dnsUpstream, upstreamHost, upstreamPort, bypass, bridgePort, 'host.docker.internal:' + serverPort);
++    gost = gostConfig(relayPort, dnsPort, dnsUpstream, upstreamHost, upstreamPort, bypass, bridgePort, 'host.docker.internal:' + serverPort,
++      helperBridgePort(config), 'host.docker.internal:' + helperPort(config));
+     relay.command = '-C /etc/gost/config.yaml';
+     relay.volumes = ['./proxy-relay-config.yaml:/etc/gost/config.yaml:ro'];
+     services['proxy-relay'] = relay;
+--- a/node-app/src/conf.ts
++++ b/node-app/src/conf.ts
+@@ -263,6 +263,23 @@
+   if (!found) throw new WorkspaceError('项目不存在');
+ }
+ 
++export type HelperAccess = 'off' | 'command' | 'gui';
++
++/** What the project's tasks may do on this machine through the helper (HELPER_ACCESS in projects.conf). */
++export function projectHelperAccess(project: WorkspaceProject): HelperAccess {
++  const value = (project.record.HELPER_ACCESS ?? '').toLowerCase();
++  return value === 'command' || value === 'gui' ? value : 'off';
++}
++
++export function setProjectHelper(workspace: string, name: string, access: string): void {
++  if (access !== 'off' && access !== 'command' && access !== 'gui') throw new WorkspaceError('机器操作只能是 off、command 或 gui');
++  const found = rewriteConf(join(workspace, 'projects.conf'), 'NAME', name, record => {
++    const { HELPER_ACCESS: _previous, ...rest } = record;
++    return access === 'off' ? rest : { ...rest, HELPER_ACCESS: access };
++  });
++  if (!found) throw new WorkspaceError('项目不存在');
++}
++
+ /** Settings shown in the desktop client, with config.conf defaults (compose.py / init_wizard.py). */
+ export const SETTINGS: Readonly<Record<string, string>> = {
+   PROXY_HOST: 'host.docker.internal', PROXY_HTTP_PORT: '7890', CONTAINER_TIMEZONE: 'Asia/Shanghai',
+--- a/node-app/src/helper-host.ts
++++ b/node-app/src/helper-host.ts
+@@ -0,0 +1,233 @@
++// The machine helper (helper/, shipped compiled in dist/helper): a separate
++// program on this machine that runs listed commands for tasks holding a token.
++// CoderFleet installs and starts it, asks it for one token per task, shows what
++// it wants confirmed and revokes the token when the task ends. The master secret
++// stays in the helper's own directory and is read from there for each request.
++import { execFile, spawn } from 'node:child_process';
++import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
++import { homedir } from 'node:os';
++import { join } from 'node:path';
++import { setTimeout as sleep } from 'node:timers/promises';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++import { promisify } from 'node:util';
++import { helperBridgePort, helperPort } from './compose.js';
++import { loadConfig, projectHelperAccess, WorkspaceError, type WorkspaceProject } from './conf.js';
++import { message, record, text } from './state.js';
++
++const run = promisify(execFile);
++
++/** One command a task wants to run and the helper's rules want confirmed first. */
++export interface HelperPending { readonly id: string; readonly task: string; readonly argv: readonly string[]; readonly cwd: string; readonly expires: number }
++
++export interface HelperStatus {
++  /** The helper this build ships. */
++  readonly bundled: string;
++  /** The installed one ('' when not installed). */
++  readonly installed: string;
++  readonly running: boolean;
++  /** The running one's version; differs from `bundled` when it should be upgraded. */
++  readonly version: string;
++  /** False when the running helper speaks another protocol: no task gets a token until it is upgraded. */
++  readonly compatible: boolean;
++  readonly upgrade: boolean;
++  readonly host: string;
++  readonly port: number;
++  /** What tasks in relay containers connect to. */
++  readonly url: string;
++  /** The relay's forward to the helper: there, not there (restart the relay), or the relay is not running. */
++  readonly relay: 'ready' | 'missing' | 'stopped' | 'unknown';
++  readonly home: string;
++  readonly tasks: number;
++  readonly pending: number;
++  readonly policyError: string;
++  readonly machine: string;
++}
++
++export type HelperDecision = 'allow' | 'allow-task' | 'deny';
++
++/** The answers on a confirmation card, in the order shown. */
++export const HELPER_ANSWERS: readonly { label: string; description: string; decision: HelperDecision }[] = [
++  { label: '允许这一次', description: '只放行这一条命令', decision: 'allow' },
++  { label: '这个任务里同样的命令都允许', description: '这个任务结束前，同一个程序、同样的参数不再问', decision: 'allow-task' },
++  { label: '拒绝', description: '不运行，任务会收到被拒绝的结果', decision: 'deny' },
++];
++
++/** Turn approvals that belong to the helper carry this prefix, so answers go to it and not to the worker. */
++export const HELPER_CARD = 'helper-';
++
++/** Environment variables that hand a task its connection; the worker removes them before the agent starts. */
++export const HELPER_URL_ENV = 'CODERFLEET_HELPER_URL';
++export const HELPER_TOKEN_ENV = 'CODERFLEET_HELPER_TOKEN';
++
++const bundle = fileURLToPath(new URL('./helper/', import.meta.url));
++
++export class HelperHost {
++  public readonly home = process.env.CODERFLEET_HELPER_HOME || join(homedir(), '.coderfleet-helper');
++  private shipped?: Promise<{ version: string; protocol: number }>;
++
++  public constructor(private readonly workspace: string, private readonly dockerPath: string) {}
++
++  private config(): { host: string; port: number; url: string; bridge: string } {
++    const config = loadConfig(this.workspace);
++    const bridge = helperBridgePort(config);
++    return {
++      host: config.HELPER_HOST || '127.0.0.1', port: Number(helperPort(config)), bridge,
++      url: 'http://' + (config.RELAY_IP || '172.21.0.2') + ':' + bridge + '/mcp',
++    };
++  }
++
++  /** The helper compiled into this build. */
++  private bundled(): Promise<{ version: string; protocol: number }> {
++    return this.shipped ??= import(pathToFileURL(join(bundle, 'version.js')).href)
++      .then(module => ({ version: text(module.VERSION), protocol: Number(module.PROTOCOL) }));
++  }
++
++  private installedVersion(): string {
++    try { return readFileSync(join(this.home, 'bin', 'VERSION'), 'utf8').trim(); } catch { return ''; }
++  }
++
++  /** One request to the helper's management port; undefined when nothing answers there. */
++  private async control(method: string, path: string, body?: unknown, timeout = 5_000): Promise<{ status: number; body: Record<string, unknown> } | undefined> {
++    let secret: string; let address: { host: string; port: number };
++    try {
++      secret = readFileSync(join(this.home, 'secret'), 'utf8').trim();
++      address = JSON.parse(readFileSync(join(this.home, 'run.json'), 'utf8')) as { host: string; port: number };
++    } catch { return undefined; }
++    const host = address.host.includes(':') ? '[' + address.host + ']' : address.host;
++    try {
++      const response = await fetch('http://' + host + ':' + address.port + '/control/' + path, {
++        method, headers: { authorization: 'Bearer ' + secret, 'content-type': 'application/json' },
++        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeout),
++      });
++      return { status: response.status, body: record(await response.json()) };
++    } catch { return undefined; }
++  }
++
++  /** Like `control`, for what the user asked for: a helper that is not there or refuses is an error. */
++  private async ask(method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
++    const answer = await this.control(method, path, body);
++    if (!answer) throw new WorkspaceError('机器助手没有在运行');
++    if (answer.status >= 400) throw new WorkspaceError(text(answer.body.error) || '机器助手拒绝了这个请求（' + answer.status + '）');
++    return answer.body;
++  }
++
++  private async relay(bridge: string): Promise<HelperStatus['relay']> {
++    try {
++      const { stdout } = await run(this.dockerPath, ['ps', '-a', '--format', '{{.Names}}\t{{.State}}'], { timeout: 5_000, maxBuffer: 4_000_000 });
++      if (!stdout.split('\n').some(line => line.split('\t')[0] === 'coderfleet-proxy-relay' && line.split('\t')[1] === 'running')) return 'stopped';
++    } catch { return 'unknown'; }
++    try { await run(this.dockerPath, ['exec', 'coderfleet-proxy-relay', 'nc', '-z', 'localhost', bridge], { timeout: 5_000 }); return 'ready'; }
++    catch (error) { return record(error).code === 1 ? 'missing' : 'unknown'; }
++  }
++
++  public async status(): Promise<HelperStatus> {
++    const [shipped, answer] = await Promise.all([this.bundled(), this.control('GET', 'status')]);
++    const settings = this.config();
++    const live = answer?.status === 200 ? answer.body : undefined;
++    const installed = this.installedVersion();
++    return {
++      bundled: shipped.version, installed, running: Boolean(live), version: text(live?.version),
++      compatible: !live || live.protocol === shipped.protocol,
++      upgrade: Boolean(installed) && installed !== shipped.version || Boolean(live) && live?.version !== shipped.version,
++      host: settings.host, port: settings.port, url: settings.url, relay: live ? await this.relay(settings.bridge) : 'unknown',
++      home: this.home, tasks: Number(live?.tasks ?? 0), pending: Number(live?.pending ?? 0),
++      policyError: text(live?.policy_error), machine: live ? [text(live.hostname), text(live.system), text(live.arch)].filter(Boolean).join(' · ') : '',
++    };
++  }
++
++  /** Copies the helper this build ships into its own directory; rules, secret and log stay. */
++  public async install(): Promise<void> {
++    if (!existsSync(join(bundle, 'main.js'))) throw new WorkspaceError('这个版本没有带机器助手');
++    const shipped = await this.bundled();
++    const target = join(this.home, 'bin');
++    mkdirSync(this.home, { recursive: true, mode: 0o700 });
++    chmodSync(this.home, 0o700);
++    rmSync(target, { recursive: true, force: true });
++    mkdirSync(target, { mode: 0o700 });
++    for (const name of readdirSync(bundle)) if (name.endsWith('.js')) cpSync(join(bundle, name), join(target, name));
++    writeFileSync(join(target, 'package.json'), '{"type":"module"}\n');
++    writeFileSync(join(target, 'VERSION'), shipped.version + '\n');
++  }
++
++  public async start(): Promise<void> {
++    if ((await this.control('GET', 'status'))?.status === 200) return;
++    const script = join(this.home, 'bin', 'main.js');
++    if (!existsSync(script)) throw new WorkspaceError('机器助手还没有安装');
++    const settings = this.config();
++    const logPath = join(this.home, 'helper.log');
++    const log = openSync(logPath, 'a', 0o600);
++    try {
++      // Its own process group and no ties to this service: it keeps running when the backend restarts.
++      const child = spawn(process.execPath, [script, 'serve', '--port', String(settings.port), '--host', settings.host], {
++        detached: true, stdio: ['ignore', log, log],
++        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', CODERFLEET_HELPER_HOME: this.home },
++      });
++      child.unref();
++    } finally { closeSync(log); }
++    for (let attempt = 0; attempt < 50; attempt += 1) {
++      await sleep(100);
++      if ((await this.control('GET', 'status', undefined, 1_000))?.status === 200) return;
++    }
++    let tail = '';
++    try { tail = readFileSync(logPath, 'utf8').trim().split('\n').slice(-3).join('\n'); } catch { /* no log */ }
++    throw new WorkspaceError('机器助手没有启动起来' + (tail ? '：' + tail : ''));
++  }
++
++  /** Stops the helper and every command it is running. */
++  public async stop(): Promise<void> {
++    if (!await this.control('POST', 'stop', {})) return;
++    for (let attempt = 0; attempt < 50; attempt += 1) {
++      await sleep(100);
++      if (!await this.control('GET', 'status', undefined, 1_000)) return;
++    }
++    throw new WorkspaceError('机器助手没有停下来');
++  }
++
++  /** Replaces the installed helper with the one this build ships; a running one is restarted. */
++  public async upgrade(): Promise<void> {
++    const running = Boolean(await this.control('GET', 'status'));
++    if (running) await this.stop();
++    await this.install();
++    if (running) await this.start();
++  }
++
++  /**
++   * The environment that connects one task to the helper, or nothing when the
++   * project has no access, the account cannot reach it, or the helper is not there.
++   * `reason` says why, for the service log.
++   */
++  public async grant(project: WorkspaceProject, taskId: string): Promise<{ env: Record<string, string>; reason?: string }> {
++    const access = projectHelperAccess(project);
++    if (access === 'off') return { env: {} };
++    if (project.account.type !== 'claude' || project.account.runtime !== 'container') return { env: {}, reason: '只有容器里的 Claude Code 任务能用机器助手' };
++    if (project.account.proxy !== 'relay') return { env: {}, reason: '不走 relay 的账号连不到机器助手' };
++    const status = await this.control('GET', 'status');
++    if (status?.status !== 200) return { env: {}, reason: '机器助手没有在运行' };
++    if (status.body.protocol !== (await this.bundled()).protocol) return { env: {}, reason: '机器助手的版本和这个后端对不上，请先升级它' };
++    const answer = await this.control('POST', 'token', { task: taskId, label: project.name, access, root: project.path });
++    const token = text(answer?.body.token);
++    if (answer?.status !== 200 || !token) return { env: {}, reason: text(answer?.body.error) || '机器助手没有发出令牌' };
++    return { env: { [HELPER_URL_ENV]: this.config().url, [HELPER_TOKEN_ENV]: token } };
++  }
++
++  /** Ends a task's access: its token stops working and what it started is killed. */
++  public async revoke(taskId: string): Promise<void> {
++    const answer = await this.control('POST', 'revoke', { task: taskId });
++    if (answer && answer.status >= 400) console.error('Helper did not revoke', taskId, message(answer.body.error));
++  }
++
++  /** Commands waiting for a person; undefined when the helper does not answer. */
++  public async pending(): Promise<HelperPending[] | undefined> {
++    const answer = await this.control('GET', 'pending', undefined, 3_000);
++    if (answer?.status !== 200 || !Array.isArray(answer.body.pending)) return undefined;
++    return answer.body.pending.map(record).map(item => ({
++      id: text(item.id), task: text(item.task), cwd: text(item.cwd), expires: Number(item.expires),
++      argv: Array.isArray(item.argv) ? item.argv.map(text) : [],
++    }));
++  }
++
++  public async decide(id: string, decision: HelperDecision): Promise<void> { await this.ask('POST', 'decide', { id, decision }); }
++  public policy(): Promise<Record<string, unknown>> { return this.ask('GET', 'policy'); }
++  public changePolicy(change: unknown): Promise<Record<string, unknown>> { return this.ask('POST', 'policy', change); }
++  public audit(count: number): Promise<Record<string, unknown>> { return this.ask('GET', 'audit?n=' + count); }
++}
+--- a/node-app/src/lifecycle.ts
++++ b/node-app/src/lifecycle.ts
+@@ -172,6 +172,18 @@
+     });
+   }
+ 
++  /**
++   * Recreates the relay from a freshly written configuration, so a forward added
++   * since it started (the machine helper's) takes effect. Running tasks lose
++   * their connections for a few seconds.
++   */
++  public restartRelay(): Operation {
++    return this.start('restart', 'proxy-relay', async (_log, exec) => {
++      if (!(await writeCompose(this.workspace, this.dockerPath)).gost) throw new WorkspaceError('没有走 relay 的项目，不需要转发');
++      await exec([...this.compose(), 'up', '-d', '--force-recreate', '--no-deps', 'proxy-relay']);
++    });
++  }
++
+   /** Stops and removes the project's containers, then removes it from projects.conf. Files stay. */
+   public removeProject(name: string): Operation {
+     const project = this.project(name);
+--- a/node-app/src/server.ts
++++ b/node-app/src/server.ts
+@@ -8,7 +8,7 @@
+ import { fileURLToPath } from 'node:url';
+ import { ACCOUNT_TYPES, accountType } from './accounts.js';
+ import {
+-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectMountSpecs, setProjectMounts,
++  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
+ } from './conf.js';
+ import { projectMounts } from './compose.js';
+ import { assertContainer, models } from './docker.js';
+@@ -16,6 +16,7 @@
+ import { FollowUps, type FollowUp } from './follow-ups.js';
+ import { acceptPrompt, CHECK_ROUNDS, closedNote, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
+ import { ForkError, forkOf, transcript } from './fork.js';
++import { HELPER_ANSWERS, HELPER_CARD, HelperHost, type HelperPending } from './helper-host.js';
+ import { Lifecycle } from './lifecycle.js';
+ import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
+ import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
+@@ -115,6 +116,44 @@
+   const chatProject = (id: string): WorkspaceProject | undefined =>
+     readWorkspace(workspace).projects.find(item => item.name === id && chatSupported(item.account.type) && item.account.runtime === 'container');
+   const runner = new TaskRunner(store, config.dockerPath, chatProject);
++  const helper = new HelperHost(workspace, config.dockerPath);
++  runner.taskEnv = async (target, turn) => {
++    const granted = await helper.grant(target, turn.id);
++    if (granted.reason) console.error('Turn ' + turn.id + ' runs without the machine helper: ' + granted.reason);
++    return granted.env;
++  };
++  /** Active turns of projects that may use the machine helper, or that still show one of its cards. */
++  const machineTurns = (): Turn[] => {
++    const allowed = new Set(readWorkspace(workspace).projects.filter(item => projectHelperAccess(item) !== 'off').map(item => item.name));
++    return store.liveTurns().filter(turn => active(turn) && turn.origin === 'node' && (allowed.has(turn.projectId) || turn.permission?.id.startsWith(HELPER_CARD)));
++  };
++  const helperCard = (item: HelperPending): NonNullable<Turn['permission']> => {
++    const command = item.argv.map(word => /^[\w@%+=:,./-]+$/.test(word) ? word : JSON.stringify(word)).join(' ');
++    return {
++      id: HELPER_CARD + item.id, title: '要在这台机器上运行命令', details: JSON.stringify({ command, cwd: item.cwd }), allow: true,
++      questions: [{
++        question: '要在这台机器上运行：' + command + '（目录 ' + item.cwd + '）', header: '机器操作', multiSelect: false,
++        options: HELPER_ANSWERS.map(({ label, description }) => ({ label, description })),
++      }],
++    };
++  };
++  let helperSyncing = false;
++  /** Shows what the helper wants confirmed as the turn's approval card, and takes the card away once it is settled. */
++  const syncHelperCards = async (): Promise<void> => {
++    if (helperSyncing || !machineTurns().length) return;
++    helperSyncing = true;
++    try {
++      // A helper that does not answer has nothing waiting: its calls ended with it.
++      const pending = await helper.pending() ?? [];
++      for (const turn of machineTurns()) {
++        const mine = pending.filter(item => item.task === turn.id);
++        const shown = turn.permission?.id.startsWith(HELPER_CARD) ? turn.permission.id : '';
++        if (shown && !mine.some(item => HELPER_CARD + item.id === shown)) { delete turn.permission; store.saveTurn(turn); }
++        // One card at a time: the worker's own approval, when there is one, is answered first.
++        if (!turn.permission && mine[0]) { turn.permission = helperCard(mine[0]); store.saveTurn(turn); }
++      }
++    } finally { helperSyncing = false; }
++  };
+   const claudeModelLists = new Map<string, { at: number; list: Promise<ModelChoice[]> }>();
+   const project = (name: string): WorkspaceProject => {
+     const found = readWorkspace(workspace).projects.find(item => item.name === name);
+@@ -313,7 +352,12 @@
+     catch (error) { jobs.patch(id, ['working'], { state: 'waiting', reason: 'merge', error: undefined, mergeError: '没能确认有没有合并：' + message(error) }); }
+     finally { reviewing.delete(id); }
+   };
+-  runner.onFinish = turn => { titles.observe(turn); settleJob(turn); };
++  runner.onFinish = turn => {
++    // The task's token stops working and whatever it started on the machine is killed.
++    const owner = readWorkspace(workspace).projects.find(item => item.name === turn.projectId);
++    if (owner && projectHelperAccess(owner) !== 'off') void helper.revoke(turn.id);
++    titles.observe(turn); settleJob(turn);
++  };
+   /** After a restart (or a missed finish): a working job whose last turn has ended is settled from that turn. */
+   const settleJobs = (): void => {
+     for (const job of jobs.list()) {
+@@ -657,7 +701,7 @@
+       return projects.map(item => ({
+         id: item.name, name: item.name, account: item.account.name, type: item.account.type, typeLabel: accountType(item.account.type).label,
+         path: item.path, active: item.active, runtime: item.account.runtime, container: item.container,
+-        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item),
++        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item), helper: projectHelperAccess(item),
+         chat: chatSupported(item.account.type) && item.account.runtime === 'container',
+       }));
+     }],
+@@ -690,6 +734,29 @@
+       setProjectMounts(workspace, target.name, specs);
+       return { mounts: specs };
+     }],
++    // What the project's tasks may do on this machine through the helper (HELPER_ACCESS); applies to tasks started afterwards.
++    ['PUT', /^projects\/([\w-]+)\/helper$/, async (request, [name]) => {
++      const target = project(name as string);
++      const access = text((await body(request)).access);
++      if (access === 'gui') throw new HttpError(400, '图形界面操作还没有做，现在只能选 off 或 command');
++      setProjectHelper(workspace, target.name, access);
++      // Turned off: running tasks lose their access now, not when they end.
++      if (access === 'off') for (const turn of store.liveTurns()) if (turn.projectId === target.name && active(turn)) await helper.revoke(turn.id);
++      return { helper: access };
++    }],
++    // The machine helper: main token only (none of these is in DEVICE_ROUTES).
++    ['GET', /^helper$/, () => helper.status()],
++    ['POST', /^helper\/(install|start|stop|upgrade)$/, async (_request, [action]) => {
++      if (action === 'install') { await helper.install(); await helper.start(); }
++      else if (action === 'start') await helper.start();
++      else if (action === 'stop') await helper.stop();
++      else await helper.upgrade();
++      return helper.status();
++    }],
++    ['POST', /^helper\/restart-relay$/, async () => lifecycle.restartRelay()],
++    ['GET', /^helper\/policy$/, () => helper.policy()],
++    ['POST', /^helper\/policy$/, async request => helper.changePolicy(await body(request))],
++    ['GET', /^helper\/audit$/, (_request, _params, url) => helper.audit(Math.min(Math.max(Number(url.searchParams.get('n')) || 50, 1), 1000))],
+     ['POST', /^projects\/([\w-]+)\/terminal$/, async (request, [name]) => {
+       const [cols, rows] = size(await body(request));
+       return { terminalId: await terminals.shell(project(name as string).name, cols, rows) };
+@@ -1035,6 +1102,17 @@
+       const input = await body(request);
+       const key = identifier(input.id);
+       if (turn.permission?.id !== key) throw new HttpError(409, 'This approval is no longer available');
++      if (key.startsWith(HELPER_CARD)) {
++        // The machine helper's card: the answer goes to the helper, which holds the call until then.
++        const answer = Object.values(record(input.answers)).map(text)[0] || (input.decision === 'allow' ? HELPER_ANSWERS[0]?.label : input.decision === 'deny' ? '拒绝' : '');
++        if (!answer) throw new HttpError(400, 'Answer the question first');
++        // Anything that is not one of the two ways to allow is a refusal.
++        const decision = HELPER_ANSWERS.find(item => item.label === answer)?.decision ?? 'deny';
++        try { await helper.decide(key.slice(HELPER_CARD.length), decision); }
++        catch (error) { throw new HttpError(409, message(error)); }
++        if (turn.permission?.id === key) { delete turn.permission; store.saveTurn(turn); }
++        return { accepted: true, decision };
++      }
+       if (turn.permission.questions) {
+         const answers = Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)]));
+         if (!Object.keys(answers).length) throw new HttpError(400, 'Answer the question first');
+@@ -1094,6 +1172,7 @@
+   let titlesTicked = 0;
+   let jobsSettled = 0;
+   let schedulesTicked = 0;
++  let helperSynced = 0;
+   const timer = setInterval(() => {
+     for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
+     void drainFollowUps();
+@@ -1103,6 +1182,10 @@
+       try { tickSchedules(); } catch (error) { console.error('Schedules not checked:', message(error)); }
+     }
+     if (Date.now() - titlesTicked > 1_000) { titlesTicked = Date.now(); titles.tick(); }
++    if (Date.now() - helperSynced > 1_000) {
++      helperSynced = Date.now();
++      void syncHelperCards().catch(error => console.error('Helper confirmations not read:', message(error)));
++    }
+   }, 250);
+   timer.unref();
+   // Subscription usage, asked from the accounts' own containers; see usage.ts for how often.
+--- a/node-app/src/tasks.ts
++++ b/node-app/src/tasks.ts
+@@ -281,6 +281,8 @@
+   private readonly busy = new Set<string>();
+   /** Called once a turn has settled (done, failed or cancelled). */
+   public onFinish?: (turn: Turn) => void;
++  /** Extra environment for one turn's worker (the machine helper's connection); it is not saved anywhere. */
++  public taskEnv?: (project: WorkspaceProject, turn: Turn) => Promise<Record<string, string>>;
+ 
+   public constructor(
+     private readonly store: WorkspaceStore,
+@@ -333,7 +335,8 @@
+       const body = '( setsid -w node ' + quote(inside(bundleName + '/' + workerFile)) + ' --spec ' + quote(inside(turn.id + '.sdk.json'))
+         + ' --task-marker ' + quote('coderfleet-task-' + turn.id) + ' ) >> ' + log + ' 2>> ' + quote(inside(turn.id + '.sdk-diagnostic.log'))
+         + '; cf_rc=$?; echo $cf_rc > ' + exit + '.tmp; mv ' + exit + '.tmp ' + exit;
+-      await execDetached(this.dockerPath, project.container, { CODERFLEET_TASK_ID: turn.id }, body);
++      const extra = await this.taskEnv?.(project, turn) ?? {};
++      await execDetached(this.dockerPath, project.container, { ...extra, CODERFLEET_TASK_ID: turn.id }, body);
+     } catch (error) {
+       this.finish(turn, 'failed', message(error));
+     }
+--- a/node-app/test/helper.test.mjs
++++ b/node-app/test/helper.test.mjs
+@@ -0,0 +1,229 @@
++import assert from 'node:assert/strict';
++import { execFile } from 'node:child_process';
++import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { test } from 'node:test';
++import { promisify } from 'node:util';
++import { generateCompose } from '../dist/compose.js';
++import { environment, lastTurn, port, until } from './helpers.mjs';
++import { fakeClaude } from './fakes.mjs';
++
++// The service runs in this process: the command line must not block it.
++const cli = async (...args) => (await promisify(execFile)(process.execPath, ['dist/cli.js', ...args], { encoding: 'utf8' })).stdout;
++
++// Claude Code with one more prompt: "machine <program> <args…>" calls the helper's
++// run_command the way the CLI would, with the MCP server it was started with, and
++// answers with what came back. It leaves that configuration in mcp.json.
++const NEWLINE = 'String.fromCharCode(10)';
++const machineClaude = fakeClaude.replace("  } else if (prompt === 'forkme') {", `  } else if (typeof prompt === 'string' && prompt.startsWith('machine ')) {
++    const machine = (JSON.parse(flag('--mcp-config') || '{}').mcpServers ?? {}).machine;
++    const leaked = ['CODERFLEET_HELPER_URL', 'CODERFLEET_HELPER_TOKEN'].filter(name => name in process.env).length;
++    if (!machine) { say('no-machine:' + leaked); finish(); return; }
++    const { writeFileSync } = await import('node:fs');
++    writeFileSync('mcp.json', JSON.stringify(machine));
++    const args = { argv: prompt.slice(8).split(' ') };
++    const allowed = await ask('mcp__machine__run_command', args);
++    const response = await fetch(machine.url, {
++      method: 'POST', headers: { ...machine.headers, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
++      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'run_command', arguments: args } }),
++    });
++    const raw = await response.text();
++    const line = raw.split(${NEWLINE}).find(value => value.startsWith('data: '));
++    const result = JSON.parse(line ? line.slice(6) : raw).result;
++    say([allowed.behavior, leaked, response.status, result.content[0].text].join('|'));
++    finish();
++  } else if (prompt === 'forkme') {`);
++assert.notEqual(machineClaude, fakeClaude);
++
++test('the relay forwards one more port to the machine helper', async () => {
++  const root = realpathSync(mkdtempSync(join(tmpdir(), 'coderfleet-helper-compose-')));
++  try {
++    const workspace = join(root, 'ws'); const project = join(root, 'p');
++    mkdirSync(workspace); mkdirSync(project);
++    writeFileSync(join(workspace, 'config.conf'), 'HELPER_PORT=9911\n');
++    writeFileSync(join(workspace, 'accounts.conf'), 'NAME=claude-a TYPE=claude PROXY=relay\n');
++    writeFileSync(join(workspace, 'projects.conf'), `NAME=app ACCOUNT=claude-a PATH=${project}\n`);
++    const { gost } = await generateCompose(workspace, 'docker');
++    const bridge = gost.services.find(service => service.name === 'helper-bridge');
++    assert.equal(bridge.addr, ':8767');
++    assert.equal(bridge.handler.type, 'tcp');
++    assert.deepEqual(bridge.forwarder.nodes.map(node => node.addr), ['host.docker.internal:9911']);
++  } finally { rmSync(root, { recursive: true, force: true }); }
++});
++
++test('a project with machine access runs commands through the helper', { timeout: 180_000 }, async () => {
++  const base = realpathSync(mkdtempSync(join(tmpdir(), 'coderfleet-helper-test-')));
++  const home = join(base, 'home'); const programs = join(base, 'bin');
++  mkdirSync(home, { mode: 0o700 }); mkdirSync(programs);
++  for (const [name, script] of Object.entries({
++    say: 'echo "$@"', here: 'pwd', careful: 'echo careful "$@"', linger: '/bin/sleep 300 & echo $! > "$1"; wait',
++  })) { writeFileSync(join(programs, name), '#!/bin/sh\n' + script + '\n'); chmodSync(join(programs, name), 0o755); }
++  // Where programs are looked for is the one thing only the file's owner sets.
++  writeFileSync(join(home, 'policy.json'), JSON.stringify({ path: [programs], rules: [], gui_tools: [] }));
++  process.env.CODERFLEET_HELPER_HOME = home;
++  const env = await environment({
++    accounts: 'NAME=claude-a TYPE=claude\nNAME=claude-direct TYPE=claude PROXY=off\n',
++    projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\nNAME=direct ACCOUNT=claude-direct PATH=${project}\n`,
++    containers: { 'claude-app': 'running', 'claude-direct': 'running' },
++    bins: { claude: machineClaude, nc: '#!/bin/sh\nexit 0\n' },
++  });
++  const helperPort = await port();
++  // The tests have no relay: the "relay's" address is this machine and the forward is the helper's own port.
++  writeFileSync(join(env.workspace, 'config.conf'), `RELAY_IP=127.0.0.1\nHELPER_PORT=${helperPort}\nHELPER_BRIDGE_RELAY_PORT=${helperPort}\n`);
++  const ask = async (conversation, prompt) => {
++    const sent = await env.post('conversations/' + conversation + '/turns', { prompt });
++    assert.equal(sent.status, 200, JSON.stringify(sent.body));
++  };
++  const done = (conversation, label) => until(() => lastTurn(env, conversation), value => !['starting', 'running'].includes(value.status) && !value.permission, label);
++  const alive = pid => { try { return readFileSync('/proc/' + pid + '/stat', 'utf8').split(') ').pop()[0] !== 'Z'; } catch { return false; } };
++  try {
++    // Not installed; nothing answers.
++    let status = (await env.get('helper')).body;
++    assert.deepEqual([status.installed, status.running, status.home], ['', false, home]);
++    assert.match(status.bundled, /^\d+\.\d+\.\d+$/);
++    assert.equal((await env.post('helper/start')).status, 400, 'starting what is not installed');
++
++    // Only the main token manages the helper.
++    await env.put('mobile', { addresses: [{ url: 'https://cf.example.com' }] });
++    const phone = new URL((await env.post('devices', { name: 'iPhone', backendName: '本机' })).body.link).searchParams.get('token');
++    for (const [method, path] of [['GET', 'helper'], ['POST', 'helper/install'], ['POST', 'helper/stop'], ['GET', 'helper/policy'], ['POST', 'helper/policy'], ['GET', 'helper/audit'], ['PUT', 'projects/app/helper']])
++      assert.equal((await env.as(phone, method, path, {})).status, 403, method + ' ' + path);
++
++    // Install: the shipped program is copied into the helper's directory and started.
++    status = (await env.post('helper/install')).body;
++    assert.deepEqual([status.installed, status.running, status.version, status.compatible, status.upgrade, status.port],
++      [status.bundled, true, status.bundled, true, false, helperPort]);
++    assert.equal(status.url, 'http://127.0.0.1:' + helperPort + '/mcp');
++    assert.equal(status.relay, 'stopped', 'no relay container');
++    assert.ok(existsSync(join(home, 'bin', 'main.js')));
++    assert.match(await cli('helper', 'status', '--config', join(env.root, 'config.json')), /机器助手 {2}在运行/);
++
++    // Rules.
++    assert.equal((await env.post('helper/policy', { set: { program: 'say', action: 'allow' } })).status, 200);
++    assert.equal((await env.post('helper/policy', { set: { program: 'careful', action: 'confirm' } })).status, 200);
++    assert.equal((await env.post('helper/policy', { set: { program: 'here', action: 'allow' } })).status, 200);
++    assert.equal((await env.post('helper/policy', { set: { program: 'linger', action: 'allow' } })).status, 200);
++    assert.deepEqual((await env.get('helper/policy')).body.policy.rules.map(rule => rule.program + ':' + rule.action), ['say:allow', 'careful:confirm', 'here:allow', 'linger:allow']);
++
++    // Off by default: the task gets no connection.
++    const conversation = (await env.post('conversations', { projectId: 'app' })).body.id;
++    assert.equal((await env.get('projects')).body.find(item => item.id === 'app').helper, 'off');
++    await ask(conversation, 'machine say hi');
++    assert.equal((await done(conversation, 'turn without access')).answer, 'no-machine:0');
++
++    // The project's switch, from the UI's route and from the command line.
++    assert.equal((await env.put('projects/app/helper', { access: 'gui' })).status, 400, 'not built yet');
++    assert.equal((await env.put('projects/app/helper', { access: 'everything' })).status, 400);
++    assert.deepEqual((await env.put('projects/app/helper', { access: 'command' })).body, { helper: 'command' });
++    assert.match(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /NAME=app .*HELPER_ACCESS=command/);
++    assert.equal((await env.get('projects')).body.find(item => item.id === 'app').helper, 'command');
++    assert.match(await cli('helper', 'access', 'direct', 'command', '--config', join(env.root, 'config.json')), /direct {2}command/);
++
++    // An allowed command: runs in the project directory, without an approval card; the
++    // connection is not left in the agent's environment.
++    await ask(conversation, 'machine say hello there');
++    let turn = await done(conversation, 'allowed command');
++    assert.equal(turn.status, 'done', turn.error);
++    let [behavior, leaked, http, result] = turn.answer.split('|');
++    assert.deepEqual([behavior, leaked, http], ['allow', '0', '200']);
++    assert.deepEqual([JSON.parse(result).ran, JSON.parse(result).exit_code, JSON.parse(result).stdout], [true, 0, 'hello there\n']);
++
++    await ask(conversation, 'machine here');
++    assert.equal(JSON.parse((await done(conversation, 'where it runs')).answer.split('|')[3]).stdout, env.project + '\n');
++
++    // The turn is over: its token no longer works.
++    const machine = JSON.parse(readFileSync(join(env.project, 'mcp.json'), 'utf8'));
++    assert.equal(machine.url, 'http://127.0.0.1:' + helperPort + '/mcp');
++    const replay = () => fetch(machine.url, {
++      method: 'POST', headers: { ...machine.headers, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
++      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'run_command', arguments: { argv: ['say', 'again'] } } }),
++    });
++    assert.equal((await until(replay, response => response.status === 401, 'revoked token')).status, 401);
++
++    // What the rules do not list is refused, with no card.
++    await ask(conversation, 'machine rm -rf x');
++    turn = await done(conversation, 'refused command');
++    assert.deepEqual([JSON.parse(turn.answer.split('|')[3]).ran, JSON.parse(turn.answer.split('|')[3]).verdict], [false, 'deny']);
++
++    // A command the rules want confirmed shows as the turn's approval card; across a service restart.
++    await ask(conversation, 'machine careful one');
++    turn = await until(() => lastTurn(env, conversation), value => value.permission, 'confirmation card');
++    assert.match(turn.permission.id, /^helper-/);
++    assert.equal(turn.permission.title, '要在这台机器上运行命令');
++    assert.match(turn.permission.questions[0].question, /careful one/);
++    assert.deepEqual(turn.permission.questions[0].options.map(option => option.label), ['允许这一次', '这个任务里同样的命令都允许', '拒绝']);
++    assert.equal((await env.get('helper')).body.pending, 1);
++    await env.restart();
++    // The card is rebuilt from what the helper still holds.
++    turn = await until(() => lastTurn(env, conversation), value => value.permission, 'card after restart');
++    assert.equal((await env.post('turns/' + turn.id + '/permission', { id: 'helper-nope', answers: {} })).status, 409);
++    const allowedOnce = await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, answers: { [turn.permission.questions[0].question]: '允许这一次' } });
++    assert.deepEqual([allowedOnce.status, allowedOnce.body.decision], [200, "allow"], JSON.stringify(allowedOnce.body));
++    turn = await done(conversation, 'confirmed command');
++    assert.equal(JSON.parse(turn.answer.split('|')[3]).stdout, 'careful one\n');
++    assert.equal(turn.permission, undefined);
++
++    // Refused by the person; an answer that is none of the options is a refusal too.
++    for (const answer of ['拒绝', '随便']) {
++      await ask(conversation, 'machine careful two');
++      turn = await until(() => lastTurn(env, conversation), value => value.permission, 'second card');
++      const refused = await env.post('turns/' + turn.id + '/permission', { id: turn.permission.id, answers: { q: answer } });
++      assert.equal(refused.body.decision, 'deny');
++      turn = await done(conversation, 'refused by the person');
++      assert.deepEqual([JSON.parse(turn.answer.split('|')[3]).ran, JSON.parse(turn.answer.split('|')[3]).stdout], [false, undefined]);
++    }
++
++    // Stop: the turn's command on the machine dies with it, and the card of a stopped turn goes away.
++    const pidFile = join(env.project, 'linger.pid');
++    await ask(conversation, 'machine linger ' + pidFile);
++    const pid = Number((await until(async () => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim(), Boolean, 'the long command')));
++    assert.ok(alive(pid));
++    turn = await lastTurn(env, conversation);
++    assert.equal((await env.get('helper')).body.tasks, 1);
++    await env.post('turns/' + turn.id + '/cancel');
++    turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled', 'stopped turn', 500);
++    await until(async () => alive(pid), value => !value, 'the command to die');
++    assert.equal((await until(async () => (await env.get('helper')).body.tasks, value => value === 0, 'no task left')), 0);
++
++    await ask(conversation, 'machine careful three');
++    turn = await until(() => lastTurn(env, conversation), value => value.permission, 'card before stop');
++    await env.post('turns/' + turn.id + '/cancel');
++    turn = await until(() => lastTurn(env, conversation), value => value.status === 'cancelled' && !value.permission, 'card gone after stop', 500);
++    assert.equal((await until(async () => (await env.get('helper')).body.pending, value => value === 0, 'nothing pending')), 0);
++
++    // An account that does not go through the relay gets no connection, even with access on.
++    const direct = (await env.post('conversations', { projectId: 'direct' })).body.id;
++    await ask(direct, 'machine say hi');
++    assert.equal((await done(direct, 'direct turn')).answer, 'no-machine:0');
++
++    // The helper's own record: one line per call.
++    const records = (await env.get('helper/audit?n=50')).body.records.filter(item => item.tool === 'run_command');
++    assert.deepEqual(records.map(item => item.args.argv.join(' ')).sort(),
++      ['careful one', 'careful three', 'careful two', 'careful two', 'linger ' + pidFile, 'here', 'rm -rf x', 'say hello there'].sort());
++
++    // Access off again: tasks started afterwards have nothing.
++    assert.deepEqual((await env.put('projects/app/helper', { access: 'off' })).body, { helper: 'off' });
++    assert.doesNotMatch(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /NAME=app .*HELPER_ACCESS/);
++    await ask(conversation, 'machine say hi');
++    assert.equal((await done(conversation, 'turn after access off')).answer, 'no-machine:0');
++
++    // Stopped helper: a project with access still runs, without the tools.
++    await env.put('projects/app/helper', { access: 'command' });
++    status = (await env.post('helper/stop')).body;
++    assert.deepEqual([status.running, status.installed], [false, status.bundled]);
++    await ask(conversation, 'machine say hi');
++    assert.equal((await done(conversation, 'turn without a helper')).answer, 'no-machine:0');
++    assert.equal((await env.get('helper/policy')).status, 400);
++    status = (await env.post('helper/start')).body;
++    assert.equal(status.running, true);
++    status = (await env.post('helper/upgrade')).body;
++    assert.deepEqual([status.running, status.upgrade], [true, false]);
++  } finally {
++    await env.post('helper/stop').catch(() => undefined);
++    try { process.kill(JSON.parse(readFileSync(join(home, 'run.json'), 'utf8')).pid, 'SIGKILL'); } catch { /* already gone */ }
++    delete process.env.CODERFLEET_HELPER_HOME;
++    await env.close();
++    rmSync(base, { recursive: true, force: true });
++  }
++});
+--- a/node-app/ui/index.html
++++ b/node-app/ui/index.html
+@@ -18,6 +18,7 @@
+   <script src="js/projects.js" defer></script>
+   <script src="js/accounts.js" defer></script>
+   <script src="js/mobile.js" defer></script>
++  <script src="js/helper.js" defer></script>
+   <script src="js/settings.js" defer></script>
+   <script src="js/schedules.js" defer></script>
+   <script src="js/app.js" defer></script>
+--- a/node-app/ui/js/chat.js
++++ b/node-app/ui/js/chat.js
+@@ -180,10 +180,12 @@
+       await session?.refresh();
+     });
+     if (permission.questions) {
++      // The machine helper's card: its options are the only answers.
++      const machine = permission.id.startsWith('helper-');
+       const answers = new Map();
+       const blocks = permission.questions.map(question => {
+         const picked = new Set();
+-        const other = h('input', { placeholder: '其他回答（可选）', on: { input: () => sync() } });
++        const other = h('input', { placeholder: '其他回答（可选）', hidden: machine, on: { input: () => sync() } });
+         const buttons = question.options.map(option => h('button.option', {
+           title: option.description || '',
+           on: { click: event => {
+@@ -205,7 +207,7 @@
+       });
+       const submit = h('button.btn.primary.small', { disabled: true, on: { click: () => decide(submit, { answers: Object.fromEntries(answers) }) } }, '提交回答');
+       return h('div.approval',
+-        h('div.approval-head', h('span.glyph', CF.icon('question', 15)), h('div', h('strong', '需要你回答'), h('small', '回答后会继续执行'))),
++        h('div.approval-head', h('span.glyph', CF.icon('question', 15)), h('div', h('strong', machine ? permission.title : '需要你回答'), h('small', machine ? '任务在等你决定' : '回答后会继续执行'))),
+         blocks, h('div.approval-actions', submit));
+     }
+     const allow = h('button.btn.primary.small', { disabled: !permission.allow, on: { click: () => decide(allow, { decision: 'allow' }) } }, CF.icon('check', 13), '允许');
+--- a/node-app/ui/js/helper.js
++++ b/node-app/ui/js/helper.js
+@@ -0,0 +1,70 @@
++// The 机器助手 card in Settings: the separate program that lets tasks run listed
++// commands on this machine. Install, start, stop and upgrade it here; which
++// project may use it is set on the project (更多 → 机器操作).
++(() => {
++  const { h } = CF;
++
++  const ACTIONS = { allow: '直接运行', confirm: '先问我', deny: '不允许' };
++
++  /** The rules, as lines: what runs directly, what asks first. The file itself is edited by hand or with `helper policy`. */
++  async function rules() {
++    const holder = h('div', h('div.empty-note', '正在读取…'));
++    const sheet = CF.sheet({ title: '机器助手 · 规则', subtitle: '没有列出的命令一律不运行。', wide: true }, () => holder);
++    let answer;
++    try { answer = await CF.get('helper/policy'); } catch (error) { holder.replaceChildren(); sheet.error(error); return; }
++    const list = answer.policy?.rules || [];
++    holder.replaceChildren(
++      answer.error ? h('div.empty-note', '规则文件有错，所有命令都会被拒绝：' + answer.error) : list.length
++        ? h('dl.kv', list.flatMap(rule => [h('dt.mono', [rule.program, ...(rule.args_any || [])].join(' ')), h('dd', ACTIONS[rule.action] || rule.action)]))
++        : h('div.empty-note', '还没有规则，所以现在什么都不能运行。'),
++      h('div.hint', '规则文件：' + (answer.file || '') + '。命令行里用 helper policy set <程序> allow|confirm|deny 添加。'));
++  }
++
++  /** The latest calls, newest first. */
++  async function audit() {
++    const holder = h('div', h('div.empty-note', '正在读取…'));
++    const sheet = CF.sheet({ title: '机器助手 · 最近的操作', wide: true }, () => holder);
++    let answer;
++    try { answer = await CF.get('helper/audit?n=50'); } catch (error) { holder.replaceChildren(); sheet.error(error); return; }
++    const records = (answer.records || []).slice().reverse();
++    holder.replaceChildren(records.length ? h('dl.kv', records.flatMap(item => [
++      h('dt', CF.relative(item.time)),
++      h('dd', h('span.mono', item.args?.argv ? item.args.argv.join(' ') : item.tool), ' · ' + (item.label || item.task) + ' · '
++        + (item.verdict === 'deny' ? '没有运行' : item.exit_code === undefined ? '已放行' : '退出码 ' + item.exit_code)),
++    ])) : h('div.empty-note', '还没有操作。'));
++  }
++
++  CF.helperCard = () => {
++    const body = h('div.card-body', h('div.empty-note', '正在读取…'));
++    const card = h('div.card', h('div.card-head', h('div', h('h2', '机器助手'),
++      h('p', '让容器里的任务在这台机器上运行你列出的命令（比如烧录、读串口）。默认每个项目都是关的。'))), body);
++    const act = (button, path, done) => CF.busy(button, async () => {
++      const result = await CF.api('POST', 'helper/' + path);
++      if (path === 'restart-relay') { CF.operationLog(result, '重启 relay'); CF.activity.refresh(); return; }
++      render(result);
++      CF.toast(done);
++    });
++    const button = (label, path, done, primary) => {
++      const node = h('button.btn.small' + (primary ? '.primary' : ''), { on: { click: () => act(node, path, done) } }, label);
++      return node;
++    };
++    const render = status => {
++      const state = !status.installed ? '没有安装' : !status.running ? '已安装，没有运行'
++        : !status.compatible ? '在运行，但版本太旧，任务用不了' : '在运行 · ' + status.version;
++      const actions = !status.installed ? [button('安装并启动', 'install', '机器助手已安装', true)]
++        : !status.running ? [button('启动', 'start', '机器助手已启动', true), ...(status.upgrade ? [button('升级到 ' + status.bundled, 'upgrade', '已升级')] : [])]
++        : [...(status.upgrade ? [button('升级到 ' + status.bundled, 'upgrade', '已升级', true)] : []), button('停止', 'stop', '机器助手已停止')];
++      body.replaceChildren(h('dl.kv',
++        h('dt', '状态'), h('dd', state, ' ', ...actions),
++        ...(status.policyError ? [h('dt', '规则'), h('dd', '规则文件有错，所有命令都会被拒绝：' + status.policyError)] : []),
++        ...(status.running && status.relay === 'missing' ? [h('dt', '容器连接'),
++          h('dd', 'relay 还没有转发到机器助手，容器里的任务连不上。 ', button('重启 relay', 'restart-relay', ''))] : []),
++        ...(status.running && status.relay === 'stopped' ? [h('dt', '容器连接'), h('dd', 'relay 没有在运行，启动一个走 relay 的项目后就有了。')] : []),
++        ...(status.installed ? [h('dt', '查看'), h('dd',
++          h('button.btn.ghost.small', { disabled: !status.running, on: { click: rules } }, '规则'),
++          h('button.btn.ghost.small', { disabled: !status.running, on: { click: audit } }, '最近的操作'))] : [])));
++    };
++    CF.get('helper').then(render, error => body.replaceChildren(h('div.empty-note', '读取失败：' + CF.errorText(error))));
++    return card;
++  };
++})();
+--- a/node-app/ui/js/projects.js
++++ b/node-app/ui/js/projects.js
+@@ -115,6 +115,20 @@
+     },
+ 
+     /**
++     * Lets the project's tasks run the machine helper's listed commands on the
++     * backend's machine, or takes that away (HELPER_ACCESS in projects.conf).
++     */
++    async helper(project) {
++      const on = project.helper === 'command';
++      if (!on && !await CF.confirm('允许 ' + project.name + ' 的任务操作这台机器？',
++        '任务可以通过机器助手运行你在规则里列出的命令，目录限制在项目目录里；规则要求确认的命令会先问你。对之后开始的任务生效。', { label: '允许' })) return;
++      try { await CF.api('PUT', 'projects/' + project.id + '/helper', { access: on ? 'off' : 'command' }); }
++      catch (error) { CF.fail(error); return; }
++      await CF.app.refreshProjects();
++      CF.toast(on ? '已关闭，正在运行的任务也用不了了' : '已允许。机器助手在「设置」里安装和启动');
++    },
++
++    /**
+      * Edits the extra host directories in the project's container (EXTRA_MOUNTS in
+      * projects.conf, shared with the old Web UI). Like the environment, they reach the
+      * container when it is recreated.
+@@ -189,6 +203,7 @@
+           running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
+           { label: '环境变量…', icon: 'key', run: () => CF.projects.env(project) },
+           { label: '挂载目录…', icon: 'folder', run: () => CF.projects.mounts(project) },
++          { label: project.helper === 'command' ? '关闭机器操作' : '允许机器操作…', icon: 'terminal', run: () => CF.projects.helper(project) },
+           { label: project.active ? '停用项目' : '启用项目', run: () => CF.busy(null, async () => {
+             await CF.api('POST', 'projects/' + project.id + '/' + (project.active ? 'disable' : 'enable'));
+             await CF.app.refreshProjects();
+--- a/node-app/ui/js/settings.js
++++ b/node-app/ui/js/settings.js
+@@ -140,6 +140,9 @@
+       // Phones
+       page.append(CF.mobileCard(current));
+ 
++      // Machine helper: managed by the backend on its own machine.
++      page.append(CF.helperCard());
++
+       // Workspace & image
+       let image = overview.image;
+       // These parts follow background operations live; the rest of the page (and what is typed in it) stays.
