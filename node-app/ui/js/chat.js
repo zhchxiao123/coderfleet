@@ -606,7 +606,10 @@
       // The conversation map at the left edge (like Codex): one dash per turn, the one in view
       // darker; hover shows the question and the start of the reply; click jumps there.
       const rail = h('nav.turn-rail', { 'aria-label': '对话导航' });
+      // The dashes scroll inside the map when there are more turns than fit; the peek stays outside the scroller.
+      const railTrack = h('div.rail-track');
       const peek = h('div.turn-peek', { hidden: true });
+      rail.append(railTrack, peek);
       const bookmarkKey = () => 'cf.bookmarks:' + CF.state.backendId + ':' + current.conversationId;
       const bookmarks = () => { try { return new Set(JSON.parse(localStorage.getItem(bookmarkKey()) || '[]')); } catch { return new Set(); } };
       const toggleBookmark = id => {
@@ -617,13 +620,21 @@
       };
       let railCurrent = '';
       let jumpUntil = 0;
+      const markCurrent = id => {
+        railCurrent = id;
+        let currentDash = null;
+        for (const dash of railTrack.children) { const on = dash.dataset.turn === id; dash.classList.toggle('current', on); if (on) currentDash = dash; }
+        const scrolls = railTrack.scrollHeight > railTrack.clientHeight + 1;
+        railTrack.classList.toggle('scrolls', scrolls);
+        // A long map keeps the current turn's dash in the middle.
+        if (scrolls && currentDash && !rail.matches(':hover')) railTrack.scrollTop = currentDash.offsetTop - (railTrack.clientHeight - currentDash.offsetHeight) / 2;
+      };
       // A jump from the map marks its turn current, even when the view cannot scroll it to the top.
       const jumpTo = id => {
         const node = nodes.get(id)?.node;
         if (!node) return;
         jumpUntil = Date.now() + 1200;
-        railCurrent = id;
-        for (const dash of rail.querySelectorAll('.rail-dash')) dash.classList.toggle('current', dash.dataset.turn === id);
+        markCurrent(id);
         node.scrollIntoView({ behavior: 'smooth', block: 'start' });
       };
       let peekTurn = '';
@@ -654,13 +665,14 @@
         rail.hidden = turns.length < 2;
         if (rail.hidden) { peek.hidden = true; return; }
         const marks = bookmarks();
-        rail.replaceChildren(...turns.map(turn => h('button.rail-dash' + (turn.id === railCurrent ? '.current' : '') + (marks.has(turn.id) ? '.marked' : '') + (isActive(turn) ? '.live' : ''), {
+        railTrack.replaceChildren(...turns.map(turn => h('button.rail-dash' + (turn.id === railCurrent ? '.current' : '') + (marks.has(turn.id) ? '.marked' : '') + (isActive(turn) ? '.live' : ''), {
           dataset: { turn: turn.id }, 'aria-label': plain(turn.prompt).slice(0, 60),
           on: {
             mouseenter: event => showPeek(turn, event.currentTarget), mouseleave: hidePeek, focus: event => showPeek(turn, event.currentTarget), blur: hidePeek,
             click: () => jumpTo(turn.id),
           },
-        }, h('span'))), peek);
+        }, h('span'))));
+        markCurrent(railCurrent);
       };
       // The turn whose top is nearest above the middle of the view is "current".
       const trackCurrent = () => {
@@ -671,10 +683,7 @@
           const node = nodes.get(turn.id)?.node;
           if (node && node.getBoundingClientRect().top <= top) found = turn.id;
         }
-        if (found !== railCurrent) {
-          railCurrent = found;
-          for (const dash of rail.querySelectorAll('.rail-dash')) dash.classList.toggle('current', dash.dataset.turn === found);
-        }
+        if (found !== railCurrent) markCurrent(found);
       };
       transcript.addEventListener('scroll', () => requestAnimationFrame(trackCurrent), { passive: true });
 

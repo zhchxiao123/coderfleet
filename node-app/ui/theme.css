@@ -892,10 +892,14 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .chat { position: relative; }
 .turn-rail {
   position: absolute; left: 10px; top: 50%; transform: translateY(-50%); z-index: 4;
-  display: flex; flex-direction: column; gap: 0; max-height: 70%; padding: 6px 4px;
+  display: flex; flex-direction: column; max-height: 70%; padding: 6px 4px;
 }
 .turn-rail[hidden] { display: none; }
-.rail-dash { display: flex; align-items: center; height: 12px; min-height: 5px; flex: 0 1 12px; padding: 0 2px; border: 0; background: none; cursor: default; }
+/* More turns than fit: the dashes shrink a little, then the map scrolls (the current turn stays in view) and fades at both ends. */
+.rail-track { position: relative; display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none; }
+.rail-track::-webkit-scrollbar { display: none; }
+.rail-track.scrolls { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to bottom, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
+.rail-dash { display: flex; align-items: center; height: 12px; min-height: 8px; flex: 0 1 12px; padding: 0 2px; border: 0; background: none; cursor: default; }
 .rail-dash span { display: block; width: 12px; height: 2px; border-radius: 2px; background: var(--line-strong); transition: width 0.15s ease, background 0.15s; }
 .turn-rail:hover .rail-dash span { width: 18px; }
 .rail-dash:hover span, .rail-dash:focus-visible span { width: 26px !important; background: var(--text-2); }
