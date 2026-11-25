@@ -1,5 +1,5 @@
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('coderFleet', {
   list: () => ipcRenderer.invoke('backends:list'),
@@ -10,6 +10,11 @@ contextBridge.exposeInMainWorld('coderFleet', {
   restartLocal: id => ipcRenderer.invoke('backends:restartLocal', id),
   setLan: (id, enabled) => ipcRenderer.invoke('backends:setLan', id, enabled),
   request: (id, method, path, body) => ipcRenderer.invoke('backends:request', { id, method, path, body }),
+  /** Uploads a File into a project: streamed from disk when it has a path, else (pasted) from memory. */
+  upload: async (id, projectId, name, file) => {
+    const path = webUtils.getPathForFile(file);
+    return ipcRenderer.invoke('backends:upload', { id, projectId, name, ...(path ? { path } : { data: await file.arrayBuffer() }) });
+  },
   setupLocal: () => ipcRenderer.invoke('backends:setupLocal'),
   pickDirectory: () => ipcRenderer.invoke('dialog:directory'),
   pickFile: () => ipcRenderer.invoke('dialog:file'),

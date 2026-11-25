@@ -751,32 +751,35 @@
         updateComposer();
       };
       const IMAGES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-      // Any file up to 20 MB, uploaded into the project right away (images also get a preview).
+      // Any file up to 500 MB, uploaded into the project right away; an image up to 20 MB also gets a preview.
       const addFiles = files => {
         for (const file of files) {
           if (!file.size) { CF.toast((file.name || '这个文件') + ' 是空的'); continue; }
-          if (file.size > 20 * 1024 * 1024) { CF.toast(file.name + ' 超过 20 MB'); continue; }
+          if (file.size > 500 * 1024 * 1024) { CF.toast(file.name + ' 超过 500 MB'); continue; }
           if (current.attachments.length >= 20) { CF.toast('一次最多 20 个附件'); break; }
-          const image = IMAGES.includes(file.type);
+          const image = IMAGES.includes(file.type) && file.size <= 20 * 1024 * 1024;
           const name = file.name || (image ? 'image.' + file.type.split('/')[1].replace('jpeg', 'jpg') : 'file');
           const item = { name, size: file.size, image, url: '', path: '' };
           current.attachments.push(item);
-          const reader = new FileReader();
-          reader.onload = async () => {
-            item.url = String(reader.result);
-            renderAttachments();
+          const preview = !image ? Promise.resolve('') : new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => { item.url = String(reader.result); renderAttachments(); resolve(item.url); };
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(file);
+          });
+          (async () => {
             try {
-              const saved = await CF.api('POST', 'projects/' + encodeURIComponent(projectId) + '/uploads', { name, data: item.url.split(',')[1] });
+              const saved = await CF.transport.upload(CF.state.backendId, projectId, name, file);
               item.path = saved.path;
               CF.rememberUpload(saved.path, name, file.size);
-              if (image) CF.seedUpload(projectId, saved.path, item.url);
+              const url = await preview;
+              if (url) CF.seedUpload(projectId, saved.path, url);
             } catch (error) {
               current.attachments = current.attachments.filter(other => other !== item);
               CF.fail(error);
             }
             if (session === current) renderAttachments();
-          };
-          reader.readAsDataURL(file);
+          })();
         }
         renderAttachments();
       };

@@ -114,6 +114,60 @@
       if (!running) saveOnly.classList.add('primary');
     },
 
+    /**
+     * Edits the extra host directories in the project's container (EXTRA_MOUNTS in
+     * projects.conf, shared with the old Web UI). Like the environment, they reach the
+     * container when it is recreated.
+     */
+    mounts(project) {
+      const rows = h('div.env-rows');
+      const addRow = (spec = '') => {
+        const parts = spec.split(':');
+        const host = h('input.mono', { value: parts[0] || '', placeholder: '这台机器上的目录', spellcheck: false, autocomplete: 'off' });
+        const target = h('input.mono', { value: parts[1] || '', placeholder: '容器里的路径，例如 /data', spellcheck: false, autocomplete: 'off' });
+        const readOnly = h('input', { type: 'checkbox', checked: parts[2] === 'ro' });
+        const pick = CF.transport.pickDirectory && CF.app.isLocal() ? h('button.icon-btn', { title: '选择目录…', on: { click: async () => {
+          const chosen = await CF.transport.pickDirectory();
+          if (!chosen) return;
+          host.value = chosen;
+          if (!target.value) target.value = '/' + chosen.split(/[\\/]/).filter(Boolean).pop();
+        } } }, CF.icon('folder', 13)) : h('span');
+        const row = h('div.env-row.mount-row', host, target, h('label.check', { title: '容器里只能读，不能改' }, readOnly, '只读'), pick,
+          h('button.icon-btn', { title: '删除', on: { click: () => { row.remove(); if (!rows.children.length) addRow(); } } }, CF.icon('x', 13)));
+        rows.append(row);
+        return host;
+      };
+      for (const spec of project.mounts || []) addRow(spec);
+      if (!rows.children.length) addRow();
+      const running = project.state === 'running';
+      const sheet = CF.sheet({ title: project.name + ' · 挂载目录', subtitle: '把这台机器上的其他目录也放进项目容器。项目目录本身已经在 /workspace。保存后重启项目才生效。', wide: true }, () => [
+        h('div.env-head.mount-head', h('span', '机器上的目录'), h('span', '容器里的路径')), rows,
+        h('button.btn.ghost.small', { on: { click: () => addRow().focus() } }, CF.icon('plus', 13), '添加目录'),
+      ]);
+      const collect = () => [...rows.querySelectorAll('.env-row')].flatMap(row => {
+        const [host, target, readOnly] = [...row.querySelectorAll('input')];
+        const from = host.value.trim(); const to = target.value.trim();
+        if (!from && !to) return [];
+        if (!from || !to) throw new Error('每一行都要填机器上的目录和容器里的路径');
+        return [from + ':' + to + (readOnly.checked ? ':ro' : '')];
+      });
+      const save = async restart => {
+        sheet.error('');
+        let mounts;
+        try { mounts = collect(); } catch (error) { sheet.error(error.message); return; }
+        try { await CF.api('PUT', 'projects/' + project.id + '/mounts', { mounts }); } catch (error) { sheet.error(error); return; }
+        sheet.close();
+        await CF.app.refreshProjects();
+        if (!restart) { CF.toast(running ? '已保存，重启项目后生效' : '已保存，启动项目时生效'); return; }
+        const operation = await CF.api('POST', 'projects/' + project.id + '/restart');
+        if (operation) void track(project.id, '重启', operation);
+      };
+      const saveOnly = h('button.btn', { on: { click: () => CF.busy(saveOnly, () => save(false)) } }, '保存');
+      const saveRestart = running ? h('button.btn.primary', { on: { click: () => CF.busy(saveRestart, () => save(true)) } }, '保存并重启') : null;
+      sheet.foot(h('button.btn.ghost', { on: { click: () => sheet.close() } }, '取消'), saveOnly, saveRestart);
+      if (!running) saveOnly.classList.add('primary');
+    },
+
     mount(container) {
       const { projects, overview } = CF.state;
       const banners = [];
@@ -134,6 +188,7 @@
           running ? { label: '重启容器', icon: 'restart', run: () => act('restart', '重启')({ currentTarget: menuButton }) } : null,
           running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
           { label: '环境变量…', icon: 'key', run: () => CF.projects.env(project) },
+          { label: '挂载目录…', icon: 'folder', run: () => CF.projects.mounts(project) },
           { label: project.active ? '停用项目' : '启用项目', run: () => CF.busy(null, async () => {
             await CF.api('POST', 'projects/' + project.id + '/' + (project.active ? 'disable' : 'enable'));
             await CF.app.refreshProjects();

@@ -118,6 +118,11 @@ class BackendClient {
       _base = null;
       throw BackendError('网络断开了，正在重连');
     }
+    return _decoded(response);
+  }
+
+  /// The JSON of an answer, or the backend's error.
+  Object? _decoded(http.Response response) {
     Object? data;
     try { data = jsonDecode(utf8.decode(response.bodyBytes)); } catch (_) { data = null; }
     if (response.statusCode >= 400) {
@@ -156,9 +161,27 @@ class BackendClient {
 
   Future<void> withdraw(String conversationId, String followUpId) => _call('DELETE', 'conversations/$conversationId/follow-ups/$followUpId');
 
-  /// Uploads a file (up to 20 MB) into the project (.coderfleet-uploads); returns its container path.
-  Future<String> upload(String projectId, String name, List<int> bytes) async =>
-      asMap(await _call('POST', 'projects/${Uri.encodeComponent(projectId)}/uploads', body: {'name': name, 'data': base64Encode(bytes)}, timeout: const Duration(seconds: 120)))['path'] as String? ?? '';
+  /// Uploads a file (up to 500 MB) into the project (.coderfleet-uploads); returns its container path.
+  /// The file is the request body, sent as it is read.
+  Future<String> upload(String projectId, String name, Stream<List<int>> data, int size) async {
+    final base = _base ?? await connect();
+    final request = http.StreamedRequest('POST', Uri.parse('$base/v1/projects/${Uri.encodeComponent(projectId)}/uploads').replace(queryParameters: {'name': name}))
+      ..headers.addAll(_headers)
+      ..headers['Content-Type'] = 'application/octet-stream'
+      ..contentLength = size;
+    data.listen(request.sink.add, onError: request.sink.addError, onDone: request.sink.close, cancelOnError: true);
+    http.Response response;
+    try {
+      // At least 100 KB/s, on top of the usual allowance.
+      response = await http.Response.fromStream(await _http.send(request)).timeout(Duration(seconds: 120 + size ~/ 100000));
+    } on TimeoutException {
+      throw BackendError('上传超时');
+    } catch (_) {
+      _base = null;
+      throw BackendError('网络断开了，正在重连');
+    }
+    return asMap(_decoded(response))['path'] as String? ?? '';
+  }
 
   Future<List<int>> image(String projectId, String path) async {
     final data = asMap(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/uploads/${path.split('/').last}', timeout: const Duration(seconds: 60)));

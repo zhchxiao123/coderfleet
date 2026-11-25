@@ -94,14 +94,15 @@ export async function runMain<T extends BaseSpec>(moduleUrl: string, run: (spec:
 }
 
 export const IMAGE_TYPES: Readonly<Record<string, string>> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
-const MAX_ATTACHMENT = 20 * 1024 * 1024;
+/** The largest image or PDF sent inside the message itself; a larger one is passed by its path. */
+const MAX_NATIVE = 20 * 1024 * 1024;
 
 /** `image` and `pdf` can go to a model natively; any other `file` is passed by its path. */
 export interface Attachment { readonly path: string; readonly mime: string; readonly kind: 'image' | 'pdf' | 'file'; data(): string }
 
 /**
  * Resolves the project uploads of a message (Python `_input_content`): each must be a file
- * directly in <cwd>/.coderfleet-uploads, at most 20 MiB. `data()` reads it as base64.
+ * directly in <cwd>/.coderfleet-uploads. `data()` reads it as base64.
  */
 export function attachments(cwd: string, uploads: readonly string[] | undefined): Attachment[] {
   if (!uploads?.length) return [];
@@ -110,10 +111,10 @@ export function attachments(cwd: string, uploads: readonly string[] | undefined)
     if (dirname(reference) !== '/workspace/.coderfleet-uploads' && dirname(reference) !== join(cwd, '.coderfleet-uploads')) throw new Error('Attachments must be project uploads');
     const path = realpathSync(join(root, basename(reference)));
     if (dirname(path) !== root || !statSync(path).isFile()) throw new Error('Attachment does not belong to this project');
-    if (statSync(path).size > MAX_ATTACHMENT) throw new Error('Attachment exceeds 20 MiB');
     const extension = path.slice(path.lastIndexOf('.')).toLowerCase();
-    const image = IMAGE_TYPES[extension];
-    const kind = image ? 'image' : extension === '.pdf' ? 'pdf' : 'file';
+    const native = statSync(path).size <= MAX_NATIVE;
+    const image = native ? IMAGE_TYPES[extension] : undefined;
+    const kind = image ? 'image' : native && extension === '.pdf' ? 'pdf' : 'file';
     return { path, mime: image ?? (kind === 'pdf' ? 'application/pdf' : 'application/octet-stream'), kind, data: () => readFileSync(path).toString('base64') };
   });
 }

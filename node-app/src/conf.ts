@@ -247,6 +247,22 @@ export function setProjectActive(workspace: string, name: string, active: boolea
   if (!found) throw new WorkspaceError('项目不存在');
 }
 
+/** A project's extra mounts as written in projects.conf: `HOST:CONTAINER[:ro]` each. */
+export function projectMountSpecs(project: WorkspaceProject): string[] {
+  return (project.record.EXTRA_MOUNTS ?? '').split(',').map(item => item.trim()).filter(Boolean);
+}
+
+/** Replaces the project's EXTRA_MOUNTS; the caller has checked the specs (compose.ts: projectMounts). */
+export function setProjectMounts(workspace: string, name: string, specs: readonly string[]): void {
+  // projects.conf separates tokens by blanks and mounts by commas, so neither fits inside a path.
+  for (const spec of specs) if (/[\s,]/.test(spec)) throw new WorkspaceError('挂载路径不能包含空格或逗号：' + spec);
+  const found = rewriteConf(join(workspace, 'projects.conf'), 'NAME', name, record => {
+    const { EXTRA_MOUNTS: _previous, ...rest } = record;
+    return specs.length ? { ...rest, EXTRA_MOUNTS: specs.join(',') } : rest;
+  });
+  if (!found) throw new WorkspaceError('项目不存在');
+}
+
 /** Settings shown in the desktop client, with config.conf defaults (compose.py / init_wizard.py). */
 export const SETTINGS: Readonly<Record<string, string>> = {
   PROXY_HOST: 'host.docker.internal', PROXY_HTTP_PORT: '7890', CONTAINER_TIMEZONE: 'Asia/Shanghai',

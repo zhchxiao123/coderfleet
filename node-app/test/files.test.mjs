@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { environment } from './helpers.mjs';
+import { attachments } from '../dist/worker-kit.js';
 
 test('the App browses and previews a project\'s files, never outside it', async () => {
   const env = await environment({ accounts: 'NAME=codex-a TYPE=codex\n', projects: project => `NAME=web ACCOUNT=codex-a PATH=${project}\n` });
@@ -37,4 +38,29 @@ test('the App browses and previews a project\'s files, never outside it', async 
   } finally {
     await env.close();
   }
+});
+
+test('an attachment is the request body, written to disk as it arrives, up to 500 MB', async () => {
+  const env = await environment({ accounts: 'NAME=codex-a TYPE=codex\n', projects: project => `NAME=web ACCOUNT=codex-a PATH=${project}\n` });
+  try {
+    // Larger than the 20 MB the JSON form allows.
+    const data = Buffer.alloc(24 * 1024 * 1024, 7);
+    const saved = await env.upload('web', '录屏 1.MOV', data);
+    assert.equal(saved.status, 200);
+    assert.match(saved.body.path, /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}-录屏_1\.mov$/);
+    assert.deepEqual([saved.body.name, saved.body.size], ['录屏 1.MOV', data.length]);
+    const directory = join(env.project, '.coderfleet-uploads');
+    assert.ok(readFileSync(join(directory, saved.body.path.split('/').pop())).equals(data));
+
+    const large = await env.upload('web', 'big.bin', Buffer.alloc(0), 500 * 1024 * 1024 + 1);
+    assert.deepEqual([large.status, large.body.error], [413, '附件不能超过 500 MB']);
+    assert.equal((await env.upload('web', 'empty.bin', Buffer.alloc(0))).status, 400);
+    assert.equal((await env.post('projects/web/uploads', { name: 'old.txt', data: Buffer.from('old client').toString('base64') })).status, 200);
+    // An image or PDF too large to go inside a message is passed by its path, like any other file.
+    writeFileSync(join(directory, 'scan.pdf'), Buffer.alloc(20 * 1024 * 1024 + 1));
+    writeFileSync(join(directory, 'small.pdf'), '%PDF-1.4');
+    assert.deepEqual(attachments(env.project, ['/workspace/.coderfleet-uploads/scan.pdf', '/workspace/.coderfleet-uploads/small.pdf']).map(file => file.kind), ['file', 'pdf']);
+    // Nothing is left of the refused ones.
+    assert.deepEqual(readdirSync(directory).map(name => name.replace(/^[a-f0-9]{16}-/, '')).sort(), ['old.txt', 'scan.pdf', 'small.pdf', '录屏_1.mov']);
+  } finally { await env.close(); }
 });

@@ -35,30 +35,47 @@ class AutoModeStore {
 
 enum AttachFrom { camera, photos, files }
 
-/// Picks attachments; tests replace it.
-typedef AttachmentSource = Future<List<({String name, Uint8List bytes})>> Function(BuildContext context, AttachFrom from);
+/// A picked file. It is read when it is uploaded, so a large one never sits in memory;
+/// `preview` holds the bytes of an image small enough to show.
+typedef PickedFile = ({String name, int size, Stream<List<int>> Function() open, Uint8List? preview});
 
-Future<List<({String name, Uint8List bytes})>> pickAttachments(BuildContext context, AttachFrom from) async {
+/// A picked file already in memory.
+PickedFile pickedBytes(String name, Uint8List bytes) => (name: name, size: bytes.length, open: () => Stream.value(bytes), preview: bytes);
+
+/// Picks attachments; tests replace it.
+typedef AttachmentSource = Future<List<PickedFile>> Function(BuildContext context, AttachFrom from);
+
+Future<List<PickedFile>> pickAttachments(BuildContext context, AttachFrom from) async {
   if (from == AttachFrom.files) {
     final files = await FilePicker.pickFiles();
-    return [for (final file in files) (name: file.name, bytes: await file.readAsBytes())];
+    return [
+      for (final file in files.map((item) => item.xFile))
+        await () async {
+          final size = await file.length();
+          return (name: file.name, size: size, open: () => file.openRead().cast<List<int>>(),
+              preview: isImageUpload(file.name) && size <= maxPreview ? await file.readAsBytes() : null);
+        }(),
+    ];
   }
   final picker = ImagePicker();
   final files = from == AttachFrom.camera
       ? [?await picker.pickImage(source: ImageSource.camera, maxWidth: 2048, maxHeight: 2048, imageQuality: 85)]
       : await picker.pickMultiImage(maxWidth: 2048, maxHeight: 2048, imageQuality: 85, limit: 10);
-  return [for (final file in files) (name: file.name, bytes: await file.readAsBytes())];
+  return [for (final file in files) pickedBytes(file.name, await file.readAsBytes())];
 }
 
 /// The backend's limit for one upload.
-const maxUpload = 20 * 1024 * 1024;
+const maxUpload = 500 * 1024 * 1024;
+/// The largest image shown as a picture; a larger one shows as a file.
+const maxPreview = 20 * 1024 * 1024;
 
 class _Attachment {
-  _Attachment(this.name, this.bytes);
+  _Attachment(this.name, this.size, this.preview);
   final String name;
-  final Uint8List bytes;
+  final int size;
+  final Uint8List? preview;
   String? path;
-  bool get image => isImageUpload(name);
+  bool get image => preview != null && isImageUpload(name);
 }
 
 class ChatScreen extends StatefulWidget {
@@ -136,15 +153,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _attach(AttachFrom from) async {
-    List<({String name, Uint8List bytes})> picked;
+    List<PickedFile> picked;
     try { picked = await widget.attachmentSource(context, from); } catch (error) { if (mounted) showMessage(context, '没能读取文件：$error'); return; }
     for (final file in picked.take(20 - attachments.length)) {
-      if (file.bytes.length > maxUpload) { if (mounted) showMessage(context, '${file.name} 超过 20 MB'); continue; }
+      if (file.size > maxUpload) { if (mounted) showMessage(context, '${file.name} 超过 500 MB'); continue; }
       final name = from == AttachFrom.files || file.name.contains('.') ? file.name : '${file.name}.jpg';
-      final item = _Attachment(name, file.bytes);
+      final item = _Attachment(name, file.size, file.preview);
       setState(() => attachments.add(item));
-      widget.client.upload(widget.projectId, name, file.bytes).then((path) {
-        if (item.image) images.seed(path, file.bytes);
+      widget.client.upload(widget.projectId, name, file.open(), file.size).then((path) {
+        if (item.image) images.seed(path, item.preview!);
         if (mounted) setState(() => item.path = path);
       }).catchError((Object error) {
         if (!mounted) return;
@@ -281,9 +298,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               for (final item in attachments)
                 Padding(padding: const EdgeInsets.only(right: 8, bottom: 8), child: Stack(children: [
                   item.image
-                      ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.memory(item.bytes, width: 60, height: 60, fit: BoxFit.cover,
+                      ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.memory(item.preview!, width: 60, height: 60, fit: BoxFit.cover,
                           opacity: AlwaysStoppedAnimation(item.path == null ? 0.45 : 1)))
-                      : Opacity(opacity: item.path == null ? 0.45 : 1, child: FileChip(name: item.name, size: item.bytes.length, height: 60, maxWidth: 200)),
+                      : Opacity(opacity: item.path == null ? 0.45 : 1, child: FileChip(name: item.name, size: item.size, height: 60, maxWidth: 200)),
                   if (item.path == null) const Positioned.fill(child: Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)))),
                   Positioned(top: 2, right: 2, child: GestureDetector(
                     onTap: () => setState(() => attachments.remove(item)),

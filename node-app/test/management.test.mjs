@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -74,6 +74,22 @@ test('the App initializes the workspace and manages accounts, projects, containe
     const recreated = JSON.parse(readFileSync(join(env.workspace, 'docker-compose.yml'), 'utf8').replace(/^#.*\n/, ''));
     assert.equal(recreated.services['claude-project-app'].environment.MODE, 'dev');
     assert.deepEqual((await env.put('projects/app/env', { vars: { MODE: 'dev' } })).body.vars, { MODE: 'dev' }, 'removed rows are dropped');
+
+    // Extra mounts: EXTRA_MOUNTS in projects.conf, checked when saved, in the container after a restart.
+    assert.deepEqual(project.mounts, []);
+    const shared = join(env.workspace, 'shared');
+    mkdirSync(shared);
+    assert.equal((await env.put('projects/app/mounts', { mounts: ['/does/not/exist:/data'] })).status, 400);
+    assert.equal((await env.put('projects/app/mounts', { mounts: [shared + ':/workspace'] })).status, 400);
+    assert.equal((await env.put('projects/app/mounts', { mounts: [shared + ':relative'] })).status, 400);
+    assert.deepEqual((await env.put('projects/app/mounts', { mounts: [shared + ':/data:ro'] })).body.mounts, [shared + ':/data:ro']);
+    assert.match(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /NAME=app .*EXTRA_MOUNTS=\S+:\/data:ro/);
+    assert.deepEqual((await env.get('projects')).body[0].mounts, [shared + ':/data:ro']);
+    assert.equal((await operation(env, (await env.post('projects/app/restart')).body.id)).body.status, 'succeeded');
+    const mounted = JSON.parse(readFileSync(join(env.workspace, 'docker-compose.yml'), 'utf8').replace(/^#.*\n/, ''));
+    assert.ok(mounted.services['claude-project-app'].volumes.includes(shared + ':/data:ro'));
+    assert.deepEqual((await env.put('projects/app/mounts', { mounts: [] })).body.mounts, []);
+    assert.doesNotMatch(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /EXTRA_MOUNTS/);
     assert.equal((await env.del('accounts/claude-a')).status, 400);
     accounts = (await env.get('accounts')).body;
     assert.deepEqual(accounts[0].projects, ['app']);

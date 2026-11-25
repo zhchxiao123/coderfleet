@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, safeStorage, type IpcMainInvokeEvent } from 'electron';
@@ -105,6 +106,25 @@ async function api(profile: Profile, method: string, path: string, data?: unknow
     headers: { Authorization: 'Bearer ' + token, ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
+  const result: unknown = await response.json();
+  if (!response.ok) throw new Error(text(record(result).error) || 'Backend returned HTTP ' + response.status);
+  return result;
+}
+
+/** The largest attachment (the backend's limit). */
+const MAX_UPLOAD = 500 * 1024 * 1024;
+
+/** Sends one attachment as the request body: from disk as a stream, or bytes the window read itself (pasted). */
+async function upload(profile: Profile, projectId: string, name: string, source: string | ArrayBuffer): Promise<unknown> {
+  const size = typeof source === 'string' ? statSync(source).size : source.byteLength;
+  if (size > MAX_UPLOAD) throw new Error('附件不能超过 500 MB');
+  const { url, token } = await credentials(profile);
+  const response = await fetch(url + '/v1/projects/' + encodeURIComponent(projectId) + '/uploads?name=' + encodeURIComponent(name), {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60 * 60_000),
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) },
+    body: typeof source === 'string' ? Readable.toWeb(createReadStream(source)) as ReadableStream : source,
+    duplex: 'half',
+  } as RequestInit);
   const result: unknown = await response.json();
   if (!response.ok) throw new Error(text(record(result).error) || 'Backend returned HTTP ' + response.status);
   return result;
@@ -339,6 +359,14 @@ function register(): void {
       throw new Error('Unsupported request');
     }
     return api(findProfile(raw.id), method, path, raw.body);
+  });
+  // `path` comes from the preload script (the file the user chose), `data` from a pasted file.
+  ipcMain.handle('backends:upload', (event, input: unknown) => {
+    guard(event);
+    const raw = record(input);
+    const source = raw.data instanceof ArrayBuffer ? raw.data : text(raw.path);
+    if (!source || !/^[\w.-]+$/.test(text(raw.projectId))) throw new Error('Unsupported request');
+    return upload(findProfile(raw.id), text(raw.projectId), text(raw.name), source);
   });
   ipcMain.handle('remote:addSsh', (event, input: unknown) => {
     guard(event);

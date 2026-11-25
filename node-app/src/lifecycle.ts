@@ -46,7 +46,7 @@ export function summarize(operation: Operation): OperationSummary {
   return { ...rest, ...(step ? { step } : {}), lastLine };
 }
 
-export interface ContainerState { readonly name: string; readonly state: string; readonly status: string }
+export interface ContainerState { readonly name: string; readonly state: string }
 
 export class Lifecycle {
   private readonly operations = new Map<string, Operation>();
@@ -61,11 +61,11 @@ export class Lifecycle {
 
   /** States of all CoderFleet-related containers, from one `docker ps` call. */
   public async containers(): Promise<Map<string, ContainerState>> {
-    const { stdout } = await run(this.dockerPath, ['ps', '-a', '--format', '{{.Names}}\t{{.State}}\t{{.Status}}'], { timeout: 10_000, maxBuffer: 4_000_000 });
+    const { stdout } = await run(this.dockerPath, ['ps', '-a', '--format', '{{.Names}}\t{{.State}}'], { timeout: 10_000, maxBuffer: 4_000_000 });
     const result = new Map<string, ContainerState>();
     for (const line of stdout.split('\n')) {
-      const [name, state, status] = line.split('\t');
-      if (name) result.set(name, { name, state: state ?? '', status: status ?? '' });
+      const [name, state] = line.split('\t');
+      if (name) result.set(name, { name, state: state ?? '' });
     }
     return result;
   }

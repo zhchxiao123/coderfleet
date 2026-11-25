@@ -469,16 +469,21 @@
       role: 'tab', 'aria-selected': String(name === active), on: { click: () => CF.app.go({ name }) },
     }, CF.icon(icon, 14), label))));
 
+  let shownView = '';
   function renderMain() {
     const { view, connected } = CF.state;
     if (!connected && view.name !== 'settings') return;
     if (view.name === 'chat') CF.state.lastChat = view;
     const container = h('div.view');
+    // 项目 and 账号 are redrawn in place after every change (start, save, poll): keep where the user scrolled to.
+    const scrollTop = view.name === shownView ? main.querySelector('.page')?.scrollTop ?? 0 : 0;
+    shownView = view.name;
     setBar(null);
     main.replaceChildren(...(SETTINGS_TABS.some(([name]) => name === view.name) ? [settingsBar(view.name)] : []), container);
     if (view.name === 'chat') CF.chat.mount(container, view);
     else if (view.name === 'projects') CF.projects.mount(container);
     else if (view.name === 'accounts') CF.accounts.mount(container);
+    if (scrollTop) { const page = container.querySelector('.page'); if (page) page.scrollTop = scrollTop; }
     else if (view.name === 'settings') void CF.settings.mount(container);
     else if (view.name === 'schedules') CF.schedules.mount(container);
   }

@@ -28,8 +28,8 @@ void main() {
     final client = BackendClient(Profile(id: 'p1', name: '本机', token: backend.token, addresses: [profile.address]), client: backend.client);
     final feed = ConversationFeed(client);
     await tester.runAsync(feed.refreshProjects);
-    Future<List<({String name, Uint8List bytes})>> source(BuildContext context, AttachFrom from) async =>
-        [(name: '需求说明.pdf', bytes: Uint8List.fromList(utf8.encode('%PDF-1.4 demo')))];
+    Future<List<PickedFile>> source(BuildContext context, AttachFrom from) async =>
+        [pickedBytes('需求说明.pdf', Uint8List.fromList(utf8.encode('%PDF-1.4 demo')))];
     await tester.pumpWidget(MaterialApp(theme: buildTheme(Brightness.light, fontFamily: 'Roboto', fontFamilyFallback: const ['NotoCJK']),
         home: ChatScreen(client: client, feed: feed, projectId: 'coderfleet', autoStore: AutoModeStore(persist: false), attachmentSource: source, chatWait: const Duration(milliseconds: 300))));
     await settle(tester, 3);
@@ -43,7 +43,8 @@ void main() {
     await tester.tap(find.byTooltip('发送'));
     await settle(tester, 3);
     final upload = backend.requests.firstWhere((item) => item['path'] == 'projects/coderfleet/uploads');
-    expect(upload['body']['name'], '需求说明.pdf');
+    expect(upload['name'], '需求说明.pdf');
+    expect(upload['bytes'], utf8.encode('%PDF-1.4 demo'));
     final sent = backend.requests.firstWhere((item) => item['method'] == 'POST' && item['path'].toString().endsWith('/turns'));
     expect((sent['body']['images'] as List).single, endsWith('-需求说明.pdf'));
     // In the conversation the file shows as a chip, not a broken image.

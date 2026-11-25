@@ -105,6 +105,18 @@ function parseMounts(raw: string): { volume: string; host: string; container: st
   });
 }
 
+/** A project's EXTRA_MOUNTS, checked: the format, that the host paths exist and that nothing lands on a path the container already uses. */
+export function projectMounts(name: string, raw: string, authDir: string): { volume: string; host: string; container: string }[] {
+  const mounts = parseMounts(raw);
+  for (const mount of mounts) {
+    if (mount.container === '/workspace' || mount.container === authDir) {
+      throw new WorkspaceError('项目 ' + name + ' 的 EXTRA_MOUNTS 配置无效：容器路径 ' + mount.container + ' 已被项目工作区或账号认证目录占用');
+    }
+    if (!existsSync(mount.host)) throw new WorkspaceError('项目 ' + name + ' 的 EXTRA_MOUNTS 配置无效：宿主机路径 ' + mount.host + ' 不存在');
+  }
+  return mounts;
+}
+
 function portAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
     const server = createServer();
@@ -219,13 +231,7 @@ export async function generateCompose(workspace: string, dockerPath = 'docker'):
       environment.CODERFLEET_HOST_WORKSPACE = path;
       environment.CODERFLEET_DOCKER_SOCKET = socket.container;
     }
-    for (const mount of parseMounts(project.EXTRA_MOUNTS ?? '')) {
-      if (mount.container === '/workspace' || mount.container === spec.authDir) {
-        throw new WorkspaceError('项目 ' + name + ' 的 EXTRA_MOUNTS 配置无效：容器路径 ' + mount.container + ' 已被项目工作区或账号认证目录占用');
-      }
-      if (!existsSync(mount.host)) throw new WorkspaceError('项目 ' + name + ' 的 EXTRA_MOUNTS 配置无效：宿主机路径 ' + mount.host + ' 不存在');
-      volumes.push(mount.volume);
-    }
+    for (const mount of projectMounts(name, project.EXTRA_MOUNTS ?? '', spec.authDir)) volumes.push(mount.volume);
     let idePort = 0; let ideRemote = false;
     if (ideEnabled) {
       if (project.IDE_PORT) {

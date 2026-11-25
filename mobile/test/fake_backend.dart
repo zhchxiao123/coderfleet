@@ -96,8 +96,10 @@ class FakeBackend {
     if (!reachable.contains(base)) throw http.ClientException('connection refused', request.url);
     if (request.headers['Authorization'] != 'Bearer $token') return _json({'error': 'Invalid backend token'}, 401);
     final path = request.url.path.replaceFirst('/v1/', '');
-    final body = request.body.isEmpty ? <String, dynamic>{} : (jsonDecode(request.body) as Map).cast<String, dynamic>();
-    requests.add({'method': request.method, 'path': path, 'body': body});
+    // An upload is the file itself, named in the query.
+    final raw = request.headers['Content-Type'] == 'application/octet-stream';
+    final body = raw || request.body.isEmpty ? <String, dynamic>{} : (jsonDecode(request.body) as Map).cast<String, dynamic>();
+    requests.add({'method': request.method, 'path': path, 'body': body, if (raw) 'name': request.url.queryParameters['name'], if (raw) 'bytes': request.bodyBytes});
     final parts = path.split('/');
     switch ((request.method, parts)) {
       case ('GET', ['health']):
@@ -148,8 +150,8 @@ class FakeBackend {
         _touch();
         return _json({'removed': true});
       case ('POST', ['projects', _, 'uploads']):
-        final path = '/workspace/.coderfleet-uploads/${_id()}a1b2-${body['name']}';
-        uploads[path] = body['data'] as String;
+        final path = '/workspace/.coderfleet-uploads/${_id()}a1b2-${request.url.queryParameters['name']}';
+        uploads[path] = base64Encode(request.bodyBytes);
         return _json({'path': path});
       case ('GET', ['projects', _, 'uploads', final file]):
         final data = uploads.entries.where((entry) => entry.key.endsWith(file)).firstOrNull?.value;

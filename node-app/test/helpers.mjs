@@ -156,6 +156,18 @@ export async function environment({ accounts = '', projects = (project) => '', b
     as: (bearer, method, path, value) => call(method, path, value, bearer),
     get: path => call('GET', path),
     post: (path, value = {}) => call('POST', path, value),
+    /** A file sent as the request body (the App's upload); `length` overrides the declared size. */
+    upload: (projectId, name, data, length = data.length) => new Promise((resolve, reject) => {
+      const request = httpRequest(base + 'projects/' + projectId + '/uploads?name=' + encodeURIComponent(name), {
+        method: 'POST', agent: false, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream', 'Content-Length': length },
+      }, response => {
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+      });
+      request.once('error', reject);
+      request.end(length === data.length ? data : undefined);
+    }),
     delete: path => call('DELETE', path),
     put: (path, value) => call('PUT', path, value),
     del: path => call('DELETE', path),

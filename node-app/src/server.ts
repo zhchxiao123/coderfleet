@@ -1,13 +1,16 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv,
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectMountSpecs, setProjectMounts,
 } from './conf.js';
+import { projectMounts } from './compose.js';
 import { assertContainer, models } from './docker.js';
 import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
@@ -49,6 +52,10 @@ async function body(request: IncomingMessage, limit = 160_000): Promise<Record<s
   try { return record(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
   catch { throw new HttpError(400, 'Expected a JSON request body'); }
 }
+
+/** The largest attachment a message can carry. */
+const MAX_UPLOAD = 500 * 1024 * 1024;
+const TOO_LARGE = '附件不能超过 500 MB';
 
 function size(input: Record<string, unknown>): [number, number] {
   const cols = Number(input.cols); const rows = Number(input.rows);
@@ -643,12 +650,14 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     // Projects and containers
     ['GET', /^projects$/, async () => {
       const { projects } = readWorkspace(workspace);
-      let containers = new Map<string, { state: string; status: string }>();
+      let containers = new Map<string, { state: string }>();
       try { containers = await lifecycle.containers(); } catch { /* Docker unavailable: states stay unknown */ }
+      // Only what stays the same between polls: Docker's status text ("Up 5 minutes") changes by itself
+      // and would make every client redraw its page each time it asks.
       return projects.map(item => ({
         id: item.name, name: item.name, account: item.account.name, type: item.account.type, typeLabel: accountType(item.account.type).label,
         path: item.path, active: item.active, runtime: item.account.runtime, container: item.container,
-        state: containers.get(item.container)?.state ?? 'missing', status: containers.get(item.container)?.status ?? '',
+        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item),
         chat: chatSupported(item.account.type) && item.account.runtime === 'container',
       }));
     }],
@@ -671,6 +680,15 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       project(name as string);
       setProjectActive(workspace, name as string, action === 'enable');
       return { active: action === 'enable' };
+    }],
+    // Extra host directories in the project's container (EXTRA_MOUNTS); they apply when it is recreated.
+    ['PUT', /^projects\/([\w-]+)\/mounts$/, async (request, [name]) => {
+      const target = project(name as string);
+      const input = (await body(request)).mounts;
+      const specs = (Array.isArray(input) ? input : []).map(item => text(item).trim()).filter(Boolean);
+      projectMounts(target.name, specs.join(','), accountType(target.account.type).authDir);
+      setProjectMounts(workspace, target.name, specs);
+      return { mounts: specs };
     }],
     ['POST', /^projects\/([\w-]+)\/terminal$/, async (request, [name]) => {
       const [cols, rows] = size(await body(request));
@@ -946,13 +964,17 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (!followUps.remove(identifier(id), identifier(item))) throw new HttpError(404, '这条消息已经发出');
       return { removed: true };
     }],
-    // Images for a message, saved in the project like the Python service (.coderfleet-uploads).
-    ['POST', /^projects\/([\w.-]+)\/uploads$/, async (request, [name]) => {
+    // Files for a message, saved in the project like the Python service (.coderfleet-uploads).
+    // The file is the request body (application/octet-stream, named by ?name=), written to disk as it
+    // arrives; older clients send JSON { name, data: base64 }, which stays limited to 20 MB.
+    ['POST', /^projects\/([\w.-]+)\/uploads$/, async (request, [name], url) => {
       const target = project(name as string);
-      const input = await body(request, 28 * 1024 * 1024);
-      const data = Buffer.from(text(input.data), 'base64');
-      if (!data.length) throw new HttpError(400, '文件是空的');
-      if (data.length > 20 * 1024 * 1024) throw new HttpError(400, '附件不能超过 20 MB');
+      const raw = (request.headers['content-type'] ?? '').startsWith('application/octet-stream');
+      if (raw && Number(request.headers['content-length']) > MAX_UPLOAD) throw new HttpError(413, TOO_LARGE);
+      const input = raw ? { name: url.searchParams.get('name') ?? '' } : await body(request, 28 * 1024 * 1024);
+      const data = raw ? undefined : Buffer.from(text(input.data), 'base64');
+      if (data && !data.length) throw new HttpError(400, '文件是空的');
+      if (data && data.length > 20 * 1024 * 1024) throw new HttpError(400, '附件不能超过 20 MB');
       const directory = join(target.path, '.coderfleet-uploads');
       mkdirSync(directory, { recursive: true });
       // A unique prefix plus the name in characters every tool handles; the agent sees a readable file name.
@@ -961,8 +983,25 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const extension = dot > 0 ? original.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
       const stem = (dot > 0 ? original.slice(0, dot) : original).normalize('NFC').replace(/[^\p{L}\p{N}_.-]+/gu, '_').replace(/^[_.]+|[_.]+$/g, '').slice(0, 80) || 'file';
       const file = randomBytes(8).toString('hex') + '-' + stem + (extension ? '.' + extension : '');
-      writeFileSync(join(directory, file), data, { mode: 0o644 });
-      return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size: data.length };
+      let size = data?.length ?? 0;
+      if (data) writeFileSync(join(directory, file), data, { mode: 0o644 });
+      else {
+        // Under a temporary name until it is complete: a dropped connection leaves nothing behind.
+        const partial = join(directory, '.' + file + '.part');
+        const counted = new Transform({ transform(chunk: Buffer, _encoding, done) {
+          size += chunk.length;
+          done(size > MAX_UPLOAD ? new HttpError(413, TOO_LARGE) : null, chunk);
+        } });
+        try {
+          await pipeline(request, counted, createWriteStream(partial, { mode: 0o644 }));
+          if (!size) throw new HttpError(400, '文件是空的');
+          renameSync(partial, join(directory, file));
+        } catch (error) {
+          rmSync(partial, { force: true });
+          throw error;
+        }
+      }
+      return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size };
     }],
     // `<16 hex>-<name>.png` (this service) or `<16 hex>.png` (the Python service).
     ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}(?:[-%][^/]*)?\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) => {
