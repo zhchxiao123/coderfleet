@@ -125,7 +125,15 @@
       } } }, zoneLabel());
       page.append(h('div.card',
         h('div.card-head', h('div', h('h2', '显示'), h('p', '只影响这台电脑上 App 里显示的时间；容器里的时区在下面「代理与容器」里设置。'))),
-        h('div.card-body', h('dl.kv', h('dt', '时区'), h('dd', zoneButton)))));
+        h('div.card-body', h('dl.kv', h('dt', '时区'), h('dd', zoneButton), ...(CF.transport?.testNotification ? [
+          h('dt', '通知'),
+          h('dd', h('button.btn.small', { on: { click: async () => {
+            let result;
+            try { result = await CF.transport.testNotification(); } catch (error) { CF.fail(error); return; }
+            if (result.ok) CF.toast('已发出，没看到的话请到系统设置的「通知」里允许 CoderFleet');
+            else CF.toast('通知没有发出：' + result.error, { error: true, timeout: 8000 });
+          } } }, '发一条测试通知')),
+        ] : [])))));
 
       if (!current || !overview) return;
 

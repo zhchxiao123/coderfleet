@@ -20,5 +20,16 @@ if (process.platform === 'darwin') {
       const now = new Date();
       utimesSync(bundle, now, now);
     }
+    // Editing Info.plist breaks the bundle's signature, and macOS delivers no notifications
+    // for an App whose signature is not valid. Sign it again ad hoc.
+    try {
+      execFileSync('codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'ignore' });
+    } catch {
+      try {
+        execFileSync('codesign', ['--force', '--deep', '--sign', '-', bundle], { stdio: 'ignore' });
+      } catch (error) {
+        console.warn('Could not sign ' + bundle + '; system notifications may not show: ' + (error instanceof Error ? error.message : error));
+      }
+    }
   }
 }

@@ -136,6 +136,10 @@ function notify(backendId: string, event: ConversationEvent): void {
   const notification = new Notification(notificationText(event));
   shown.add(notification);
   notification.on('close', () => shown.delete(notification));
+  notification.on('failed', (_event, error) => {
+    shown.delete(notification);
+    console.warn('System notification was not shown: ' + error);
+  });
   notification.on('click', () => {
     shown.delete(notification);
     void openConversation({ backendId, conversationId: event.conversation.id, projectId: event.conversation.projectId });
@@ -356,6 +360,22 @@ function register(): void {
     const job = jobs.get(text(id));
     if (!job) throw new Error('Job not found');
     return job;
+  });
+  // Settings → 发一条测试通知: shown even while the window has focus, so the user can see whether the
+  // system delivers the App's notifications at all (and gets the system's permission prompt).
+  ipcMain.handle('notifications:test', event => {
+    guard(event);
+    if (!Notification.isSupported()) return { ok: false, error: '这个系统不支持通知' };
+    return new Promise<{ ok: boolean; error?: string }>(resolve => {
+      const notification = new Notification({ title: 'CoderFleet', body: '通知可以正常显示' });
+      const done = (result: { ok: boolean; error?: string }): void => { clearTimeout(timer); shown.delete(notification); resolve(result); };
+      // macOS reports neither event when the user has turned the App's notifications off.
+      const timer = setTimeout(() => done({ ok: false, error: '系统没有回应' }), 5_000);
+      shown.add(notification);
+      notification.once('show', () => done({ ok: true }));
+      notification.once('failed', (_event, error) => done({ ok: false, error }));
+      notification.show();
+    });
   });
   ipcMain.handle('remote:bundle', event => {
     guard(event);
