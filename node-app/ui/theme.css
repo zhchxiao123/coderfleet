@@ -1014,3 +1014,91 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 .send-meta strong { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .send-meta small { color: var(--text-3); font-size: 12px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .send-card .btn { flex: none; gap: 5px; }
+
+/* Subscription usage: meters on the accounts page, a pill in the chat top bar. */
+.usage-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; color: var(--text-3); font-size: 12px; }
+.usage { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.usage strong { color: var(--text-2); font-weight: 620; font-variant-numeric: tabular-nums; }
+.usage-bar { width: 64px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.usage-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.usage.amber .usage-bar i { background: var(--amber); }
+.usage.red .usage-bar i { background: var(--red); }
+.usage.amber strong { color: var(--amber); }
+.usage.red strong { color: var(--red); }
+.usage-age { margin-left: auto; }
+.usage-pill { cursor: pointer; padding: 1px 8px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--line); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-pill.amber { color: var(--amber); background: var(--amber-soft); box-shadow: none; }
+.usage-pill.red { color: var(--red); background: var(--red-soft); box-shadow: none; }
+
+/* 做完为止: the composer switch, the card over the top-right corner, the lines in the transcript. */
+.auto-toggle.job-toggle.on { background: var(--accent-soft); color: var(--accent); }
+.auto-toggle:disabled { opacity: 0.45; cursor: default; }
+.auto-toggle[hidden] { display: none; }
+.job-card {
+  position: absolute; top: 10px; right: 14px; z-index: 5; width: 292px; max-height: calc(100% - 150px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-float);
+  padding: 10px 12px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;
+}
+.job-card[hidden] { display: none; }
+.job-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.job-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; flex: none; }
+.job-head code { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.job-time { color: var(--text-3); font-size: 12px; flex: none; }
+.job-close { flex: none; margin-right: -4px; }
+.job-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; margin: 0 -2px; border: 0; border-radius: 8px;
+  background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.job-row:hover:not(:disabled) { background: var(--fill); }
+.job-row:disabled { cursor: default; }
+.job-row .v { margin-left: auto; color: var(--text-2); font-size: 12.5px; }
+.job-row .chev { color: var(--text-3); display: inline-flex; transition: transform 0.15s; }
+.job-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.job-card .add { color: var(--green); }
+.job-card .del { color: var(--red); }
+.job-files { display: flex; flex-direction: column; gap: 3px; padding: 0 6px 2px; }
+.job-file { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+.job-file .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.job-file .path.gone { text-decoration: line-through; }
+.job-file .tag { font-family: inherit; font-size: 10.5px; color: var(--text-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; }
+.job-more, .job-hint { color: var(--text-3); font-size: 12px; }
+.job-ask { background: var(--amber-soft); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; font-size: 12.5px; }
+.job-ask p { margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.job-ask span { color: var(--text-2); }
+.job-actions { display: flex; gap: 8px; align-items: center; }
+.job-actions .btn.primary { flex: 1; min-width: 0; justify-content: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.danger-text { color: var(--red); }
+.job-divider { display: flex; align-items: center; gap: 12px; color: var(--text-3); font-size: 12px; margin: 4px 0 20px; }
+.job-divider::before, .job-divider::after { content: ''; flex: 1; border-top: 1px dashed var(--line-strong); }
+.job-divider b { color: var(--text-2); font-weight: 600; margin-right: 6px; }
+.job-divider span { max-width: 80%; text-align: center; }
+.job-button.on { background: var(--fill); color: var(--text); }
+.job-button[hidden] { display: none; }
+.job-button { gap: 6px; }
+.job-button .job-count { font-size: 12px; font-variant-numeric: tabular-nums; }
+.job-button .add { color: var(--green); }
+.job-button .del { color: var(--red); }
+
+/* The check's output in the job card. */
+.job-row .v .spinner { display: inline-block; vertical-align: -2px; margin-right: 5px; }
+.job-output { display: flex; flex-direction: column; gap: 6px; }
+.job-output code { font-size: 11.5px; color: var(--text-2); overflow-wrap: anywhere; }
+.job-output pre { margin: 0; max-height: 220px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: var(--fill); font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-link { align-self: flex-start; background: none; border: 0; padding: 0; color: var(--text-2); font-size: 12px; text-decoration: underline; cursor: pointer; }
+.job-row.static { cursor: default; }
+.job-row.static:hover { background: none; }
+
+/* 做完的标准: in the job card and, for the block the agent writes, in the transcript. */
+.job-criteria { display: flex; flex-direction: column; gap: 7px; padding: 2px 6px 4px; }
+.job-label { display: flex; align-items: center; color: var(--text-3); font-size: 12px; }
+.job-label .v { margin-left: auto; font-variant-numeric: tabular-nums; }
+.criterion { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.45; }
+.criterion .mark { flex: none; width: 15px; height: 15px; margin-top: 1.5px; border-radius: 50%; border: 1.5px solid var(--line-strong); display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; box-sizing: border-box; }
+.criterion.done .mark { background: var(--green); border-color: var(--green); }
+.criterion.ask .mark { background: var(--amber); border-color: var(--amber); }
+.criterion > div { min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow-wrap: anywhere; }
+.criterion small { color: var(--text-3); font-size: 11.5px; }
+.criteria-block { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin: 8px 0; display: flex; flex-direction: column; gap: 7px; }
+.criteria-block .criterion { font-size: inherit; }
+.criteria-block .criterion small { font-size: 12.5px; }
+.criteria-title { color: var(--text-3); font-size: 12px; }

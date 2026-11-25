@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type WorkspaceProject } from './conf.js';
 import { ControlMailbox, type CommandKind } from './control.js';
-import { containerPath, execDetached, quote, signalGroup, workerAlive } from './docker.js';
+import { assertContainer, containerPath, execDetached, execText, quote, signalGroup, workerAlive } from './docker.js';
 import { entries, message, record, text, type RecordValue, type ToolStatus, type Turn } from './state.js';
 import type { WorkspaceStore } from './store.js';
 
@@ -28,7 +28,7 @@ const WORKERS: Readonly<Record<string, string>> = {
   claude: 'claude-worker.js', codex: 'codex-worker.js', opencode: 'opencode-worker.js', pi: 'pi-worker.js', hermes: 'hermes-worker.js',
   antigravity: 'acp-worker.js', kimi: 'acp-worker.js', grok: 'acp-worker.js',
 };
-const BUNDLE_FILES = ['control.js', 'worker-kit.js', ...new Set(Object.values(WORKERS))];
+const BUNDLE_FILES = ['control.js', 'worker-kit.js', 'claude-models.js', ...new Set(Object.values(WORKERS))];
 
 /** Worker files plus the vendored SDKs, copied into each project under a content hash. */
 interface Bundle { readonly name: string; readonly files: ReadonlyMap<string, Buffer> }
@@ -85,6 +85,34 @@ function writeShared(path: string, bytes: Buffer | string): void {
 }
 
 export function hostTaskDirectory(project: WorkspaceProject): string { return join(project.path, TASKS); }
+
+export interface ModelChoice { readonly id: string; readonly label: string; readonly title?: string }
+
+/**
+ * The models a Claude project's account may use, as Claude Code lists them
+ * (SDK `supportedModels()`, run in the container with that account's sign-in
+ * and settings). Its `default` row becomes id '' — no `--model` — labelled
+ * with the model it currently resolves to.
+ */
+export async function claudeModels(dockerPath: string, project: WorkspaceProject): Promise<ModelChoice[]> {
+  await assertContainer(dockerPath, project);
+  const host = hostTaskDirectory(project);
+  mkdirSync(host, { recursive: true });
+  chmodSync(host, 0o777);
+  const bundleName = installBundle(host);
+  const inside = (name: string): string => containerPath(TASKS + '/' + bundleName + '/' + name);
+  const stdout = await execText(dockerPath, project.container,
+    ['node', inside('claude-models.js'), inside('claude-agent-sdk'), containerPath('').replace(/\/$/, '')], 60_000);
+  const rows = entries(JSON.parse(stdout.trim().split('\n').at(-1) || '[]'));
+  return rows.flatMap(row => {
+    const id = text(row.value);
+    if (!id) return [];
+    if (id !== 'default') return [{ id, label: text(row.displayName) || id, title: text(row.description) }];
+    const resolved = text(row.resolvedModel);
+    const name = text(rows.find(other => other !== row && text(other.resolvedModel) === resolved)?.displayName) || resolved;
+    return [{ id: '', label: name ? '默认（' + name + '）' : '默认模型', title: text(row.description) }];
+  });
+}
 
 const DETAIL_KEYS = ['command', 'cmd', 'file_path', 'filePath', 'path', 'notebook_path', 'pattern', 'query', 'url', 'description', 'prompt', 'skill'];
 
@@ -274,7 +302,8 @@ export class TaskRunner {
     return new ControlMailbox(this.paths(project, turn).control, turn.id, turn.controlToken);
   }
 
-  public async launch(turn: Turn): Promise<void> {
+  /** `run.cwd`: where the agent works (default: the project root); `run.preamble`: text put before the prompt, not shown as the user's. */
+  public async launch(turn: Turn, run: { cwd?: string; preamble?: string; readOnly?: boolean } = {}): Promise<void> {
     const project = this.project(turn.projectId);
     try {
       if (!project) throw new Error('The project configuration is missing');
@@ -289,7 +318,7 @@ export class TaskRunner {
       turn.controlReady = false;
       turn.logOffset = 0;
       writeShared(paths.spec, JSON.stringify({
-        task_id: turn.id, cwd: containerPath('').replace(/\/$/, ''), prompt: turn.prompt, images: turn.images ?? [], auto: turn.auto === true, session_id: turn.resumeId,
+        task_id: turn.id, cwd: run.cwd || containerPath('').replace(/\/$/, ''), prompt: (run.preamble ?? '') + turn.prompt, images: turn.images ?? [], auto: turn.auto === true, session_id: turn.resumeId, ...(run.readOnly ? { read_only: true } : {}),
         ...(turn.forkAt ? { fork_session_id: turn.forkAt.sessionId, resume_session_at: turn.forkAt.messageId } : {}),
         model: turn.requestedModel, env_auth: project.account.auth === 'env',
         state_path: inside(turn.id + '.sdk-state.json'), control_module: inside(bundleName + '/control.js'),
@@ -349,7 +378,8 @@ export class TaskRunner {
       this.store.appendLog(turn.id, buffer.subarray(0, end + 1));
       // The offset moved, so the record is saved even when no event changed it.
       turn.logOffset = offset + end + 1;
-      if (turn.sessionId && turn.sessionId !== session) this.store.setNativeSession(turn.conversationId, turn.sessionId, turn.id);
+      // A reviewer's session is its own: the conversation keeps resuming the author's.
+      if (turn.sessionId && turn.sessionId !== session && turn.role !== 'review') this.store.setNativeSession(turn.conversationId, turn.sessionId, turn.id);
       return true;
     } finally { closeSync(descriptor); }
   }

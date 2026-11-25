@@ -89,6 +89,36 @@ try {
   await shot('chat-running');
   await page.click('.send.stop');
   await page.waitForSelector('.turn-note');
+  // A job waiting for review: the card over the top-right corner, then accepting it.
+  await page.click('.conv-item:has-text("端口改成读环境变量")');
+  // In a window this narrow the card is folded into the top bar's button and opens from there.
+  await page.waitForSelector('.job-button:has-text("待验收")');
+  await shot('job-folded');
+  await page.click('.job-button');
+  await page.waitForSelector('.job-card .job-actions');
+  await page.click('.job-row');
+  await shot('job-review');
+  await page.click('.job-actions .btn.primary');
+  await page.waitForSelector('.job-divider:has-text("已收下")');
+  await shot('job-accepted');
+  // A criterion only the user can decide: the job waits, the question is in the card.
+  await page.click('.conv-item:has-text("给启动流程补上集成测试")');
+  await page.waitForSelector('.job-button:has-text("等你")');
+  await page.click('.job-button');
+  await page.waitForSelector('.job-card .criterion.ask');
+  await shot('job-question');
+  // 做完为止 can also be turned on in a conversation that is already going.
+  await page.click('.conv-item:has-text("hello")');
+  await page.waitForSelector('.job-toggle:not([disabled])');
+  await page.click('.job-toggle');
+  await shot('job-toggle-midway');
+  await page.click('.job-toggle');
+  await page.click('.conv-item:has-text("给启动流程补上集成测试")');
+  // A wide window has room for the card beside the conversation: it stays open there.
+  await page.setViewportSize({ width: 1780, height: 900 });
+  await page.waitForSelector('.job-card:not([hidden])');
+  await shot('job-wide');
+  await page.setViewportSize({ width: 1280, height: 820 });
   await openTab('项目', '项目');
   await page.waitForSelector('.row');
   await shot('projects');

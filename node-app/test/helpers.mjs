@@ -79,6 +79,13 @@ const child = spawn(argv[0], argv.slice(1), { env, cwd: project, stdio: 'inherit
 child.once('exit', code => process.exit(code ?? 1));
 `;
 
+// Stand-in for the container's python3, which only the usage probe runs: prints
+// $FAKE_USAGE ($FAKE_USAGE_CODEX for a Codex account), or "not signed in".
+export const fakePython = `#!/usr/bin/env node
+const codex = process.argv.at(-1).includes('chatgpt.com');
+console.log((codex && process.env.FAKE_USAGE_CODEX) || process.env.FAKE_USAGE || '{"error": "no_credentials"}');
+`;
+
 export async function port() {
   const server = createServer();
   await new Promise(done => server.listen(0, '127.0.0.1', done));
@@ -114,7 +121,7 @@ export async function environment({ accounts = '', projects = (project) => '', b
   // a new session the same way, so the tests run there too.
   const setsid = ['/usr/bin/setsid', '/bin/setsid'].some(path => existsSync(path))
     ? {} : { setsid: "#!/bin/sh\n[ \"$1\" = \"-w\" ] && shift\nexec perl -MPOSIX -e 'if (POSIX::setsid() < 0) { my $pid = fork; die \"fork: $!\" unless defined $pid; if ($pid) { waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8) } POSIX::setsid() } exec @ARGV or die \"exec: $!\"' \"$@\"\n" };
-  for (const [name, source] of Object.entries({ docker: fakeDocker, ...setsid, ...bins })) {
+  for (const [name, source] of Object.entries({ docker: fakeDocker, python3: fakePython, ...setsid, ...bins })) {
     await writeFile(join(bin, name), source);
     await chmod(join(bin, name), 0o755);
   }

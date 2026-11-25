@@ -11,6 +11,8 @@ export interface BaseSpec {
   task_id: string; cwd: string; prompt: string; session_id: string; model: string; env_auth: boolean;
   /** Project uploads (/workspace/.coderfleet-uploads/<name>) and whether tools run without asking. */
   images?: string[]; auto?: boolean;
+  /** A reviewer's turn: it reads, it does not change files. */
+  read_only?: boolean;
   state_path: string; control_module: string; control_directory: string; control_token: string; permission_timeout: number;
 }
 

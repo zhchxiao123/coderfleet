@@ -93,7 +93,15 @@ const DEMO = [
 createInterface({ input: process.stdin }).on('line', line => void handle(JSON.parse(line)));
 async function handle(message) {
   if (message.type === 'control_request') {
-    send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } });
+    // The initialize answer lists the account's models, as \`/model\` shows them.
+    const models = [
+      { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default (recommended)', description: 'Opus 5.5 · Best for everyday, complex tasks' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'For complex work' },
+      { value: 'claude-fable-5-2', resolvedModel: 'claude-fable-5-2', displayName: 'Fable 5.2', description: 'For your toughest challenges' },
+      { value: 'haiku', resolvedModel: 'claude-haiku-5-5', displayName: 'Haiku 5.5', description: 'Fastest for quick answers' },
+    ];
+    send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id,
+      response: message.request.subtype === 'initialize' ? { models } : {} } });
     if (message.request.subtype === 'interrupt') interrupt?.();
     return;
   }
@@ -149,6 +157,18 @@ async function handle(message) {
   } else if (prompt === 'ask') {
     const decision = await ask('AskUserQuestion', { questions: [{ question: 'Pick one?', header: 'Choice', multiSelect: false, options: [{ label: 'A', description: 'first' }, { label: 'B', description: 'second' }] }] });
     say('answer:' + JSON.stringify(decision.updatedInput.answers));
+    finish();
+  } else if (prompt.startsWith('请核对')) {
+    // A job's reviewer (做完为止): every criterion it was given holds.
+    const items = prompt.split('\\n').filter(line => line.startsWith('- [')).map(line => line.slice(6).split(' —— ')[0]);
+    send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'v1', name: 'Bash', input: { command: 'git diff --stat && npm test' } }] } });
+    send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'v1', content: '…' }] } });
+    say(['逐条看了改动，也自己跑了一遍测试。', '', '\`\`\`标准', ...items.map(item => '- [x] ' + item + ' —— 看了改动并重跑，属实'), '\`\`\`', '', '没有发现必须改的问题。', '', '结论：通过'].join('\\n'));
+    finish();
+  } else if (prompt.includes('做完的标准')) {
+    // A job's author that cannot decide one of its criteria.
+    say(['测试写好了，有一条要你来定。', '', '\`\`\`标准', '- [x] 启动流程有一条集成测试，从读配置跑到监听端口 —— \`npm test\` 14 项全过',
+      '- [x] 测试不占用固定端口 —— 用端口 0，由系统分配', '- [?] 配置文件缺失时的行为 —— 现在是直接报错退出；要不要改成用默认配置启动？', '\`\`\`'].join('\\n'));
     finish();
   } else if (prompt.startsWith('请')) {
     send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'src/server.ts' } }] } });
@@ -223,6 +243,16 @@ process.stdin.on('end', async () => {
     return;
   }
   if (prompt === 'fail') { send({ type: 'turn.failed', error: { message: 'quota exceeded' } }); process.exit(1); }
+  if (prompt.includes('做完的标准') && !prompt.startsWith('请核对')) {
+    // A job's author (做完为止): lists what done means, with its evidence.
+    send({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'npm test', aggregated_output: 'pass 12', exit_code: 0, status: 'completed' } });
+    send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: ['改好了。', '', '\`\`\`标准',
+      '- [x] 端口从环境变量 PORT 读取 —— 新增 \`src/port.ts\`，\`PORT=9000\` 启动后监听 9000',
+      '- [x] 没设或不是正整数时用 8765 —— 补了 3 条测试，\`npm test\` 12 项全过',
+      '- [x] README 写明怎么改端口 —— 加了一行说明', '\`\`\`'].join('\\n') } });
+    send({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
+    return;
+  }
   send({ type: 'item.started', item: { id: 'c1', type: 'command_execution', command: 'ls', status: 'in_progress' } });
   send({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'ls', aggregated_output: 'a.txt', exit_code: 0, status: 'completed' } });
   send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'echo:' + prompt + ':' + args.join(' ') } });

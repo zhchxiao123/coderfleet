@@ -34,7 +34,7 @@ const TO_PYTHON: Readonly<Record<Status, string>> = {
 
 /** Node-only Task fields, kept under the Task's "node" key. */
 interface NodeFields {
-  launchedAt?: string; controlReady?: boolean; logOffset?: number; cancelRequested?: boolean; error?: string; requestedModel?: string;
+  launchedAt?: string; controlReady?: boolean; logOffset?: number; cancelRequested?: boolean; error?: string; requestedModel?: string; checkRound?: number; role?: 'review' | 'review-feedback';
 }
 
 interface Entry { readonly mtime: number; readonly raw: Raw }
@@ -207,6 +207,7 @@ export class WorkspaceStore {
       interrupted: raw.interrupted === true || undefined, finishedAt: text(raw.finished) || undefined,
       controlToken: text(raw.sdk_control_token) || undefined, controlReady: node.controlReady,
       logOffset: node.logOffset ?? Number(raw.sdk_source_offset ?? 0), launchedAt: node.launchedAt, cancelRequested: node.cancelRequested,
+      ...(node.checkRound ? { checkRound: node.checkRound } : {}), ...(node.role ? { role: node.role } : {}),
     };
     let content = '';
     try { content = readFileSync(this.logPath(id), 'utf8'); } catch { /* no log yet */ }
@@ -276,7 +277,7 @@ export class WorkspaceStore {
     try { logSize = statSync(this.logPath(turn.id)).size; } catch { /* no log yet */ }
     const node: NodeFields = {
       launchedAt: turn.launchedAt, controlReady: turn.controlReady, logOffset: turn.logOffset, cancelRequested: turn.cancelRequested,
-      error: turn.error, requestedModel: turn.requestedModel,
+      error: turn.error, requestedModel: turn.requestedModel, checkRound: turn.checkRound, role: turn.role,
     };
     const finished = turn.status === 'done' || turn.status === 'failed' || turn.status === 'cancelled';
     const next: Raw = {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { environment, lastTurn, until } from './helpers.mjs';
@@ -11,7 +11,12 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     containers: { 'claude-app': 'running' }, bins: { claude: fakeClaude },
   });
   try {
-    assert.deepEqual((await env.get('projects/app/models')).body.map(item => item.id), ['opus', 'sonnet', 'haiku']);
+    // The account's own model list, from Claude Code; its default row is "no --model".
+    assert.deepEqual((await env.get('projects/app/models')).body.map(item => [item.id, item.label]),
+      [['', '默认（Opus 5.5）'], ['opus', 'Opus 5.5'], ['claude-fable-5-2', 'Fable 5.2'], ['haiku', 'Haiku 5.5']]);
+    // Reused afterwards: Claude Code is asked once.
+    await env.get('projects/app/models');
+    assert.equal(readFileSync(join(env.root, 'docker.log'), 'utf8').split('\n').filter(line => line.includes('claude-models.js')).length, 1);
     const conversation = (await env.post('conversations', { projectId: 'app' })).body.id;
     await env.post('conversations/' + conversation + '/turns', { prompt: 'hello', model: 'opus' });
     let turn = await until(() => lastTurn(env, conversation), value => !['starting', 'running'].includes(value.status), 'first turn');

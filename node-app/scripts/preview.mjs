@@ -38,6 +38,13 @@ for (const [name, account, start] of [['coderfleet', 'claude-work', true], ['rem
   if (result.body.operation) started.push(result.body.operation.id);
 }
 for (const id of started) await until(() => env.get('operations/' + id), value => value.body.status !== 'running', 'start');
+// Sample subscription usage, read through the fake container like the real probe.
+const soon = hours => new Date(Date.now() + hours * 3600_000).toISOString();
+process.env.FAKE_USAGE = '{"plan": "max"}\n' + JSON.stringify({ status: 200, body: JSON.stringify({
+  five_hour: { utilization: 82, resets_at: soon(2.4) }, seven_day: { utilization: 37, resets_at: soon(90) } }) });
+process.env.FAKE_USAGE_CODEX = JSON.stringify({ status: 200, body: JSON.stringify({ plan_type: 'pro', rate_limit: {
+  primary_window: { used_percent: 12, reset_at: Math.round(Date.now() / 1000) + 9000 }, secondary_window: { used_percent: 64, reset_at: Math.round(Date.now() / 1000) + 300000 } } }) });
+for (const name of ['claude-work', 'codex-team']) await env.post('accounts/' + name + '/usage');
 
 const say = async (projectId, prompts) => {
   const conversation = (await env.post('conversations', { projectId })).body.id;
@@ -51,6 +58,28 @@ const say = async (projectId, prompts) => {
 await say('reminis-app', ['修一下登录页的样式']);
 await say('coderfleet', ['hello']);
 await say('coderfleet', ['请帮我梳理一下服务启动流程', '请修改端口为读取环境变量']);
+// A job (做完为止) waiting for review: the project becomes a git repository, the job's first
+// turn runs in its own worktree, the other account checks it, and a few edits there stand in
+// for the agent's work.
+{
+  const { execFileSync } = await import('node:child_process');
+  const { writeFileSync } = await import('node:fs');
+  const git = (...args) => execFileSync('git', ['-C', env.project, '-c', 'user.name=Demo', '-c', 'user.email=demo@example.com', ...args]);
+  git('init', '-q', '-b', 'main');
+  git('add', 'README.md', 'package.json', 'src');
+  git('commit', '-q', '-m', 'initial');
+  // One whose agent has a question about a criterion: it waits for the user.
+  const stuck = (await env.post('conversations', { projectId: 'coderfleet' })).body.id;
+  await env.post('conversations/' + stuck + '/turns', { prompt: '给启动流程补上集成测试', job: true });
+  await until(() => env.get('conversations/' + stuck + '/job'), value => value.body.job?.state === 'waiting', 'stuck job');
+  const conversation = (await env.post('conversations', { projectId: 'reminis-app' })).body.id;
+  await env.post('conversations/' + conversation + '/turns', { prompt: '端口改成读环境变量 PORT，默认 8765', job: true });
+  const job = (await until(() => env.get('conversations/' + conversation + '/job'), value => value.body.job?.state === 'review', 'job')).body.job;
+  const work = join(env.project, '.coderfleet-work', job.id);
+  writeFileSync(join(work, 'src', 'port.ts'), 'export function port(): number {\n  const value = Number(process.env.PORT);\n  return Number.isInteger(value) && value > 0 ? value : 8765;\n}\n');
+  writeFileSync(join(work, 'src', 'server.ts'), "import { port } from './port.js';\n\nexport async function serve(configPath: string) {\n  const config = readConfig(configPath);\n  return listen(port(), config.host);\n}\n");
+  writeFileSync(join(work, 'README.md'), '# coderfleet\n\n把多个 AI 编程账号放进各自的容器里，一起用它们的额度。\n\n- `src/server.ts`：后端入口\n- `docs/`：说明文档\n- 端口：环境变量 `PORT`，默认 8765\n');
+}
 await say('coderfleet', ['请运行检查并修复']);
 
 const token = 'synthetic-node-test-token-0000000';

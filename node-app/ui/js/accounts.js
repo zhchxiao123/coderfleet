@@ -33,7 +33,52 @@
     };
   }
 
+  const resetText = iso => {
+    const at = Date.parse(iso);
+    if (!Number.isFinite(at)) return '';
+    const zone = { timeZone: CF.timeZone.current() };
+    const time = new Date(at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false, ...zone });
+    if (at - Date.now() < 20 * 3600_000) return time + ' 重置';
+    return new Date(at).toLocaleDateString('zh-CN', { weekday: 'short', ...zone }) + ' ' + time + ' 重置';
+  };
+  const level = used => used >= 90 ? '.red' : used >= 75 ? '.amber' : '';
+  const USAGE_ERRORS = { unauthorized: '登录已过期，重新登录后才能查额度', no_credentials: '还没有登录', rate_limited: '查询太频繁，稍后再试', network_error: '容器里连不上额度接口' };
+  const windows = usage => [['5 小时', usage?.fiveHour], ['本周', usage?.sevenDay]].filter(([, value]) => value);
+
+  /** The account's subscription usage as a line of meters; null for accounts that have none (API key and others). */
+  function usageLine(account) {
+    const usage = account.usage;
+    if (!usage) return null;
+    const shown = windows(usage);
+    const problem = usage.error ? USAGE_ERRORS[usage.error] || '查询失败' : '';
+    if (!shown.length) return h('div.usage-line', h('span', problem || (usage.fetchedAt ? '这个账号没有返回额度' : '启动这个账号的一个项目后显示额度')));
+    return h('div.usage-line',
+      shown.map(([label, value]) => h('span.usage' + level(value.used), { title: resetText(value.resetsAt) },
+        h('span', label), h('span.usage-bar', h('i', { style: 'width:' + Math.round(value.used) + '%' })),
+        h('strong', Math.round(value.used) + '%'), h('span.usage-reset', resetText(value.resetsAt)))),
+      h('span.usage-age', problem ? problem + '，这是' + CF.relative(usage.fetchedAt) + '的数字' : CF.relative(usage.fetchedAt) + '更新'));
+  }
+
+  async function refreshUsage(account) {
+    try {
+      await CF.api('POST', 'accounts/' + account.name + '/usage');
+      await CF.app.refreshAccounts();
+    } catch (error) { CF.fail(error); }
+  }
+
   CF.accounts = {
+    /** A small pill for the chat top bar: the fuller of the account's two windows first. */
+    usagePill(name) {
+      const usage = CF.state.accounts.find(item => item.name === name)?.usage;
+      const shown = windows(usage);
+      if (!shown.length) return null;
+      const worst = Math.max(...shown.map(([, value]) => value.used));
+      return h('span.usage-pill' + level(worst), {
+        title: name + ' 的套餐额度\n' + shown.map(([label, value]) => label + ' 已用 ' + Math.round(value.used) + '%，' + resetText(value.resetsAt)).join('\n'),
+        on: { click: () => CF.app.go({ name: 'accounts' }) },
+      }, shown.map(([label, value]) => label + ' ' + Math.round(value.used) + '%').join(' · '));
+    },
+
     create() {
       const types = CF.state.overview?.accountTypes || [];
       let type = types.find(item => item.id === 'claude') || types[0];
@@ -117,13 +162,14 @@
       const row = account => {
         const menuButton = h('button.btn.ghost.icon.small', { title: '更多', on: { click: () => CF.menu(menuButton, [
           account.auth === 'env' ? { label: '编辑环境变量', icon: 'key', run: () => CF.accounts.editEnv(account) } : { label: '重新登录', icon: 'user', run: () => CF.accounts.login(account.name) },
+          account.usage ? { label: '刷新额度', icon: 'spark', run: () => refreshUsage(account) } : null,
           '-',
           { label: '删除账号', icon: 'trash', danger: true, run: async () => {
             if (account.projects.length) { CF.toast('先删除使用这个账号的项目：' + account.projects.join('、'), { error: true }); return; }
             if (!await CF.confirm('删除账号 ' + account.name + '？', '只从配置里移除，登录数据会保留在工作区的 accounts 目录。', { danger: true, label: '删除' })) return;
             await CF.busy(null, async () => { await CF.api('DELETE', 'accounts/' + account.name); await CF.app.refreshAccounts(); });
           } },
-        ]) } }, CF.icon('more', 15));
+        ].filter(Boolean)) } }, CF.icon('more', 15));
         const authText = account.auth === 'env'
           ? (account.envKeys.length ? '环境变量 · ' + account.envKeys.join('、') : '环境变量 · 未设置')
           : '登录账号';
@@ -135,7 +181,8 @@
               h('div.row-title', h('span.name', account.name), CF.typeBadge(account.type, account.typeLabel),
                 needsSetup ? h('span.badge.amber', account.auth === 'env' ? '未配置' : '未登录') : null),
               h('div.row-sub', h('span', authText), h('span.sep'), h('span', account.proxy === 'off' ? '直连' : '经 relay'),
-                h('span.sep'), h('span', account.projects.length ? '项目：' + account.projects.join('、') : '没有项目')))),
+                h('span.sep'), h('span', account.projects.length ? '项目：' + account.projects.join('、') : '没有项目')),
+              usageLine(account))),
           h('div.row-actions',
             account.auth === 'login'
               ? h('button.btn.small' + (account.hasLogin ? '' : '.soft'), { on: { click: () => CF.accounts.login(account.name) } }, CF.icon('user', 13), account.hasLogin ? '重新登录' : '登录')

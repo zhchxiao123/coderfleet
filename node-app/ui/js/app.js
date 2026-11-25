@@ -209,6 +209,9 @@
 
   function conversationMeta(item) {
     if (item.attention) return h('span.dot.waiting', { title: '等你确认' });
+    // A job (做完为止) shows its own state: blue working, amber waiting for you, green ready to review.
+    const jobDot = item.job && CF.job.dot(item.job);
+    if (jobDot) return jobDot;
     if (item.status === 'queued') return h('span.dot', { title: '在原服务里排队' });
     if (['starting', 'running'].includes(item.status)) return h('span.dot.busy', { title: '进行中' });
     if (item.status === 'failed') return h('span.dot.failed', { title: '失败' });
@@ -428,6 +431,15 @@
       CF.chat.sync();
     }).catch(() => undefined);
   }, 5000);
+  // Subscription usage changes slowly; the service itself asks at most every five minutes.
+  setInterval(() => {
+    if (document.hidden || !CF.state.connected) return;
+    void CF.get('accounts').then(accounts => {
+      if (JSON.stringify(accounts) === JSON.stringify(CF.state.accounts)) return;
+      CF.state.accounts = accounts;
+      CF.app.renderCurrent();
+    }).catch(() => undefined);
+  }, 60000);
 
   if (!CF.transport) {
     main.textContent = 'CoderFleet must run inside the desktop App.';

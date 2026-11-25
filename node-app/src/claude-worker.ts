@@ -207,7 +207,8 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
         cwd: spec.cwd, pathToClaudeCodeExecutable: path, model: spec.model || undefined, resume: spec.session_id || undefined,
         ...(spec.fork_session_id && spec.session_id && spec.resume_session_at
           ? { forkSession: true, sessionId: spec.fork_session_id, resumeSessionAt: spec.resume_session_at } : {}),
-        permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
+        permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}),
+        ...(spec.read_only ? { disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code', append: CF_SEND_HINT },
         canUseTool: (toolName: string, toolInput: Json, context: Json) =>
           ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),

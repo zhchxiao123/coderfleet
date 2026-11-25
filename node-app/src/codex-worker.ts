@@ -101,8 +101,8 @@ export async function runCodex(spec: CodexSpec): Promise<number> {
   try {
     const sdk = await import(pathToFileURL(join(spec.vendor_directory, 'codex-sdk', 'index.js')).href) as { Codex: new (options: Json) => CodexClient };
     const codex = new sdk.Codex({ codexPathOverride: codexPath() });
-    const sandboxMode = spec.auto ? 'danger-full-access' : 'workspace-write';
-    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode, ...(spec.auto ? { approvalPolicy: 'never' } : {}), ...(spec.model ? { model: spec.model } : {}) };
+    const sandboxMode = spec.read_only ? 'read-only' : spec.auto ? 'danger-full-access' : 'workspace-write';
+    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode, ...(spec.auto || spec.read_only ? { approvalPolicy: 'never' } : {}), ...(spec.model ? { model: spec.model } : {}) };
     const files = attachments(spec.cwd, spec.images);
     const images = files.filter(file => file.kind === 'image');
     const prompt = withPaths(spec.prompt, files.filter(file => file.kind !== 'image'));

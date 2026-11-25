@@ -46,6 +46,8 @@
         index += 1;
         while (index < lines.length && !lines[index].trim().startsWith(fence[1])) body.push(lines[index++]);
         index += 1;
+        // A job's criteria (see job.js) read as a checklist, not as code.
+        if (/^\s*```\s*(标准|做完的标准)\s*$/.test(line) && window.CF.job) { root.append(window.CF.job.criteriaBlock(body.join('\n'))); continue; }
         root.append(h('pre', h('code', { dataset: { lang: fence[2] || '' } }, body.join('\n'))));
         continue;
       }

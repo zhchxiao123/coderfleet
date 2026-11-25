@@ -349,7 +349,7 @@
           ? h('span.turn-action.busy', { title: '正在翻译' }, h('span.spinner'), '翻译中…')
           : action('translate', translated ? '显示原文' : '翻译成中文', button => toggleTranslation(turn, button), translated ? '.on' : ''))
         : null,
-      turn.type === 'claude' && turn.status === 'done' && !turn.inherited && turn.sessionId
+      turn.type === 'claude' && turn.status === 'done' && !turn.inherited && turn.sessionId && turn.role !== 'review'
         ? action('fork', '从这里分叉', button => forkAt(turn, button)) : null);
   }
 
@@ -380,7 +380,7 @@
 
   function turnNode(turn) {
     const node = h('div.turn' + (turn.inherited ? '.inherited' : ''),
-      userBubble(turn.projectId, turn.prompt, turn.images),
+      turn.checkRound || turn.role ? CF.job.systemLine(turn) : userBubble(turn.projectId, turn.prompt, turn.images),
       translationStatus(turn),
       body(turn),
       turnActions(turn),
@@ -405,11 +405,13 @@
   async function loadModels(projectId, select) {
     let list = models.get(projectId);
     if (!list) {
-      try { list = await CF.get('projects/' + projectId + '/models'); } catch { list = []; }
-      models.set(projectId, list);
+      // A failed list (container stopped) is asked for again next time.
+      try { list = await CF.get('projects/' + projectId + '/models'); models.set(projectId, list); } catch { list = []; }
     }
     const current = select.value;
-    select.replaceChildren(h('option', { value: '' }, '默认模型'), ...list.map(item => h('option', { value: item.id }, item.label)));
+    // Claude lists its own default row (id ''), named after the model it resolves to.
+    const options = list.some(item => item.id === '') ? list : [{ id: '', label: '默认模型' }, ...list];
+    select.replaceChildren(...options.map(item => h('option', { value: item.id, ...(item.title ? { title: item.title } : {}) }, item.label)));
     select.value = list.some(item => item.id === current) ? current : '';
     select.hidden = !list.length;
   }
@@ -497,6 +499,31 @@
       let savedAuto = '';
       try { savedAuto = localStorage.getItem(autoKey) || ''; } catch { /* storage unavailable */ }
       setAuto(Boolean(savedAuto));
+      // 做完为止: a message can start a job, in a new conversation or one already going. From
+      // then on the work happens in its own branch and directory until its changes are accepted
+      // or discarded (see job.js).
+      let jobWanted = false;
+      const setJobWanted = on => {
+        jobWanted = on;
+        jobToggle.setAttribute('aria-pressed', String(on));
+        jobToggle.classList.toggle('on', on);
+      };
+      const jobToggle = h('button.auto-toggle.job-toggle', {
+        disabled: true, hidden: Boolean(conversation?.job), title: '做完为止',
+        on: { click: () => {
+          setJobWanted(!jobWanted);
+          autoButton.hidden = jobWanted;
+          if (jobWanted) CF.toast('做完为止已开：它先列出做完的标准，在独立分支上做到为止，再由你收下或丢弃');
+        } },
+      }, CF.icon('check', 13), h('span', '做完为止'));
+      if (projectId) {
+        CF.get('projects/' + encodeURIComponent(projectId) + '/job-support').then(support => {
+          jobToggle.disabled = !support.supported;
+          jobToggle.title = support.supported
+            ? '做完为止：它先列出做完的标准，在独立的分支和目录里做，逐条做到并经过核对后，由你收下（合并）或丢弃。有 PRD 或 issue 就把文件路径告诉它。'
+            : '做完为止用不了：' + support.reason;
+        }).catch(() => { jobToggle.title = '做完为止暂时用不了'; });
+      }
       const followHost = h('div.follow-ups');
       // Only a new conversation can still change its project.
       const chip = conversation ? null : projectChip(projectId);
@@ -522,11 +549,13 @@
         const stopping = Boolean(running) && !content;
         sendButton.classList.toggle('stop', stopping);
         sendButton.replaceChildren(stopping ? h('span.stop-mark') : CF.icon('send', 16));
-        sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || !content || uploading || !containerReady;
+        sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || current.jobClosed || !content || uploading || !containerReady;
         sendButton.title = stopping ? (running.stopping ? '正在停止…' : '中断（Esc）') : running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
         sendButton.setAttribute('aria-label', sendButton.title);
         hint.textContent = running?.stopping ? '正在停止…' : running && !content ? '正在回答 · Esc 停止，也可以继续输入'
           : running ? (canInject(running) ? '发送会插入这一轮回答' : '发送会排在这轮回答之后')
+          : current.jobClosed ? '这件事已经结束，接着做请开一个新对话'
+          : current.job?.state === 'review' && !running ? '发消息就是让它再改 · Enter 发送'
           : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
       };
@@ -539,13 +568,14 @@
           info ? CF.typeBadge(info.type, info.typeLabel) : null,
           // The container only needs mentioning when it is not running.
           info && info.state !== 'running' ? h('span.container-warn', h('span.dot.waiting'), '容器' + CF.stateText(info.state)) : null,
+          info ? CF.accounts.usagePill(info.account) : null,
         );
-        textarea.placeholder = info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
+        textarea.placeholder = current.jobClosed ? '这件事已经结束' : info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
         const record = CF.findConversation(current.conversationId);
         current.readOnly = Boolean(record?.type && info && record.type !== info.type);
-        textarea.disabled = current.readOnly;
+        textarea.disabled = current.readOnly || Boolean(current.jobClosed);
         if (current.readOnly) {
           notice.replaceChildren(h('div.banner', h('span.banner-icon', CF.icon('chat', 16)),
             h('div.text', h('strong', '这是 ' + record.type + ' 账号的历史对话'), h('span', '项目现在绑定的是 ' + info.typeLabel + '，这段对话只能查看。'))));
@@ -647,6 +677,23 @@
       };
       transcript.addEventListener('scroll', () => requestAnimationFrame(trackCurrent), { passive: true });
 
+      // A job's conversation says where the work happens (top) and how it ended (bottom).
+      let jobStartLine = null;
+      let jobEndLine = null;
+      const renderJobLines = () => {
+        const job = current.job;
+        if (!job || !current.turns.length) return;
+        if (!jobStartLine) {
+          // Above the turn that started it: the conversation may have been going before.
+          const first = current.turns.find(turn => turn.createdAt >= job.createdAt);
+          const node = first && nodes.get(first.id)?.node;
+          if (first && !node) return;
+          jobStartLine = CF.job.line(job, false);
+          if (node) node.before(jobStartLine); else inner.prepend(jobStartLine);
+        }
+        if (!jobEndLine && CF.job.closed(job)) jobEndLine = CF.job.line(job, true);
+        if (jobEndLine && inner.lastChild !== jobEndLine) inner.append(jobEndLine);
+      };
       const renderTurns = () => {
         if (!current.turns.length) { if (!welcome.isConnected) transcript.replaceWith(welcome); return; }
         if (welcome.isConnected) welcome.replaceWith(transcript);
@@ -663,6 +710,7 @@
           if (!existing && turn.inherited && !dividerNode) { dividerNode = h('div.fork-divider', h('span', '以上是分叉前的历史')); }
           if (dividerNode && turn.inherited) node.after(dividerNode);
         }
+        renderJobLines();
         if (atBottom) transcript.scrollTop = transcript.scrollHeight;
         updateComposer();
         renderRail();
@@ -745,6 +793,9 @@
           if (session !== current) return;
           current.turns = turns;
           current.followUps = followUps;
+          mountJob();
+          await current.jobCard?.refresh();
+          if (session !== current) return;
           applyModel();
           renderTurns();
           renderFollowUps();
@@ -780,7 +831,9 @@
             chip?.remove();
           }
           const result = await CF.api('POST', 'conversations/' + current.conversationId + '/turns',
-            { prompt, images, model: modelSelect.value, auto: autoButton.getAttribute('aria-pressed') === 'true' });
+            { prompt, images, model: modelSelect.value, auto: autoButton.getAttribute('aria-pressed') === 'true',
+              ...(jobWanted ? { job: true } : {}) });
+          if (jobWanted) { jobToggle.hidden = true; setJobWanted(false); }
           try { localStorage.setItem(modelKey, modelSelect.value); } catch { /* storage unavailable */ }
           if (result?.delivered === 'queued') CF.toast('已排队，这一轮结束后自动发出');
           textarea.value = '';
@@ -825,14 +878,38 @@
         filesButton.classList.toggle('on', Boolean(filesPanel));
         filesButton.setAttribute('aria-pressed', String(Boolean(filesPanel)));
       };
-      const topbar = h('div.topbar', title, meta, h('div.spacer'), projectId ? filesButton : null, more);
+      // The job card over the top-right corner, and the button that brings it back once folded.
+      const chatColumn = h('div.chat');
+      const jobButton = h('button.btn.ghost.small.job-button', { hidden: true, title: '这件事的进度', on: { click: () => current.jobCard?.toggle() } }, CF.icon('check', 14), '进度');
+      const mountJob = () => {
+        if (current.jobCard || !current.conversationId) return;
+        current.jobCard = CF.job.mount(chatColumn, current.conversationId, {
+          changed: job => {
+            const first = !current.job && job;
+            current.job = job;
+            current.jobClosed = Boolean(job) && CF.job.closed(job);
+            jobButton.hidden = !job;
+            if (job) { autoButton.hidden = true; jobToggle.hidden = true; }
+            renderHeader();
+            renderJobLines();
+            if (!first) void CF.app.refreshConversations();
+          },
+          summary: (job, changes, open) => {
+            jobButton.classList.toggle('on', open);
+            jobButton.setAttribute('aria-expanded', String(open));
+            if (job) jobButton.replaceChildren(...CF.job.summary(job, changes).filter(Boolean));
+          },
+          say: async text => { textarea.value = text; updateComposer(); await send(); },
+        });
+      };
+      const topbar = h('div.topbar', title, meta, h('div.spacer'), jobButton, projectId ? filesButton : null, more);
       transcript.addEventListener('scroll', () => topbar.classList.toggle('scrolled', transcript.scrollTop > 4), { passive: true });
       container.replaceChildren(
         topbar,
         chatRow,
       );
       chatRow.append(
-        h('div.chat', rail, current.conversationId ? transcript : welcome,
+        (chatColumn.append(rail, current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, followHost, h('div.composer', {
             on: {
               dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
@@ -840,7 +917,7 @@
               drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); addFiles([...event.dataTransfer.files]); },
             },
           }, attachRow, textarea, fileInput,
-            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, sendButton)))),
+            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, jobToggle, hint, sendButton)))), chatColumn),
       );
       let filesOpen = false;
       try { filesOpen = localStorage.getItem('cf.filesOpen') === '1'; } catch { /* storage unavailable */ }
