@@ -235,11 +235,41 @@
       if (!block.text.trim()) return;
       const state = translations.get(turn.id + ':' + index);
       nodes.push(state?.showing && state.text !== undefined
-        ? h('div.assistant.translated', CF.markdown(state.text))
-        : h('div.assistant', { dataset: { block: String(index) } }, CF.markdown(block.text)));
+        ? h('div.assistant.translated', answerContent(turn.projectId, state.text))
+        : h('div.assistant', { dataset: { block: String(index) } }, answerContent(turn.projectId, block.text)));
     });
     flush();
     return nodes;
+  }
+
+  /**
+   * Answer Markdown with the agent's file markers, <!-- CF_SEND: path --> (as in
+   * the Python Web UI), shown as file cards to open or save.
+   */
+  const SEND_MARKER = /<!--\s*CF_SEND:\s*([^>]+?)\s*-->/g;
+  function answerContent(projectId, text) {
+    if (!text.includes('CF_SEND')) return CF.markdown(text);
+    const parts = [];
+    let last = 0;
+    for (const match of text.matchAll(SEND_MARKER)) {
+      const before = text.slice(last, match.index);
+      if (before.trim()) parts.push(CF.markdown(before));
+      parts.push(sendCard(projectId, match[1]));
+      last = match.index + match[0].length;
+    }
+    if (text.slice(last).trim()) parts.push(CF.markdown(text.slice(last)));
+    return h('div', parts);
+  }
+
+  function sendCard(projectId, raw) {
+    const path = raw.trim().replace(/^\/workspace\//, '').replace(/^\.\//, '');
+    const name = path.split('/').pop() || path;
+    const extension = /\.([A-Za-z0-9]{1,6})$/.exec(name)?.[1]?.toUpperCase() || '';
+    const entry = { name, path, size: null };
+    const save = h('button.btn.small', { title: '保存到本机', on: { click: event => { event.stopPropagation(); void CF.busy(save, () => CF.files.save(projectId, path)); } } }, CF.icon('download', 13), '下载');
+    return h('div.send-card', { role: 'button', tabIndex: 0, title: '预览 ' + path, on: { click: () => CF.files.preview(projectId, entry) } },
+      h('span.file-icon', CF.icon('file', 20), extension ? h('small', extension) : null),
+      h('span.send-meta', h('strong', name), h('small', path)), save);
   }
 
   /** A user message: its images above the text, like mainstream chat apps. */

@@ -60,6 +60,8 @@ try {
   await shot('chat-approval');
   await page.evaluate(() => { document.querySelector('.transcript').scrollTop = 0; });
   await shot('chat-markdown');
+  await page.locator('.send-card').first().scrollIntoViewIfNeeded();
+  await shot('send-card');
   await page.click('.files-toggle');
   await page.waitForSelector('.file-row:has-text("README.md")');
   await shot('files');

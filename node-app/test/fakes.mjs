@@ -86,6 +86,9 @@ const DEMO = [
   '| 启动服务 | \`serve\` |',
   '',
   '> 端口目前写死在配置里，要改成读环境变量吗？',
+  '',
+  '整理好的说明在这里：',
+  '<!-- CF_SEND: README.md -->',
 ].join('\\n');
 createInterface({ input: process.stdin }).on('line', line => void handle(JSON.parse(line)));
 async function handle(message) {

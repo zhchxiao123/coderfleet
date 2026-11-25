@@ -22,6 +22,18 @@ type PermissionResult = { behavior: 'allow'; updatedInput: Json } | { behavior: 
 interface Query extends AsyncIterable<Json> { interrupt(): Promise<unknown> }
 type QueryFunction = (input: { prompt: AsyncIterable<Json>; options: Json }) => Query;
 
+/** The Python service's --append-system-prompt: files for the user are marked, and the App shows a card to save them. */
+const CF_SEND_HINT = 'When the user asks you to send, share, or provide a file for download, '
+  + 'output a download marker on its own line in this exact format: '
+  + '<!-- CF_SEND: relative/path/to/file.ext --> '
+  + 'The path must be relative to /workspace (the project root). '
+  + 'Examples: '
+  + 'if the file is /workspace/report.html → output <!-- CF_SEND: report.html --> ; '
+  + 'if the file is /tmp/output.pdf → first copy it to /workspace/ with: cp /tmp/output.pdf /workspace/ '
+  + 'then output <!-- CF_SEND: output.pdf --> . '
+  + 'Only output this marker after confirming the file exists at the given path. '
+  + 'Do not mention scp, IDE downloads, or other manual methods — use this marker instead.';
+
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan']);
 /** After a result, how long to wait for the run that answers a message sent mid-turn. */
 const FOLLOW_UP_WAIT = 5_000;
@@ -196,7 +208,7 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
         ...(spec.fork_session_id && spec.session_id && spec.resume_session_at
           ? { forkSession: true, sessionId: spec.fork_session_id, resumeSessionAt: spec.resume_session_at } : {}),
         permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
-        systemPrompt: { type: 'preset', preset: 'claude_code' },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: CF_SEND_HINT },
         canUseTool: (toolName: string, toolInput: Json, context: Json) =>
           ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),
         stderr: (data: string) => process.stderr.write(data),

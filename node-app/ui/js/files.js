@@ -101,5 +101,5 @@
     return node;
   }
 
-  CF.files = { panel };
+  CF.files = { panel, preview, save };
 })();

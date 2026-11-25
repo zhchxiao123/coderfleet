@@ -65,6 +65,7 @@
     terminal: '<rect x="2" y="3" width="12" height="10" rx="1.8"/><path d="m5 6.5 2 1.5-2 1.5M8.5 10H11"/>',
     more: '<circle cx="4" cy="8" r=".9"/><circle cx="8" cy="8" r=".9"/><circle cx="12" cy="8" r=".9"/>',
     edit: '<path d="M10.5 3 13 5.5 6 12.5H3.5V10z"/><path d="m9 4.5 2.5 2.5"/>',
+    download: '<path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13h10"/>',
     trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/>',
     send: '<path d="M8 13V3.5M3.8 7.5 8 3.3l4.2 4.2"/>',
     square: '<rect x="4.5" y="4.5" width="7" height="7" rx="1.2"/>',
