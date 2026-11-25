@@ -1,5 +1,5 @@
 // 做完为止: a conversation that works in its own git worktree and branch until the
-// user accepts (merge into the project's checked-out branch) or discards it.
+// user accepts (the agent merges it where it belongs) or discards it.
 // A job is a record attached to one conversation, kept in the backend's own
 // state directory; every git operation runs inside the project's container.
 import { execFile } from 'node:child_process';
@@ -71,14 +71,21 @@ export interface Job {
   /**
    * Why it waits: `failed`, `stopped` (the turn's error comes with it); `question`: a criterion
    * needs the user's decision; `checks` / `review`: criteria still unmet, or the reviewer still
-   * wanting changes, after CHECK_ROUNDS rounds.
+   * wanting changes, after CHECK_ROUNDS rounds; `merge`: accepted, but the agent's turn ended
+   * with the branch not merged (it asked where to, or could not).
    */
   readonly reason?: string;
   readonly error?: string;
-  /** Why the last accept did not merge (a conflict, local changes in the way). */
+  /**
+   * The user accepted: the agent has been asked to merge the branch. From then on each of its
+   * turns ends with a look at whether the branch is merged, instead of the criteria.
+   */
+  readonly accepting?: boolean;
+  /** What the last look found still missing. */
   readonly mergeError?: string;
-  /** What was merged, kept after the worktree is gone. */
+  /** What was merged, kept after the worktree is gone, and the branch it went into ('' when there was nothing to merge into any). */
   readonly merged?: Changes;
+  readonly mergedInto?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly closedAt?: string;
@@ -175,6 +182,23 @@ export function reviewFeedback(account: string, answer: string): string {
   return [
     '另一个 AI（' + account + '）核对了你的改动，认为要改。它的意见：', '', answer.trim(), '',
     '逐条处理：确实是问题的就改掉；你认为不成立的，说明理由，不用改。改完把整个 ```标准 代码块连同证据再写一遍。',
+  ].join('\n');
+}
+
+/**
+ * What the agent is told when the user accepts. Where the changes belong is its call: the
+ * branch was cut from whatever the project had checked out, which need not be where they go.
+ */
+export function acceptPrompt(job: Job): string {
+  return [
+    '我收下这件事了，请把改动合并回去。前面「不要合并」的要求到此为止，其余照旧。',
+    '- 先把工作目录 ' + job.directory + ' 里还没提交的改动提交到分支 ' + job.branch + '。',
+    '- 合并到哪个分支由你判断：这个分支是从 ' + ROOT + (job.baseBranch ? ' 的 ' + job.baseBranch + ' 分支' : '') + '（提交 ' + job.base.slice(0, 12) + '）分出来的，一般合并回那里；'
+      + '但对话里我说过别的去处，或者这件事的改动实际做在别的分支上，就按实际来。拿不准就先问我，不要猜。',
+    '- 用普通的 git merge（不要 squash、rebase 或 cherry-pick），在检出了目标分支的那个目录里合并；不要替我切换 ' + ROOT + ' 的分支，不要动别人没提交的改动，不要推送。',
+    '- 有冲突就解决并确认改动仍然正确；解决不了，或者目标分支现在合并不了，就停下告诉我原因。',
+    '- 不要自己删除这个工作目录和分支 ' + job.branch + '：确认它已经合并进别的分支后，它们会被自动清理。',
+    '- 最后用一两句话告诉我：合并进了哪个分支，或者为什么还没有合并。',
   ].join('\n');
 }
 
@@ -320,32 +344,32 @@ export class Jobs {
   }
 
   /**
-   * Commits what is uncommitted, merges the branch into whatever the project has checked
-   * out, then removes the worktree and branch. When the merge cannot be done the project
-   * is left as it was and the job stays in review with `mergeError`.
+   * After a turn of an accepted job: when nothing is left uncommitted and the branch's commit
+   * is in another local branch, the worktree and branch are removed and the job is closed.
+   * Otherwise it waits for the user, with what is still missing in `mergeError`.
    */
-  public async accept(project: WorkspaceProject, job: Job): Promise<Job> {
-    const identity = await this.identity(project);
-    await this.git(project, job.directory, 'add', '-A');
-    const staged = await this.git(project, job.directory, 'status', '--porcelain');
-    if (staged.trim()) await this.git(project, job.directory, ...identity, 'commit', '--no-verify', '-m', job.title || 'CoderFleet job ' + job.id);
+  public async finish(project: WorkspaceProject, job: Job): Promise<Job> {
+    const waiting = (mergeError: string): Job => this.patch(job.conversationId, ['working'], { state: 'waiting', phase: undefined, reason: 'merge', error: undefined, mergeError }) as Job;
+    let tip = '';
+    let holders: string[] = [];
+    try {
+      if ((await this.git(project, job.directory, 'status', '--porcelain')).trim()) return waiting('工作目录里还有没提交的改动。');
+      tip = (await this.git(project, ROOT, 'rev-parse', '--verify', 'refs/heads/' + job.branch)).trim();
+      holders = (await this.git(project, ROOT, 'for-each-ref', '--contains', tip, '--format=%(refname:short)', 'refs/heads'))
+        .split('\n').map(line => line.trim()).filter(name => name && name !== job.branch);
+    } catch (error) { return waiting('没能确认有没有合并：' + (error instanceof Error ? error.message : String(error)).split('\n').slice(-2).join(' ')); }
+    // With no commit of its own there is nothing to merge.
+    if (!holders.length && tip !== job.base) return waiting('分支 ' + job.branch + ' 还没有合并进别的分支。');
     const merged = await this.changes(project, job);
-    try { await this.git(project, ROOT, ...identity, 'merge', '--no-edit', job.branch); }
-    catch (error) {
-      await this.git(project, ROOT, 'merge', '--abort').catch(() => undefined);
-      const detail = error instanceof Error ? error.message : String(error);
-      const conflict = /CONFLICT|Automatic merge failed/i.test(detail);
-      const saved = this.patch(job.conversationId, ['review', 'waiting'], {
-        mergeError: conflict ? '和主目录现在的内容有冲突，没有合并。' : '没有合并：' + detail.split('\n').slice(-3).join(' '),
-      });
-      throw new JobError(saved?.mergeError ?? detail);
-    }
     await this.remove(project, job);
-    return this.patch(job.conversationId, ['review', 'waiting'], { state: 'accepted', merged, mergeError: undefined, reason: undefined, error: undefined, closedAt: new Date().toISOString() }) as Job;
+    return this.patch(job.conversationId, ['working'], {
+      state: 'accepted', phase: undefined, accepting: undefined, merged, mergeError: undefined, reason: undefined, error: undefined, closedAt: new Date().toISOString(),
+      mergedInto: holders.includes(job.baseBranch) ? job.baseBranch : holders.slice(0, 3).join('、'),
+    }) as Job;
   }
 
   public async discard(project: WorkspaceProject, job: Job): Promise<Job> {
     await this.remove(project, job);
-    return this.patch(job.conversationId, ['review', 'waiting', 'working'], { state: 'discarded', mergeError: undefined, closedAt: new Date().toISOString() }) as Job;
+    return this.patch(job.conversationId, ['review', 'waiting', 'working'], { state: 'discarded', accepting: undefined, mergeError: undefined, closedAt: new Date().toISOString() }) as Job;
   }
 }

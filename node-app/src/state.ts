@@ -146,7 +146,7 @@ export interface Turn {
   /** Sent by the service, not the user: the job's agent stopped with criteria unmet (or none listed) for the n-th time. */
   readonly checkRound?: number;
   /** Sent by the service too: `review` is the reviewer checking the job's changes against its criteria (a fresh read-only session, in another account's project when there is one); `review-feedback` hands its findings to the author. */
-  readonly role?: 'review' | 'review-feedback';
+  readonly role?: 'review' | 'review-feedback' | 'accept';
   readonly requestedModel: string;
   readonly createdAt: string;
   readonly resumeId: string;

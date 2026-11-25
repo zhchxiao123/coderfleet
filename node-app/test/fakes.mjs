@@ -243,6 +243,25 @@ process.stdin.on('end', async () => {
     return;
   }
   if (prompt === 'fail') { send({ type: 'turn.failed', error: { message: 'quota exceeded' } }); process.exit(1); }
+  if (prompt.startsWith('我收下')) {
+    // The user accepted a job: where the changes go is the agent's call, and here it asks first.
+    send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: '还没有合并。这个分支是从 main 分出来的，但 main 之后有了新的提交，另外还有一个 release 分支。合并到哪个？' } });
+    send({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
+    return;
+  }
+  if (prompt.startsWith('合并到')) {
+    const { execFileSync } = await import('node:child_process');
+    const cwd = args[args.indexOf('--cd') + 1];
+    const git = (directory, ...rest) => execFileSync('git', ['-C', directory, '-c', 'user.name=Fake', '-c', 'user.email=fake@example.com', ...rest], { encoding: 'utf8' }).trim();
+    const branch = git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD');
+    git(cwd, 'add', '-A');
+    if (git(cwd, 'status', '--porcelain')) git(cwd, 'commit', '-q', '-m', 'job');
+    const root = cwd.split('/.coderfleet-work/')[0];
+    send({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'git -C ' + root + ' merge ' + branch, aggregated_output: git(root, 'merge', '--no-edit', branch), exit_code: 0, status: 'completed' } });
+    send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: '合并进了 ' + git(root, 'rev-parse', '--abbrev-ref', 'HEAD') + '，没有冲突。' } });
+    send({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
+    return;
+  }
   if (prompt.includes('做完的标准') && !prompt.startsWith('请核对')) {
     // A job's author (做完为止): lists what done means, with its evidence.
     send({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'npm test', aggregated_output: 'pass 12', exit_code: 0, status: 'completed' } });

@@ -101,7 +101,16 @@ try {
   await page.waitForSelector('.job-card .job-actions');
   await page.click('.job-row');
   await shot('job-review');
+  // Accepting hands the merge to the agent: it asks where to when it cannot tell, the answer
+  // goes in the conversation, and the job closes once the branch is seen to be merged.
   await page.click('.job-actions .btn.primary');
+  await page.waitForSelector('.job-divider:has-text("你收下了")');
+  await page.waitForSelector('.job-button:has-text("等你")');
+  if (!(await page.isVisible('.job-card'))) await page.click('.job-button');
+  await page.waitForSelector('.job-ask:has-text("还没有合并")');
+  await shot('job-accept-ask');
+  await page.fill('.composer textarea', '合并到 main');
+  await page.keyboard.press('Enter');
   await page.waitForSelector('.job-divider:has-text("已收下")');
   await shot('job-accepted');
   // A criterion only the user can decide: the job waits, the question is in the card.

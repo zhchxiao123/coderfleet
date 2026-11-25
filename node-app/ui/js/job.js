@@ -1,6 +1,6 @@
 'use strict';
 // 做完为止: the card floating over the top-right of a conversation that works in its own
-// branch — state, what changed, and the two endings (收下 / 丢弃).
+// branch — state, what changed, and the two endings (收下: it merges the branch / 丢弃).
 (() => {
   const CF = window.CF;
   const { h } = CF;
@@ -40,7 +40,7 @@
     /** What the top bar's button shows: the state and how much changed. */
     summary(job, changes) {
       const info = STATES[job.state] || STATES.working;
-      return [info.dot ? h('span.dot.' + info.dot) : CF.icon('check', 14), job.phase === 'reviewing' ? '核对中' : info.label,
+      return [info.dot ? h('span.dot.' + info.dot) : CF.icon('check', 14), job.phase === 'reviewing' ? '核对中' : job.state === 'working' && job.accepting ? '合并中' : info.label,
         changes?.files.length ? h('span.job-count', h('span.add', '+' + changes.added), ' ', h('span.del', '−' + changes.removed)) : null];
     },
     /** The sidebar dot of a conversation with a job; null for any other. */
@@ -51,6 +51,7 @@
     /** In place of a user bubble: a turn the service started itself. */
     systemLine(turn) {
       if (turn.role === 'review') return h('div.job-divider', h('span', h('b', '核对'), '换 ' + turn.account + ' 的一个新会话逐条核对标准，它只读不改'));
+      if (turn.role === 'accept') return h('div.job-divider', h('span', h('b', '你收下了'), '已经让它把改动合并回去；拿不准合并到哪个分支，它会先问你'));
       if (turn.role === 'review-feedback') return h('div.job-divider', h('span', h('b', '核对要改'), '意见已经交回给它'));
       return h('div.job-divider', h('span', h('b', '还没做完'), '第 ' + turn.checkRound + ' 轮：有标准没做到，已经让它接着做'));
     },
@@ -65,7 +66,7 @@
         return h('div.job-divider', h('span', h('b', '已开工'), '在独立分支 ' + job.branch + ' 上做，不动 ' + target(job)
           + (job.dirtyAtStart ? '；主目录里没提交的改动没有带进去' : '')));
       }
-      if (job.state === 'accepted') return h('div.job-divider', h('span', h('b', '已收下'), '合并进了 ' + target(job) + '，分支和工作目录已删除'));
+      if (job.state === 'accepted') return h('div.job-divider', h('span', h('b', '已收下'), (job.mergedInto ? '合并进了 ' + job.mergedInto : '没有要合并的改动') + '，分支和工作目录已删除'));
       if (job.state === 'discarded') return h('div.job-divider', h('span', h('b', '已丢弃'), '分支和工作目录已删除，对话保留'));
       return null;
     },
@@ -93,7 +94,6 @@
         busy = true;
         try {
           await CF.busy(button, () => CF.api('POST', 'conversations/' + conversationId + '/job/' + action));
-          if (action === 'accept') CF.toast('已合并进 ' + target(job));
         } catch { /* CF.busy has shown the error; the card shows why below */ }
         busy = false;
         changesAt = 0;
@@ -131,7 +131,7 @@
         const next = JSON.stringify([job, changes, showFiles, hidden, elapsed(job)]);
         if (next === signature || busy) return;
         signature = next;
-        const accept = h('button.btn.primary.small', { on: { click: event => act('accept', event.currentTarget) } }, '收下，合并进 ' + target(job));
+        const accept = h('button.btn.primary.small', { on: { click: event => act('accept', event.currentTarget) } }, '收下');
         const discard = h('button.btn.small.danger-text', { on: { click: event => act('discard', event.currentTarget) } }, '丢弃');
         const files = changes && showFiles ? h('div.job-files',
           changes.files.slice(0, 40).map(file => h('div.job-file', { title: file.path },
@@ -150,29 +150,25 @@
           CF.icon('eye', 14), '核对', h('span.v', job.phase === 'reviewing' ? [h('span.spinner'), '逐条核对中…'] : [review.account + ' · ', VERDICTS[review.verdict] || review.verdict])) : null;
         node.replaceChildren(...[
           h('div.job-head',
-            h('span.job-state', info.dot ? h('span.dot.' + info.dot) : null, info.label),
+            h('span.job-state', info.dot ? h('span.dot.' + info.dot) : null, job.state === 'working' && job.accepting ? '合并中' : info.label),
             h('code', { title: '分支 ' + job.branch }, job.branch),
             h('span.job-time', elapsed(job)),
             h('button.icon-btn.job-close', { title: '收起', on: { click: () => controller.toggle(false) } }, CF.icon('x', 12))),
           CF.findConversation(conversationId)?.schedule ? h('div.job-hint.job-origin', CF.icon('clock', 12), '定时开的：' + CF.findConversation(conversationId).schedule) : null,
           job.state === 'waiting' ? h('div.job-ask',
-            h('strong', job.reason === 'stopped' ? '你把它停下了' : job.reason === 'question' ? '有事要你来定' : job.reason === 'checks' ? '改了 ' + (job.round || 3) + ' 轮，还有标准没做到' : job.reason === 'review' ? '改了 ' + (job.round || 3) + ' 轮，核对还是认为要改' : '这一轮出错了'),
+            h('strong', job.reason === 'stopped' ? '你把它停下了' : job.reason === 'question' ? '有事要你来定' : job.reason === 'checks' ? '改了 ' + (job.round || 3) + ' 轮，还有标准没做到' : job.reason === 'review' ? '改了 ' + (job.round || 3) + ' 轮，核对还是认为要改' : job.reason === 'merge' ? '收下了，还没有合并' : '这一轮出错了'),
             job.error ? h('p', job.error) : null,
-            h('span', job.reason === 'question' ? '看下面标 ? 的那条，在对话里回它一句，它就接着做。' : job.reason === 'checks' ? '告诉它该怎么办，或者改一下标准；也可以照现在的样子收下。' : job.reason === 'review' ? '核对意见在对话里。告诉它该怎么办；也可以照现在的样子收下。' : '在下面回一句话，它就接着做。')) : null,
+            job.reason === 'merge' && job.mergeError ? h('p', job.mergeError) : null,
+            h('span', job.reason === 'merge' ? '它在对话里说了原因。回它一句（比如合并到哪个分支），它就接着合并。' : job.reason === 'question' ? '看下面标 ? 的那条，在对话里回它一句，它就接着做。' : job.reason === 'checks' ? '告诉它该怎么办，或者改一下标准；也可以照现在的样子收下。' : job.reason === 'review' ? '核对意见在对话里。告诉它该怎么办；也可以照现在的样子收下。' : '在下面回一句话，它就接着做。')) : null,
           criteriaNode,
-          job.mergeError ? h('div.job-ask',
-            h('strong', '没有合并'), h('p', job.mergeError),
-            job.baseBranch ? h('button.btn.small', { on: { click: event => CF.busy(event.currentTarget, () => hooks.say(
-              '主目录的 ' + job.baseBranch + ' 分支有了新的提交，和你的改动合并时有冲突。请在你的工作目录里运行 git merge ' + job.baseBranch
-              + '，解决冲突并提交，再确认改动仍然正确。')) } }, '让它解决') : null) : null,
           h('button.job-row', { disabled: !count, 'aria-expanded': String(showFiles), on: { click: () => { showFiles = !showFiles; render(); } } },
             CF.icon('file', 14), closed(job) ? (job.state === 'accepted' ? '合并的变更' : '变更') : '变更',
             h('span.v', !changes ? '…' : !count ? '还没有改动' : [count + ' 个文件 ', h('span.add', '+' + changes.added), ' ', h('span.del', '−' + changes.removed)]),
             count ? h('span.chev', CF.icon('chevron', 11)) : null),
           files,
           reviewRow,
-          job.state === 'review' ? [h('div.job-hint', '想再改或加标准，直接在下面说。'), h('div.job-actions', accept, discard)] : null,
-          job.state === 'waiting' ? h('div.job-actions', count ? accept : null, discard) : null,
+          job.state === 'review' ? [h('div.job-hint', '想再改或加标准，直接在下面说。收下后由它把改动合并回去，拿不准合并到哪会先问你。'), h('div.job-actions', accept, discard)] : null,
+          job.state === 'waiting' ? h('div.job-actions', count && job.reason !== 'merge' ? accept : null, discard) : null,
         ].flat().filter(Boolean));
       };
 

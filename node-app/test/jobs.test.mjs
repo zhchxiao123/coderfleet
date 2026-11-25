@@ -12,15 +12,29 @@ import { environment, lastTurn, until } from './helpers.mjs';
 // about how it was started, then its criteria: `write <file> <text>` (met), `stall` (never
 // met), `ask` (the user has to decide), `fail`, anything else (no criteria). Told that it
 // listed none it lists one, met; handed a review it writes "good" to state.txt.
+// Told that the user accepted, or to \`merge\`, it commits what it has and merges its branch:
+// into \`side\` when the repository has such a branch, else into what the project has checked
+// out; when that does not merge it leaves everything as it was and asks.
 // As the reviewer it wants changes while state.txt exists and does not say "good".
 const jobCodex = `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 const args = process.argv.slice(2);
 const cwd = args[args.indexOf('--cd') + 1];
 const sandbox = args[args.indexOf('--sandbox') + 1];
 const resumed = args.includes('resume') ? args[args.indexOf('resume') + 1] : '';
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const git = (directory, ...rest) => execFileSync('git', ['-C', directory, ...rest], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const merge = () => {
+  const root = dirname(dirname(cwd));
+  const branch = git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD');
+  git(cwd, 'add', '-A');
+  if (git(cwd, 'status', '--porcelain')) git(cwd, 'commit', '-q', '-m', 'job');
+  if (git(root, 'branch', '--list', 'side')) { git(root, 'fetch', '-q', '.', branch + ':side'); return '合并进了 side。'; }
+  try { git(root, 'merge', '-q', '--no-edit', branch); return '合并进了 ' + git(root, 'rev-parse', '--abbrev-ref', 'HEAD') + '。'; }
+  catch { git(root, 'merge', '--abort'); return '和那边现在的内容有冲突，没有合并。要合并到哪个分支？'; }
+};
 const block = (...lines) => ['\`\`\`标准', ...lines, '\`\`\`'].join('\\n');
 let prompt = '';
 process.stdin.on('data', chunk => { prompt += chunk; });
@@ -39,7 +53,8 @@ process.stdin.on('end', () => {
     if (verb === 'fail') { send({ type: 'turn.failed', error: { message: 'quota exceeded' } }); process.exit(1); }
     if (verb === 'slow') { process.on('SIGINT', () => process.exit(130)); setInterval(() => undefined, 1000); return; }
     let criteria = '';
-    if (prompt.includes('核对了你的改动')) { writeFileSync(join(cwd, 'state.txt'), 'good\\n'); criteria = block('- [x] 写好了 —— 改成 good 了'); }
+    if (prompt.startsWith('我收下') || verb === 'merge') criteria = merge();
+    else if (prompt.includes('核对了你的改动')) { writeFileSync(join(cwd, 'state.txt'), 'good\\n'); criteria = block('- [x] 写好了 —— 改成 good 了'); }
     else if (prompt.includes('没有列出')) criteria = block('- [x] 写好了 —— 补上了');
     else if (prompt.includes('还没有做到') || verb === 'stall') criteria = block('- [x] 开了头 —— 有文件了', '- [ ] 没做到');
     else if (verb === 'ask') criteria = block('- [?] 用哪个端口 —— 8080 还是 8765？');
@@ -138,36 +153,51 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     await env.restart();
     assert.equal((await jobOf(env, conversation)).state, 'review');
 
-    // The project moved on in a conflicting way: accepting merges nothing and leaves it as it was.
+    // Accepting is a turn of the agent's: it is told to merge and decides where. The project
+    // moved on in a conflicting way, so it merges nothing and asks; the job waits, all kept.
+    const config = ['--config', join(env.root, 'config.json')];
     writeFileSync(join(env.project, 'readme.md'), 'other\n');
     git(env.project, 'commit', '-q', '-am', 'conflicting');
-    response = await env.post('conversations/' + conversation + '/job/accept');
-    assert.equal(response.status, 409);
-    assert.match(response.body.error, /冲突/);
-    job = await jobOf(env, conversation);
-    assert.equal(job.state, 'review');
-    assert.match(job.mergeError, /冲突/);
+    assert.match(await cli('job', 'accept', conversation, ...config), new RegExp(conversation + '  在做[\\s\\S]*已经让它合并'));
+    job = await settled(env, conversation, 'waiting');
+    assert.deepEqual([job.reason, job.accepting], ['merge', true]);
+    assert.match(job.mergeError, /还没有合并进别的分支/);
+    turns = await turnsOf(env, conversation);
+    assert.deepEqual(turns.map(turn => [turn.role, turn.status]), [[undefined, 'done'], ['review', 'done'], [undefined, 'done'], ['review', 'done'], ['accept', 'done']]);
+    assert.match(turns[4].prompt, new RegExp('^我收下[\\s\\S]*' + job.branch.replace('/', '\\/') + '[\\s\\S]*main 分支[\\s\\S]*拿不准就先问我'));
+    assert.deepEqual(started(turns[4]), { cwd: work, sandbox: 'danger-full-access', resumed: 'author-thread', preamble: false, continued: false });
+    assert.match(turns[4].answer, /有冲突，没有合并/);
     assert.equal(git(env.project, 'status', '--porcelain'), '');
     assert.equal(readFileSync(join(env.project, 'readme.md'), 'utf8'), 'other\n');
+    assert.equal(readFileSync(join(work, 'readme.md'), 'utf8'), 'two\n');
+    assert.match(git(env.project, 'rev-parse', '--verify', 'refs/heads/' + job.branch), /^[a-f0-9]{40}$/);
+    assert.match(await cli('job', 'show', conversation, ...config), /收下了，还没有合并/);
+    // It is still open, and the service restarting keeps it so.
+    await env.restart();
+    assert.deepEqual([(await jobOf(env, conversation)).state, (await jobOf(env, conversation)).reason], ['waiting', 'merge']);
 
-    // Without the conflict it merges into the checked-out branch; worktree and branch are removed.
+    // The user answers in the conversation; without the conflict it merges, and only once the
+    // branch is seen to be in another one are the worktree and branch removed.
     git(env.project, 'reset', '-q', '--hard', 'HEAD~1');
-    response = await env.post('conversations/' + conversation + '/job/accept');
+    response = await env.post('conversations/' + conversation + '/turns', { prompt: 'merge' });
     assert.equal(response.status, 200, JSON.stringify(response.body));
-    assert.equal(response.body.job.state, 'accepted');
-    assert.equal(response.body.job.mergeError, undefined);
+    job = await settled(env, conversation, 'accepted');
+    assert.deepEqual([job.mergedInto, job.mergeError, job.accepting, job.reason], ['main', undefined, undefined, undefined]);
+    // No reviewer and no round of checks after the merge.
+    assert.deepEqual((await turnsOf(env, conversation)).slice(5).map(turn => [turn.role, turn.prompt]), [[undefined, 'merge']]);
     assert.equal(readFileSync(join(env.project, 'hello.txt'), 'utf8'), 'hi\n');
     assert.equal(readFileSync(join(env.project, 'readme.md'), 'utf8'), 'two\n');
     assert.equal(existsSync(work), false);
     assert.equal(git(env.project, 'branch', '--list', 'cf/*'), '');
     assert.equal(git(env.project, 'status', '--porcelain'), '');
-    assert.equal(git(env.project, 'log', '-1', '--format=%s'), 'Add greeting write hello.txt hi');
+    assert.match(await cli('job', 'show', conversation, ...config), /合并进了 main/);
     // What was merged stays readable; the conversation takes no more messages.
     assert.equal((await env.get('conversations/' + conversation + '/job/changes')).body.files.length, 2);
     response = await env.post('conversations/' + conversation + '/turns', { prompt: 'more' });
     assert.equal(response.status, 409);
     assert.match(response.body.error, /新对话/);
     assert.equal((await env.post('conversations/' + conversation + '/job/discard')).status, 409);
+    assert.equal((await env.post('conversations/' + conversation + '/job/accept')).status, 409);
 
     // A conversation already going can become a job: from that message on its session
     // continues in the worktree, and only that message is the task the reviewer is given.
@@ -194,8 +224,21 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.match(turns[3].prompt, /^请核对[\s\S]*只读[\s\S]*- \[x\] 写好了 —— b.txt 里是 y[\s\S]*write b.txt y$/);
     assert.doesNotMatch(turns[3].prompt, /hello/);
     assert.equal(readFileSync(join(goingWork, 'b.txt'), 'utf8'), 'y\n');
-    assert.match(await cli('job', 'discard', going, '--config', join(env.root, 'config.json')), /已丢弃/);
+    // Where it is merged is the agent's call, not the branch the project had checked out: here
+    // it goes into another branch, and the job records that one.
+    git(env.project, 'branch', 'side');
+    response = await env.post('conversations/' + going + '/job/accept');
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.deepEqual([response.body.job.state, response.body.job.accepting], ['working', true]);
+    // Not again while it merges.
+    assert.equal((await env.post('conversations/' + going + '/job/accept')).status, 409);
+    job = await settled(env, going, 'accepted');
+    assert.equal(job.mergedInto, 'side');
+    assert.equal(git(env.project, 'show', 'side:b.txt'), 'y');
+    assert.equal(existsSync(join(env.project, 'b.txt')), false);
     assert.equal(existsSync(goingWork), false);
+    assert.equal(git(env.project, 'branch', '--list', 'cf/*'), '');
+    git(env.project, 'branch', '-D', 'side');
 
     // A failed turn leaves the job waiting; discarding removes its directory and branch, the conversation stays.
     writeFileSync(join(env.project, 'scratch.txt'), 'uncommitted\n');
@@ -207,7 +250,6 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.equal(job.dirtyAtStart, true);
     assert.match(job.branch, /^cf\/fail-/);
     // The command line lists it.
-    const config = ['--config', join(env.root, 'config.json')];
     const listed = await cli('job', 'list', ...config);
     assert.match(listed, new RegExp(conversation + '  等你.*web  ' + job.branch.replace('/', '\\/')));
     assert.match(listed, /已收下/);

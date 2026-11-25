@@ -34,7 +34,7 @@ const TO_PYTHON: Readonly<Record<Status, string>> = {
 
 /** Node-only Task fields, kept under the Task's "node" key. */
 interface NodeFields {
-  launchedAt?: string; controlReady?: boolean; logOffset?: number; cancelRequested?: boolean; error?: string; requestedModel?: string; checkRound?: number; role?: 'review' | 'review-feedback';
+  launchedAt?: string; controlReady?: boolean; logOffset?: number; cancelRequested?: boolean; error?: string; requestedModel?: string; checkRound?: number; role?: 'review' | 'review-feedback' | 'accept';
 }
 
 interface Entry { readonly mtime: number; readonly raw: Raw }

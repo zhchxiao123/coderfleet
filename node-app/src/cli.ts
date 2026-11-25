@@ -25,7 +25,7 @@ const [mode, rawPath] = argv;
 const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' ? '' : rawPath) || join(home, 'config.json'));
 
 const JOB_STATES: Readonly<Record<string, string>> = { working: '在做', waiting: '等你', review: '待验收', accepted: '已收下', discarded: '已丢弃' };
-interface JobView { conversationId: string; projectId: string; title: string; branch: string; state: string; error?: string; mergeError?: string; createdAt: string;
+interface JobView { conversationId: string; projectId: string; title: string; branch: string; state: string; error?: string; mergeError?: string; mergedInto?: string; createdAt: string;
   phase?: string; reason?: string; criteria?: { text: string; state: string; note: string }[];
   review?: { account: string; verdict: string; error?: string } }
 
@@ -62,13 +62,17 @@ async function jobCommand(verb: string | undefined, args: string[]): Promise<voi
     else if (job.reason === 'checks') console.log('改了几轮，还有标准没做到');
     if (job.phase === 'reviewing') console.log('审查中…');
     else if (job.review) console.log('审查（' + job.review.account + '）：' + ({ pass: '通过', changes: '要改', unclear: '没给出结论', failed: '没跑成' }[job.review.verdict] ?? job.review.verdict) + (job.review.error ? '，' + job.review.error : ''));
+    if (job.reason === 'merge') console.log('收下了，还没有合并：它在对话里说了原因，回它一句它就接着合并');
     if (job.mergeError) console.log(job.mergeError);
+    if (job.state === 'accepted') console.log(job.mergedInto ? '合并进了 ' + job.mergedInto : '没有要合并的改动');
     const changes = await call<{ files: { path: string; added: number; removed: number }[]; added: number; removed: number }>('GET', 'conversations/' + args[0] + '/job/changes');
     console.log('变更 ' + changes.files.length + ' 个文件  +' + changes.added + ' -' + changes.removed);
     for (const file of changes.files) console.log('  +' + file.added + ' -' + file.removed + '  ' + file.path);
   } else if ((verb === 'accept' || verb === 'discard') && args[0]) {
     const { job } = await call<{ job: JobView }>('POST', 'conversations/' + args[0] + '/job/' + verb, {});
     console.log(jobLine(job));
+    // Accepting hands the merge to the agent: where it goes, or what it asks, is in the conversation.
+    if (verb === 'accept') console.log('已经让它合并：合并好就自动收下；它拿不准合并到哪会先问，用 job show ' + args[0] + ' 看结果');
   } else if (verb === 'start' && args[0] && args[1]) {
     const conversation = await call<{ id: string }>('POST', 'conversations', { projectId: args[0] });
     try { await call('POST', 'conversations/' + conversation.id + '/turns', { prompt: args.slice(1).join(' '), job: true }); }

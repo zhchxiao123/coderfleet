@@ -11,7 +11,7 @@ import {
 import { assertContainer, models } from './docker.js';
 import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
-import { CHECK_ROUNDS, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
+import { acceptPrompt, CHECK_ROUNDS, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
 import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
@@ -200,6 +200,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
    * A job follows its conversation's turns. The author stopped by itself: its criteria decide —
    * one needs the user → waiting; none listed or some unmet → back to it, CHECK_ROUNDS times
    * at most, then the user is asked; all met → the reviewer. Failed or stopped → waiting.
+   * Once the user has accepted, a turn ends with a look at whether the branch is merged instead.
    */
   const settleJob = (turn: Turn): void => {
     const id = turn.conversationId;
@@ -212,6 +213,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return;
     }
     if (turn.status !== 'done') return;
+    if (job.accepting) { void settleAccept(job); return; }
     const items = criteria(turnsOf(id));
     if (items.some(item => item.state === 'ask')) { jobs.patch(id, ['working'], { state: 'waiting', reason: 'question', error: undefined }); return; }
     if (items.length && items.every(item => item.state === 'done')) { void review(job); return; }
@@ -293,6 +295,15 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       jobs.patch(id, ['working'], { state: 'waiting', phase: undefined, reason: 'failed', error: message(error) });
     } finally { reviewing.delete(id); }
   };
+  /** The agent was asked to merge: merged → the job is closed; not yet → the user reads why in the conversation. */
+  const settleAccept = async (job: Job): Promise<void> => {
+    const id = job.conversationId;
+    if (reviewing.has(id)) return;
+    reviewing.add(id);
+    try { await jobs.finish(project(job.projectId), job); }
+    catch (error) { jobs.patch(id, ['working'], { state: 'waiting', reason: 'merge', error: undefined, mergeError: '没能确认有没有合并：' + message(error) }); }
+    finally { reviewing.delete(id); }
+  };
   runner.onFinish = turn => { titles.observe(turn); settleJob(turn); };
   /** After a restart (or a missed finish): a working job whose last turn has ended is settled from that turn. */
   const settleJobs = (): void => {
@@ -343,7 +354,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
 
   /** Starts a new turn in a conversation that has none running. */
-  const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>, by: { checkRound?: number; role?: 'review-feedback'; jobStart?: boolean } = {}): Promise<Turn> => {
+  const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>, by: { checkRound?: number; role?: 'review-feedback' | 'accept'; jobStart?: boolean } = {}): Promise<Turn> => {
     const system = Boolean(by.checkRound || by.role);
     const target = chatProject(conversation.projectId);
     if (!target) throw new HttpError(404, 'Project not found');
@@ -381,7 +392,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }
     if (job) {
       // The user speaking starts the count of rounds again.
-      jobs.patch(conversation.id, ['working', 'waiting', 'review'], { state: 'working', phase: undefined, reason: undefined, error: undefined, mergeError: undefined, ...(system ? {} : { round: 0, review: undefined }) });
+      jobs.patch(conversation.id, ['working', 'waiting', 'review'], { state: 'working', phase: undefined, reason: undefined, error: undefined, mergeError: undefined, ...(by.role === 'accept' ? { accepting: true } : {}), ...(system ? {} : { round: 0, review: undefined }) });
     }
     await runner.launch(turn, job ? { cwd: job.directory, preamble: by.jobStart ? preamble(job, turns.length > 0) : '' } : {});
     return turn;
@@ -863,7 +874,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       try { return { delivered: 'queued', followUp: followUps.add(conversation.id, message_) }; }
       catch (error) { throw new HttpError(409, message(error)); }
     }],
-    // 做完为止: the job of a conversation, what it changed, and its two endings.
+    // 做完为止: the job of a conversation, what it changed, and its two endings (accept: the agent is asked to merge).
     ['GET', /^jobs$/, async () => jobs.list().map(job => ({ ...job, conversation: store.conversation(job.conversationId)?.name ?? '' }))],
     ['GET', /^projects\/([\w.-]+)\/job-support$/, async (_request, [name]) => jobs.support(project(name as string))],
     ['GET', /^conversations\/([\w-]+)\/job$/, async (_request, [id]) => {
@@ -878,9 +889,19 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const { job, target } = jobOf(id as string);
       if (!jobOpen(job)) throw new HttpError(409, '这件事已经' + (job.state === 'accepted' ? '收下' : '丢弃') + '了');
       if (turnsOf(job.conversationId).some(active) || followUps.list(job.conversationId).length) throw new HttpError(409, '它还在做，先停下再' + (action === 'accept' ? '收下' : '丢弃'));
+      if (action === 'accept') {
+        // Accepting is a message to the agent: it merges the branch where it belongs (or asks),
+        // and the job is closed once that is seen to be done.
+        const conversation = store.conversation(job.conversationId);
+        if (!conversation) throw new HttpError(404, 'Conversation not found');
+        if (job.state === 'working') throw new HttpError(409, '它还在做，先停下再收下');
+        const model = turnsOf(job.conversationId).findLast(item => item.role !== 'review')?.requestedModel ?? '';
+        await startTurn(conversation, { text: acceptPrompt(job), images: [], model, auto: true }, { role: 'accept' });
+        return { job: jobs.get(job.conversationId) };
+      }
       try { await assertContainer(config.dockerPath, target); }
       catch (error) { throw new HttpError(409, message(error)); }
-      return { job: await jobCall(() => action === 'accept' ? jobs.accept(target, job) : jobs.discard(target, job)) };
+      return { job: await jobCall(() => jobs.discard(target, job)) };
     }],
     // 定时: things started by the clock, each run in a new conversation (main token only).
     ['GET', /^schedules$/, async () => schedules.list().map(item => scheduleView(item))],
