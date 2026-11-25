@@ -944,6 +944,13 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .switch .knob { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); transition: transform 0.15s; }
 .switch.on { background: var(--green); }
 .switch.on .knob { transform: translateX(16px); }
+/* 设置 → 通用: what is set once and left alone, folded below the everyday cards. */
+details.advanced { margin-top: 28px; }
+details.advanced > summary { display: flex; align-items: baseline; gap: 10px; padding: 6px 4px 12px; cursor: default; list-style: none; color: var(--text-3); font-size: 12.5px; }
+details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary::before { content: '▸'; color: var(--text-3); width: 10px; }
+details.advanced[open] > summary::before { content: '▾'; }
+details.advanced > summary strong { font-size: 14px; font-weight: 600; color: var(--text); }
 .mobile-label { font-size: 12px; font-weight: 600; color: var(--text-3); margin: 16px 0 6px; }
 ul.addresses, ol.pair-addresses { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .addresses li, .pair-addresses li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 4px; font-size: 13px; }

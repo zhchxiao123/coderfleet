@@ -42,6 +42,8 @@
       if (last && (!last.conversationId || CF.state.conversations.some(item => item.id === last.conversationId))) CF.app.go(last);
       else { const target = CF.chat.defaultProject(); if (target) CF.app.go({ name: 'chat', projectId: target.id }); }
     },
+    /** Opens 设置 on the tab last shown (项目 the first time), from the rail and from ⌘, alike. */
+    openSettings() { if (!SETTINGS_TABS.some(([name]) => name === CF.state.view.name)) CF.app.go({ name: CF.state.lastSettings || 'projects' }); },
     /** Redraws the sidebar and the current page (after a local change such as a pin). */
     rerender() { renderSidebar(); if (['projects'].includes(CF.state.view.name)) renderMain(); },
     isLocal: () => CF.state.profiles.find(item => item.id === CF.state.backendId)?.kind === 'local',
@@ -228,7 +230,7 @@
       search.focus(); search.select();
     }
     if ((event.metaKey || event.ctrlKey) && event.key === '\\') { event.preventDefault(); CF.app.toggleSidebar(); }
-    if ((event.metaKey || event.ctrlKey) && event.key === ',') { event.preventDefault(); CF.app.go({ name: 'settings' }); }
+    if ((event.metaKey || event.ctrlKey) && event.key === ',') { event.preventDefault(); CF.app.openSettings(); }
     if (event.key === 'Escape' && CF.state.view.name !== 'chat' && !document.querySelector('dialog[open], .menu')
       && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) CF.app.closeSettings();
   });
@@ -414,7 +416,7 @@
       item('clock', '定时', view.name === 'schedules', () => CF.app.go({ name: 'schedules' })),
       h('span.rail-space'),
       item('sliders', '设置（' + (CF.transport?.platform === 'darwin' ? '⌘,' : 'Ctrl+,') + '）', SETTINGS_TABS.some(([name]) => name === view.name),
-        () => { if (!SETTINGS_TABS.some(([name]) => name === view.name)) CF.app.go({ name: 'projects' }); }),
+        () => CF.app.openSettings()),
       backendButton,
     );
   }
@@ -474,6 +476,7 @@
     const { view, connected } = CF.state;
     if (!connected && view.name !== 'settings') return;
     if (view.name === 'chat') CF.state.lastChat = view;
+    if (SETTINGS_TABS.some(([name]) => name === view.name)) CF.state.lastSettings = view.name;
     const container = h('div.view');
     // 项目 and 账号 are redrawn in place after every change (start, save, poll): keep where the user scrolled to.
     const scrollTop = view.name === shownView ? main.querySelector('.page')?.scrollTop ?? 0 : 0;

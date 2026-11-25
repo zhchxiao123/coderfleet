@@ -45,14 +45,29 @@ function meshInterface(name: string, address: string): string | undefined {
   return undefined;
 }
 
-/** Addresses of this computer's network interfaces, for a backend listening beyond loopback. */
-export function interfaceAddresses(port: number): Address[] {
+/** Bridges and virtual switches of Docker, OrbStack and VM hosts: this computer has an address there, a phone does not. */
+const VIRTUAL_INTERFACE = /^(bridge|br-|docker|veth|virbr|vmnet|vnic|vboxnet|vEthernet|lxc|cni|podman|awdl|llw|anpi)/i;
+
+/** The address is its own network's base address (as OrbStack's bridges report): nothing answers there. */
+function networkAddress(address: string, netmask: string): boolean {
+  const number = (value: string) => value.split('.').reduce((sum, part) => sum * 256 + Number(part), 0);
+  const host = 2 ** 32 - 1 - number(netmask);
+  return host > 0 && number(address) % (host + 1) === 0;
+}
+
+/**
+ * Addresses of this computer a phone can reach, for a backend listening beyond
+ * loopback: real LAN interfaces and mesh ones. Virtual bridges, self-assigned
+ * (169.254) addresses and network base addresses are left out, so the phone
+ * does not wait on addresses that never answer.
+ */
+export function interfaceAddresses(port: number, interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): Address[] {
   const result: Address[] = [];
-  for (const [name, list] of Object.entries(networkInterfaces())) {
+  for (const [name, list] of Object.entries(interfaces)) {
     for (const item of list ?? []) {
       if (item.internal || item.family !== 'IPv4') continue;
       const mesh = meshInterface(name, item.address);
-      if (!mesh && !privateHost(item.address)) continue;
+      if (!mesh && (!privateHost(item.address) || VIRTUAL_INTERFACE.test(name) || item.address.startsWith('169.254.') || networkAddress(item.address, item.netmask))) continue;
       result.push({ url: 'http://' + item.address + ':' + port, kind: mesh ? 'mesh' : 'lan', label: mesh ?? '局域网 · ' + name });
     }
   }

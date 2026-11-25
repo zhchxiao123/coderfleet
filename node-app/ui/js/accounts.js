@@ -42,7 +42,13 @@
     return new Date(at).toLocaleDateString('zh-CN', { weekday: 'short', ...zone }) + ' ' + time + ' 重置';
   };
   const level = used => used >= 90 ? '.red' : used >= 75 ? '.amber' : '';
-  const USAGE_ERRORS = { unauthorized: '登录已过期，重新登录后才能查额度', no_credentials: '还没有登录', rate_limited: '查询太频繁，稍后再试', network_error: '容器里连不上额度接口' };
+  const USAGE_ERRORS = {
+    unauthorized: '登录已过期，重新登录后才能查额度', no_credentials: '还没有登录', rate_limited: '额度查询太频繁，稍后再试', network_error: '容器里连不上额度接口',
+    no_running_container: '启动这个账号的一个项目后显示额度', probe_failed: '容器里的额度查询没有跑起来',
+  };
+  /** Trying again cannot help these: the account has to be started or signed in first. */
+  const USAGE_NEEDS_ACTION = new Set(['unauthorized', 'no_credentials', 'no_running_container']);
+  const usageProblem = error => USAGE_ERRORS[error] || '额度没查到（' + (/^http_\d+$/.test(error) ? '额度接口返回 ' + error.slice(5) : error) + '）';
   const windows = usage => [['5 小时', usage?.fiveHour], ['本周', usage?.sevenDay]].filter(([, value]) => value);
 
   /** The account's subscription usage as a line of meters; null for accounts that have none (API key and others). */
@@ -50,13 +56,15 @@
     const usage = account.usage;
     if (!usage) return null;
     const shown = windows(usage);
-    const problem = usage.error ? USAGE_ERRORS[usage.error] || '查询失败' : '';
-    if (!shown.length) return h('div.usage-line', h('span', problem || (usage.fetchedAt ? '这个账号没有返回额度' : '启动这个账号的一个项目后显示额度')));
+    const problem = usage.error ? usageProblem(usage.error) : '';
+    const retry = usage.error && !USAGE_NEEDS_ACTION.has(usage.error)
+      ? h('button.btn.ghost.small', { on: { click: event => { event.stopPropagation(); void CF.busy(event.currentTarget, () => refreshUsage(account)); } } }, '重试') : null;
+    if (!shown.length) return h('div.usage-line', h('span', problem || (usage.fetchedAt ? '这个账号没有返回额度' : '启动这个账号的一个项目后显示额度')), retry);
     return h('div.usage-line',
       shown.map(([label, value]) => h('span.usage' + level(value.used), { title: resetText(value.resetsAt) },
         h('span', label), h('span.usage-bar', h('i', { style: 'width:' + Math.round(value.used) + '%' })),
         h('strong', Math.round(value.used) + '%'), h('span.usage-reset', resetText(value.resetsAt)))),
-      h('span.usage-age', problem ? problem + '，这是' + CF.relative(usage.fetchedAt) + '的数字' : CF.relative(usage.fetchedAt) + '更新'));
+      h('span.usage-age', problem ? problem + '，这是' + CF.relative(usage.fetchedAt) + '的数字' : CF.relative(usage.fetchedAt) + '更新'), retry);
   }
 
   async function refreshUsage(account) {

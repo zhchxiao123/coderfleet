@@ -37,7 +37,7 @@
 
     async mount(container) {
       const { overview, profiles, backendId } = CF.state;
-      const page = h('div.page-inner', h('div.page-head', h('div', h('div.eyebrow', '连接、显示、工作区与容器'), h('h1', '通用'))));
+      const page = h('div.page-inner', h('div.page-head', h('div', h('div.eyebrow', '连接、手机、显示'), h('h1', '通用'))));
       container.replaceChildren(h('div.page', page));
       const notice = CF.pythonNotice(overview);
       if (notice) page.append(notice);
@@ -124,7 +124,7 @@
         } });
       } } }, zoneLabel());
       page.append(h('div.card',
-        h('div.card-head', h('div', h('h2', '显示'), h('p', '只影响这台电脑上 App 里显示的时间；容器里的时区在下面「代理与容器」里设置。'))),
+        h('div.card-head', h('div', h('h2', '显示'), h('p', '只影响这台电脑上 App 里显示的时间；容器里的时区在最下面「高级」里设置。'))),
         h('div.card-body', h('dl.kv', h('dt', '时区'), h('dd', zoneButton), ...(CF.transport?.testNotification ? [
           h('dt', '通知'),
           h('dd', h('button.btn.small', { on: { click: async () => {
@@ -140,8 +140,43 @@
       // Phones
       page.append(CF.mobileCard(current));
 
+      // The settings file exists once the workspace is initialized.
+      let values;
+      if (overview.initialized) { try { values = await CF.get('settings'); } catch (error) { CF.fail(error); } }
+
+      // Translation & titles
+      if (values) {
+        const LLM = {
+          SYSTEM_LLM_PROVIDER: ['接口类型', 'anthropic 或 openai（OpenAI 兼容接口也选 openai）'],
+          SYSTEM_LLM_MODEL: ['模型', '例如 claude-haiku-4-5'],
+          SYSTEM_LLM_API_KEY: ['API Key', '只保存在工作区的 config.conf，不会再显示'],
+          SYSTEM_LLM_BASE_URL: ['Base URL（可选）', '私有网关或兼容接口的地址'],
+          SYSTEM_LLM_PROXY: ['出站代理（可选）', '例如 http://127.0.0.1:10808'],
+        };
+        const llmInputs = {};
+        const llmFields = Object.entries(LLM).map(([key, [label, hint]]) => {
+          llmInputs[key] = key === 'SYSTEM_LLM_PROVIDER'
+            ? h('select', ['anthropic', 'openai'].map(value => h('option', { value, selected: values[key] === value }, value)))
+            : h('input', { value: values[key] ?? '', spellcheck: false, type: key === 'SYSTEM_LLM_API_KEY' ? 'password' : 'text', autocomplete: 'off' });
+          return h('label.field', h('span', label, hint ? h('span.hint', ' ' + hint) : null), llmInputs[key]);
+        });
+        const saveLlm = h('button.btn.primary.small', { on: { click: () => CF.busy(saveLlm, async () => {
+          await CF.api('PUT', 'settings', Object.fromEntries(Object.entries(llmInputs).map(([key, input]) => [key, input.value.trim()])));
+          CF.chat.translationChanged();
+          CF.toast('已保存：新对话会自动起标题，回答下面会出现「翻译」');
+        }) } }, '保存');
+        page.append(h('div.card',
+          h('div.card-head', h('div', h('h2', '翻译与命名'), h('p', '用来把回答翻译成中文、给对话自动起标题。用这里配置的模型，不占用项目账号的额度；和原服务共用同一份设置。')), saveLlm),
+          h('div.card-body', h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:0 18px' }, llmFields))));
+      }
+
       // Machine helper: managed by the backend on its own machine.
       page.append(CF.helperCard());
+
+      // Advanced: what is set up once and then left alone. Open while something there still needs doing.
+      const advanced = h('details.advanced', { open: !overview.initialized || !overview.docker || !overview.image?.exists },
+        h('summary', h('strong', '高级'), h('span', '工作区、Docker、容器镜像和代理，一般不用改')));
+      page.append(advanced);
 
       // Workspace & image
       let image = overview.image;
@@ -149,7 +184,8 @@
       const buildButton = overview.initialized && overview.docker ? h('button.btn.small', { on: { click: event => build(event.currentTarget) } }) : null;
       const imageValue = h('dd');
       const operationsValue = h('dd');
-      const drawImage = () => imageValue.replaceChildren(...(image ? [h('span.mono', image.name), ' · ', image.exists ? '已构建' : '未构建'] : ['—']));
+      // The name and tag are edited in the card below; here only whether it is built (and the name, before there are settings).
+      const drawImage = () => imageValue.replaceChildren(...(image ? [...(overview.initialized ? [] : [h('span.mono', image.name), ' · ']), image.exists ? '已构建' : '未构建'] : ['—']));
       let lastBuild = '';
       const drawOperations = operations => {
         if (!page.isConnected && lastBuild) return false;
@@ -175,7 +211,7 @@
       drawImage();
       drawOperations(CF.activity.list().length ? CF.activity.list() : overview.operations);
       const unsubscribe = CF.activity.subscribe(operations => { if (!drawOperations(operations)) unsubscribe(); });
-      page.append(h('div.card',
+      advanced.append(h('div.card',
         h('div.card-head', h('h2', '工作区与镜像'),
           h('div.btn-row',
             overview.initialized ? null : h('button.btn.small.primary', { on: { click: event => init(event.currentTarget) } }, '初始化工作区'),
@@ -187,32 +223,8 @@
           h('dt', '最近操作'), operationsValue))));
 
       // Proxy & containers
-      if (!overview.initialized) return;
-      let values;
-      try { values = await CF.get('settings'); } catch (error) { CF.fail(error); return; }
+      if (!values) return;
       const inputs = {};
-      const LLM = {
-        SYSTEM_LLM_PROVIDER: ['接口类型', 'anthropic 或 openai（OpenAI 兼容接口也选 openai）'],
-        SYSTEM_LLM_MODEL: ['模型', '例如 claude-haiku-4-5'],
-        SYSTEM_LLM_API_KEY: ['API Key', '只保存在工作区的 config.conf，不会再显示'],
-        SYSTEM_LLM_BASE_URL: ['Base URL（可选）', '私有网关或兼容接口的地址'],
-        SYSTEM_LLM_PROXY: ['出站代理（可选）', '例如 http://127.0.0.1:10808'],
-      };
-      const llmInputs = {};
-      const llmFields = Object.entries(LLM).map(([key, [label, hint]]) => {
-        llmInputs[key] = key === 'SYSTEM_LLM_PROVIDER'
-          ? h('select', ['anthropic', 'openai'].map(value => h('option', { value, selected: values[key] === value }, value)))
-          : h('input', { value: values[key] ?? '', spellcheck: false, type: key === 'SYSTEM_LLM_API_KEY' ? 'password' : 'text', autocomplete: 'off' });
-        return h('label.field', h('span', label, hint ? h('span.hint', ' ' + hint) : null), llmInputs[key]);
-      });
-      const saveLlm = h('button.btn.primary.small', { on: { click: () => CF.busy(saveLlm, async () => {
-        await CF.api('PUT', 'settings', Object.fromEntries(Object.entries(llmInputs).map(([key, input]) => [key, input.value.trim()])));
-        CF.chat.translationChanged();
-        CF.toast('已保存：新对话会自动起标题，回答下面会出现「翻译」');
-      }) } }, '保存');
-      page.append(h('div.card',
-        h('div.card-head', h('div', h('h2', '翻译与命名'), h('p', '用来把回答翻译成中文、给对话自动起标题。用这里配置的模型，不占用项目账号的额度；和原服务共用同一份设置。')), saveLlm),
-        h('div.card-body', h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:0 18px' }, llmFields))));
       const fields = Object.entries(LABELS).map(([key, [label, hint]]) => {
         inputs[key] = h('input', { value: values[key] ?? '', spellcheck: false });
         return h('label.field', h('span', label, hint ? h('span.hint', ' ' + hint) : null), inputs[key]);
@@ -222,7 +234,7 @@
         CF.toast('已保存，重启项目后生效');
         await CF.app.refreshOverview();
       }) } }, '保存');
-      page.append(h('div.card',
+      advanced.append(h('div.card',
         h('div.card-head', h('h2', '代理与容器'), save),
         h('div.card-body', h('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:0 18px' }, fields))));
     },

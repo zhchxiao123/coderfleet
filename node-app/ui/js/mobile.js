@@ -6,6 +6,15 @@
   const { h } = CF;
   const KIND = { lan: '局域网', mesh: '组网', public: '公网' };
 
+  /**
+   * Where a phone last connected from. Through a tunnel or `tailscale serve` the backend only
+   * sees this computer itself, which says nothing about the phone, so that is not shown.
+   */
+  const lastFrom = address => {
+    const from = (address || '').replace(/^::ffff:/, '');
+    return !from || from === '::1' || from.startsWith('127.') ? '' : ' · 来自 ' + from;
+  };
+
   /** A QR code image for `text` (the vendored qrcode-generator draws a GIF data URL). */
   function qrImage(text) {
     const code = window.qrcode(0, 'M');
@@ -84,7 +93,7 @@
         h('div.row-lead', h('span.row-avatar', CF.icon('user', 16)),
           h('div.row-main', h('div.row-title', h('span.name', device.name)),
             h('div.row-sub', h('span', '添加于 ' + CF.relative(device.createdAt)),
-              h('span', device.lastUsedAt ? '最近使用 ' + CF.relative(device.lastUsedAt) + (device.lastAddress ? ' · ' + device.lastAddress.replace(/^::ffff:/, '') : '') : '还没用过')))),
+              h('span', device.lastUsedAt ? '最近使用 ' + CF.relative(device.lastUsedAt) + lastFrom(device.lastAddress) : '还没用过')))),
         h('div.row-actions', h('button.btn.small', { on: { click: async event => {
           if (!await CF.confirm('吊销「' + device.name + '」？', '这台手机会立即断开，需要重新扫码才能再用。', { danger: true, label: '吊销' })) return;
           await CF.busy(event.currentTarget, () => CF.api('DELETE', 'devices/' + device.id));

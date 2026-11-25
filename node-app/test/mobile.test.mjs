@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deviceAllowed } from '../dist/server.js';
-import { pairingLink, phoneUrl, privateHost } from '../dist/mobile.js';
+import { interfaceAddresses, pairingLink, phoneUrl, privateHost } from '../dist/mobile.js';
 import { environment, until } from './helpers.mjs';
 import { fakeClaude } from './fakes.mjs';
 
@@ -110,4 +110,20 @@ test('phone addresses: https anywhere, http only to private and mesh hosts', () 
   assert.equal(deviceAllowed('PUT', 'settings'), false);
   assert.equal(deviceAllowed('POST', 'projects/app/start'), false);
   assert.equal(deviceAllowed('GET', 'terminals/abc'), false);
+});
+
+test('interface addresses: only the ones a phone can reach', () => {
+  const v4 = (address, netmask = '255.255.255.0') => [{ address, netmask, family: 'IPv4', internal: false }];
+  // What a Mac running OrbStack reports: one Wi-Fi address among bridges, base addresses and a self-assigned one.
+  const urls = interfaceAddresses(8877, {
+    lo0: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', internal: true }],
+    utun4: v4('100.101.102.103', '255.255.255.255'),
+    en0: v4('192.168.2.24'),
+    bridge100: v4('192.168.139.3'),
+    bridge101: v4('192.168.215.0', '255.255.254.0'),
+    en7: v4('10.0.4.0'),
+    en9: v4('169.254.164.39', '255.255.0.0'),
+    en5: [{ address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', internal: false }],
+  }).map(item => [item.url, item.kind]);
+  assert.deepEqual(urls, [['http://192.168.2.24:8877', 'lan'], ['http://100.101.102.103:8877', 'mesh']]);
 });
