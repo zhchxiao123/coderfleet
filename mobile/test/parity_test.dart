@@ -129,6 +129,21 @@ void main() {
     await teardown(tester);
   });
 
+  testWidgets('a conversation keeps the model its last message used', (tester) async {
+    final backend = FakeBackend()..seedDemo();
+    final conversation = backend.conversation('coderfleet', '换模型');
+    backend.addTurn(conversation['id'] as String, {'prompt': 'first', 'requestedModel': 'sonnet', 'answer': 'ok', 'blocks': [{'kind': 'text', 'text': 'ok'}]});
+    await pumpApp(tester, backend);
+    await openChat(tester, '换模型');
+    expect(find.text('Sonnet'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).last, 'second');
+    await tester.pump();
+    await tester.tap(find.byTooltip('发送'));
+    await settle(tester, 3);
+    expect(backend.requests.lastWhere((item) => item['path'].toString().endsWith('/turns'))['body']['model'], 'sonnet');
+    await teardown(tester);
+  });
+
   test('times: today as a clock, this year with the date, older with the year', () {
     final now = DateTime(2026, 11, 24, 18);
     expect(shortTime(DateTime(2026, 11, 24, 9, 5), now: now), '09:05');

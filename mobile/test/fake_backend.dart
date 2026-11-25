@@ -75,8 +75,8 @@ class FakeBackend {
     }
   }
 
-  Map<String, dynamic> _start(String conversationId, String prompt, List<String> images) {
-    final turn = addTurn(conversationId, {'prompt': prompt, 'images': images, 'status': 'running', 'controlReady': true,
+  Map<String, dynamic> _start(String conversationId, String prompt, List<String> images, [String model = '']) {
+    final turn = addTurn(conversationId, {'prompt': prompt, 'images': images, 'requestedModel': model, 'status': 'running', 'controlReady': true,
       'capabilities': projects.first['id'] == conversations.firstWhere((item) => item['id'] == conversationId)['projectId'] ? ['approval', 'interrupt', 'message'] : ['interrupt']});
     pending[turn['id'] as String] = 12;
     return turn;
@@ -129,7 +129,7 @@ class FakeBackend {
         final prompt = body['prompt'] as String, images = (body['images'] as List).cast<String>();
         final running = turns[id]!.where((turn) => turn['status'] == 'running').firstOrNull;
         if (running == null) {
-          final turn = _start(id, prompt, images);
+          final turn = _start(id, prompt, images, body['model'] as String? ?? '');
           final summary = conversations.firstWhere((item) => item['id'] == id);
           if (summary['name'] == '新对话') summary['name'] = prompt;
           return _json({'delivered': 'turn', 'turn': turn});

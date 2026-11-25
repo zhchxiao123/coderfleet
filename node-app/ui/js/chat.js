@@ -249,9 +249,13 @@
   const SEND_MARKER = /<!--\s*CF_SEND:\s*([^>]+?)\s*-->/g;
   function answerContent(projectId, text) {
     if (!text.includes('CF_SEND')) return CF.markdown(text);
+    // A marker quoted in code (`<!-- CF_SEND: … -->`) is text, not a file.
+    const code = [...text.matchAll(/```[\s\S]*?(?:```|$)|`[^`\n]*`/g)].map(match => [match.index, match.index + match[0].length]);
+    const quoted = index => code.some(([start, end]) => index >= start && index < end);
     const parts = [];
     let last = 0;
     for (const match of text.matchAll(SEND_MARKER)) {
+      if (quoted(match.index)) continue;
       const before = text.slice(last, match.index);
       if (before.trim()) parts.push(CF.markdown(before));
       parts.push(sendCard(projectId, match[1]));
@@ -475,6 +479,20 @@
           CF.toast(next ? '自动模式已开：之后发的消息里，工具不再逐个确认' : '已关闭自动模式');
         } },
       }, CF.icon('bolt', 13), h('span', '自动'));
+      // The model stays with the conversation: the one its latest message used (all agent types),
+      // or, for a new conversation, the one last used in this project. A choice made here wins.
+      const modelKey = 'cf.model:' + CF.state.backendId + ':' + projectId;
+      let pickedModel = null;
+      modelSelect.addEventListener('change', () => { pickedModel = modelSelect.value; });
+      const applyModel = () => {
+        let wanted = pickedModel;
+        if (wanted === null && current.conversationId) {
+          const own = current.turns.filter(turn => !turn.inherited);
+          wanted = own.length ? own[own.length - 1].requestedModel ?? '' : null;
+        }
+        if (wanted === null) { try { wanted = localStorage.getItem(modelKey); } catch { /* storage unavailable */ } }
+        if (wanted !== null && [...modelSelect.options].some(option => option.value === wanted)) modelSelect.value = wanted;
+      };
       const setAuto = on => { autoButton.setAttribute('aria-pressed', String(on)); autoButton.classList.toggle('on', on); };
       let savedAuto = '';
       try { savedAuto = localStorage.getItem(autoKey) || ''; } catch { /* storage unavailable */ }
@@ -727,6 +745,7 @@
           if (session !== current) return;
           current.turns = turns;
           current.followUps = followUps;
+          applyModel();
           renderTurns();
           renderFollowUps();
           const running = activeTurn();
@@ -762,6 +781,7 @@
           }
           const result = await CF.api('POST', 'conversations/' + current.conversationId + '/turns',
             { prompt, images, model: modelSelect.value, auto: autoButton.getAttribute('aria-pressed') === 'true' });
+          try { localStorage.setItem(modelKey, modelSelect.value); } catch { /* storage unavailable */ }
           if (result?.delivered === 'queued') CF.toast('已排队，这一轮结束后自动发出');
           textarea.value = '';
           current.attachments = [];
@@ -827,7 +847,7 @@
       if (filesOpen) toggleFiles(true);
       renderHeader();
       autosize();
-      void loadModels(projectId, modelSelect);
+      void loadModels(projectId, modelSelect).then(applyModel);
       // Translation needs the backend's system LLM; ask once per backend.
       if (!translateReady.has(CF.state.backendId)) {
         const backend = CF.state.backendId;

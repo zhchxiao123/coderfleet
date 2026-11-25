@@ -107,7 +107,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _follow(String id) {
     chat?.dispose();
-    chat = ChatFeed(widget.client, id, wait: widget.chatWait)..start();
+    chat = ChatFeed(widget.client, id, wait: widget.chatWait)..addListener(_followModel)..start();
+  }
+
+  /// The model stays with the conversation: the one its latest message used, unless one was picked here.
+  bool modelPicked = false;
+  void _followModel() {
+    final own = chat?.turns.where((turn) => !turn.inherited).toList() ?? const <Turn>[];
+    if (modelPicked || own.isEmpty || own.last.requestedModel == model) return;
+    setState(() => model = own.last.requestedModel);
   }
 
   @override
@@ -314,7 +322,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             if (models.isNotEmpty) ...[
               const SizedBox(width: 6),
               PopupMenuButton<String>(
-                initialValue: model, onSelected: (value) => setState(() => model = value), enabled: running == null,
+                initialValue: model, onSelected: (value) => setState(() { model = value; modelPicked = true; }), enabled: running == null,
                 itemBuilder: (_) => [const PopupMenuItem(value: '', child: Text('默认模型')), for (final item in models) PopupMenuItem(value: item.id, child: Text(item.label))],
                 child: _chipBody(palette, Icons.tune, model.isEmpty ? '默认模型' : (models.where((item) => item.id == model).firstOrNull?.label ?? model), false),
               ),

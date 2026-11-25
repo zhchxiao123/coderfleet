@@ -110,7 +110,7 @@ class Turn {
   Turn({
     required this.id, required this.prompt, required this.images, required this.status, required this.answer, required this.tools,
     required this.blocks, required this.permission, required this.error, required this.capabilities, required this.controlReady,
-    required this.inherited, required this.auto, this.type = '', this.sessionId = '', this.conversationId = '', this.stopping = false, this.createdAt, this.finishedAt,
+    required this.inherited, required this.auto, this.type = '', this.sessionId = '', this.conversationId = '', this.requestedModel = '', this.stopping = false, this.createdAt, this.finishedAt,
   });
   factory Turn.fromJson(Map<String, dynamic> json) {
     final tools = _maps(json['tools']).map(Tool.fromJson).toList();
@@ -129,10 +129,11 @@ class Turn {
       tools: tools, blocks: blocks, permission: json['permission'] is Map ? Permission.fromJson(_map(json['permission'])) : null,
       error: _text(json['error']), capabilities: _strings(json['capabilities']), controlReady: json['controlReady'] == true,
       inherited: json['inherited'] == true, auto: json['auto'] == true, type: _text(json['type']), sessionId: _text(json['sessionId']),
-      conversationId: _text(json['conversationId']), stopping: json['stopping'] == true, createdAt: DateTime.tryParse(_text(json['createdAt'])), finishedAt: DateTime.tryParse(_text(json['finishedAt'])),
+      conversationId: _text(json['conversationId']), requestedModel: _text(json['requestedModel']), stopping: json['stopping'] == true, createdAt: DateTime.tryParse(_text(json['createdAt'])), finishedAt: DateTime.tryParse(_text(json['finishedAt'])),
     );
   }
-  final String id, prompt, status, answer, error, type, sessionId, conversationId;
+  /// `requestedModel`: the model chosen when the message was sent ('' = the account's default).
+  final String id, prompt, status, answer, error, type, sessionId, conversationId, requestedModel;
   final DateTime? createdAt, finishedAt;
   final List<String> images, capabilities;
   final List<Tool> tools;
