@@ -323,3 +323,24 @@ def test_log_write_failure_stops_sdk_worker_before_failing_task(
     failed = asyncio.run(drive())
     assert failed.status == TaskStatus.failed
     assert runtime.alive is False
+
+
+def test_turns_of_the_node_backend_are_left_to_it(tmp_path: Path) -> None:
+    """The desktop App's Node backend follows its own turns: no reattach, no stop, fields kept."""
+    (tmp_path / "accounts.conf").write_text("NAME=one TYPE=claude CLAUDE_BACKEND=sdk\n")
+    runtime = FakeRuntime()
+    scheduler = Scheduler(tmp_path, runtime=runtime)
+    node = {"launchedAt": "2026-11-23T14:00:00.000Z", "logOffset": 42, "controlReady": True}
+    task = Task(id="node-turn", status=TaskStatus.running, account="one", type=AccountType.claude,
+                prompt="running", project=str(tmp_path), execution_backend="sdk", execution_runtime="container",
+                sdk_version="node", node=node)
+    task.save(scheduler.tasks_dir)
+    raw = json.loads((scheduler.tasks_dir / "node-turn.json").read_text())
+    assert raw["node"] == node, "saving keeps the Node backend's follow state"
+
+    assert asyncio.run(scheduler.reconcile_running_tasks()) == 0
+    assert scheduler.get_task(task.id).status == TaskStatus.running
+    assert runtime.runs == []
+    with pytest.raises(RuntimeError, match="App"):
+        asyncio.run(scheduler.kill_task(task.id))
+    assert scheduler.get_task(task.id).status == TaskStatus.running

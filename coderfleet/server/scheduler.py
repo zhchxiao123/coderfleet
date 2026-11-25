@@ -4529,6 +4529,10 @@ class Scheduler:
         for task in Task.load_all(self.tasks_dir):
             if task.status != TaskStatus.running:
                 continue
+            # The desktop App's Node backend follows its own turns; adopting one would
+            # mirror its log a second time and race it for the Task record.
+            if task.run_by_node_backend:
+                continue
 
             if task.execution_backend == "sdk":
                 acc = next((account for account in self.get_accounts() if account.name == task.account), None)
@@ -4597,6 +4601,9 @@ class Scheduler:
             raise ValueError(f"任务 '{task_id}' 不存在")
         if task.status not in (TaskStatus.running, TaskStatus.pending, TaskStatus.scheduled):
             raise RuntimeError(f"任务状态为 '{task.status.value}'，只能终止 running、pending 或 scheduled 状态的任务")
+
+        if task.run_by_node_backend:
+            raise RuntimeError("这一轮由 CoderFleet App 的后端运行，请在 App 里停止")
 
         if task.status in (TaskStatus.pending, TaskStatus.scheduled):
             old_status = task.status

@@ -573,6 +573,9 @@ class Task(BaseModel):
     sdk_options: dict = Field(default_factory=dict)
     sdk_checkpoints: list[str] = Field(default_factory=list)
     sdk_action: dict = Field(default_factory=dict)
+    # Follow state of a turn the desktop App's Node backend launched (node-app/src/store.ts).
+    # Kept on save; such a turn is never reattached or stopped by this service.
+    node: Optional[dict] = None
     platform_run_id: str = ""
     interrupted: bool = False
     terminal_notified: bool = False
@@ -611,6 +614,11 @@ class Task(BaseModel):
     pending_intervention: Optional[PendingIntervention] = None
 
     # ── 持久化 ────────────────────────────────────────────
+
+
+    @property
+    def run_by_node_backend(self) -> bool:
+        return bool(self.node and self.node.get("launchedAt"))
 
     def save(self, tasks_dir: Path) -> None:
         JsonStore(Task, tasks_dir).save(self)
