@@ -48,7 +48,13 @@
       try { CF.state.accounts = await CF.get('accounts'); } catch (error) { return connectionLost(error); }
       CF.app.renderCurrent();
     },
+    /** Archived conversations, for the sidebar's 已归档 section. */
+    async refreshArchived() {
+      try { CF.state.archived = await CF.get('conversations?archived=1'); } catch { return; }
+      renderSidebar();
+    },
     async refreshConversations() {
+      void CF.app.refreshArchived();
       try { CF.state.conversations = await CF.get('conversations'); } catch (error) { return connectionLost(error); }
       renderSidebar();
       CF.chat.sync();
@@ -215,9 +221,16 @@
 
   function conversationButton(item, extra = '', sub = null) {
     const { view } = CF.state;
-    return h('button.conv-item' + extra + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
-      title: item.name + ' · ' + CF.fullTime(item.updatedAt), on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
-    }, sub ? h('span.lines', h('span.title', item.name), h('span.sub', sub)) : h('span.title', item.name), conversationMeta(item));
+    // ⋯ on hover (and right-click): rename, archive, delete.
+    const more = h('span.conv-actions', { role: 'button', tabIndex: 0, title: '更多', 'aria-label': '对话操作',
+      on: { click: event => { event.stopPropagation(); CF.menu(more, CF.conversationMenu(item)); } } }, CF.icon('more', 14));
+    const node = h('button.conv-item' + extra + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
+      title: item.name + ' · ' + CF.fullTime(item.updatedAt), on: {
+        click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }),
+        contextmenu: event => { event.preventDefault(); CF.menu(node, CF.conversationMenu(item)); },
+      },
+    }, sub ? h('span.lines', h('span.title', item.name), h('span.sub', sub)) : h('span.title', item.name), conversationMeta(item), more);
+    return node;
   }
 
   /**
@@ -283,7 +296,11 @@
       return h('div.recent-group' + (folded ? '.collapsed' : ''),
         h('div.project-group-head.recent-head', {
           role: 'button', tabIndex: 0, 'aria-expanded': String(!folded),
-          on: { click: () => { localStorage.setItem('cf.folded.' + key, folded ? '0' : '1'); renderConversations(); } },
+          on: { click: () => {
+            localStorage.setItem('cf.folded.' + key, folded ? '0' : '1');
+            if (key === 'archived' && folded) void CF.app.refreshArchived();
+            renderConversations();
+          } },
         }, h('span.chev', CF.icon('down', 12)), h('span.name', label), count !== undefined ? h('span.count', String(count)) : null),
         folded ? null : body());
     };
@@ -307,8 +324,16 @@
     const olderGroup = older.length
       ? section('older', '更早的项目', () => h('div.older-projects', older.map(project => group(project, 'older'))), older.length, true) : null;
 
+    // 已归档: folded at the bottom; loaded when opened.
+    const archivedOpen = localStorage.getItem('cf.folded.archived') === '0';
+    const archived = CF.state.archived.filter(item => !filter || item.name.toLowerCase().includes(filter));
+    const archivedGroup = archivedOpen || filter
+      ? (archived.length || !filter ? section('archived', '已归档', () => h('div.conv-list', archived.length
+        ? archived.map(item => conversationButton(item, '.recent', projectName(item.projectId)))
+        : h('div.sidebar-empty.small', '没有归档的对话。')), archived.length || undefined, true) : null)
+      : section('archived', '已归档', () => null, undefined, true);
     conversationsHost.replaceChildren(groups.length || olderGroup
-      ? h('div', top, groups.length && top.length ? h('div.sidebar-label', '项目') : null, groups, olderGroup)
+      ? h('div', top, groups.length && top.length ? h('div.sidebar-label', '项目') : null, groups, olderGroup, archivedGroup)
       : h('div.sidebar-empty', filter ? '没有匹配的对话。' : connected ? '添加 Claude、Codex 或 Antigravity 项目后，在这里开始对话。' : '连接后端后显示对话。'));
   }
 

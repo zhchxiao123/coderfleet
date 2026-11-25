@@ -85,6 +85,8 @@ export interface Conversation {
   readonly type?: string;
   readonly project?: string;
   readonly fork?: ConversationFork;
+  /** Python ConversationStatus.archived: hidden from the list, kept on disk. */
+  readonly archived?: boolean;
 }
 
 /**

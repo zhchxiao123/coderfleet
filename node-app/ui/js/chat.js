@@ -419,7 +419,7 @@
     /** view: { conversationId?, projectId } */
     mount(container, view) {
       CF.chat.stop();
-      const conversation = CF.state.conversations.find(item => item.id === view.conversationId);
+      const conversation = CF.findConversation(view.conversationId);
       const projectId = conversation?.projectId || view.projectId;
       const key = conversation ? conversation.id : 'new:' + projectId;
       const nodes = new Map();
@@ -484,7 +484,7 @@
       };
       const renderHeader = () => {
         const info = project();
-        const name = CF.state.conversations.find(item => item.id === current.conversationId)?.name;
+        const name = CF.findConversation(current.conversationId)?.name;
         title.textContent = name || '新对话';
         meta.replaceChildren(
           info ? h('span', info.name) : null,
@@ -495,7 +495,7 @@
         textarea.placeholder = info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
-        const record = CF.state.conversations.find(item => item.id === current.conversationId);
+        const record = CF.findConversation(current.conversationId);
         current.readOnly = Boolean(record?.type && info && record.type !== info.type);
         textarea.disabled = current.readOnly;
         if (current.readOnly) {
@@ -504,6 +504,10 @@
           updateComposer();
           return;
         }
+        const archivedBanner = record?.archived ? h('div.banner', h('span.banner-icon', CF.icon('box', 16)),
+          h('div.text', h('strong', '已归档的对话'), h('span', '不在列表里显示；发消息会把它恢复到列表。')),
+          h('button.btn.small', { on: { click: () => CF.conversationMenu(record).find(item => item.label === '取消归档')?.run() } }, '取消归档')) : null;
+        if (archivedBanner) { notice.replaceChildren(archivedBanner); updateComposer(); return; }
         notice.replaceChildren(ready || !info ? '' : h('div.banner',
           h('span.banner-icon', CF.icon('box', 16)), h('div.text', h('strong', '项目容器没有运行'), h('span', '启动后才能对话。')),
           h('button.btn.primary.small', { on: { click: event => CF.projects.start(info.id, event.currentTarget) } }, CF.icon('play', 12), '启动')));
@@ -511,9 +515,9 @@
       };
       // A fork starts with the source's history, read-only, under a banner that links back.
       const forkBanner = () => {
-        const record = CF.state.conversations.find(item => item.id === current.conversationId);
+        const record = CF.findConversation(current.conversationId);
         if (!record?.forkedFrom) return null;
-        const source = CF.state.conversations.find(item => item.id === record.forkedFrom.conversationId);
+        const source = CF.findConversation(record.forkedFrom.conversationId);
         return h('div.fork-banner', CF.icon('fork', 14),
           h('span', '分叉的对话 · 下面先是分叉点之前的历史（只读）；项目文件是共享的，不会回滚代码。'),
           source ? h('button.btn.ghost.small', { on: { click: () => CF.app.go({ name: 'chat', conversationId: source.id, projectId: source.projectId }) } }, '查看原对话') : null);
@@ -749,22 +753,8 @@
       });
       sendButton.addEventListener('click', () => void (sendButton.classList.contains('stop') ? stop() : send()));
 
-      const rename = async () => {
-        const target = CF.state.conversations.find(item => item.id === current.conversationId);
-        if (!target) return;
-        const input = h('input', { value: target.name, maxLength: 100 });
-        const sheet = CF.sheet({ title: '重命名对话' }, () => input);
-        const save = h('button.btn.primary', { on: { click: () => CF.busy(save, async () => {
-          await CF.api('PUT', 'conversations/' + target.id, { name: input.value });
-          sheet.close();
-          await CF.app.refreshConversations();
-          renderHeader();
-        }) } }, '保存');
-        sheet.foot(h('button.btn', { on: { click: () => sheet.close() } }, '取消'), save);
-        input.select();
-      };
       const more = h('button.btn.ghost.icon', { title: '更多', on: { click: () => CF.menu(more, [
-        current.conversationId ? { label: '重命名', run: rename } : null,
+        ...(CF.findConversation(current.conversationId) ? [...CF.conversationMenu(CF.findConversation(current.conversationId)).filter(item => item !== '-'), '-'] : []),
         current.conversationId ? { label: '重新生成标题', icon: 'spark', run: async () => {
           try { await CF.api('POST', 'conversations/' + current.conversationId + '/title'); CF.toast('正在生成标题…'); }
           catch (error) { CF.fail(error); }

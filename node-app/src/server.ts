@@ -118,7 +118,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
   const followUps = new FollowUps(config.stateDirectory);
   /** The conversation list (desktop and phone change feed). */
-  const conversationList = () => {
+  const conversationList = (archived = false) => {
     // Like the Python service (Conversation.touch at a task's start and end): a conversation's time is
     // its latest activity — the newest turn's finish, or its start while it runs. Status is the newest turn's.
     const time = (value: string): number => Date.parse(value) || 0;
@@ -137,7 +137,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         attention: current.attention || item.attention,
       });
     }
-    return store.conversations().map(item => {
+    return store.conversations({ archived }).map(item => {
       const summary = summaries.get(item.id);
       return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
         forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
@@ -457,7 +457,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }],
 
     // Conversations
-    ['GET', /^conversations$/, async () => conversationList()],
+    // ?archived=1: the archived ones (Python: include_archived), to restore or delete them.
+    ['GET', /^conversations$/, async (_request, _params, url) => conversationList(url.searchParams.get('archived') === '1')],
     // Long poll for phones: answers at once when the list differs from `since`, else waits for a change.
     ['GET', /^conversations\/changes$/, async (request, _params, url) => {
       const since = url.searchParams.get('since') ?? '';
@@ -480,11 +481,26 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     ['PUT', /^conversations\/([\w-]+)$/, async (request, [id]) => {
       const conversation = store.conversation(identifier(id));
       if (!conversation) throw new HttpError(404, 'Conversation not found');
-      const name = text((await body(request)).name).trim().slice(0, 100);
+      const input = await body(request);
+      // { archived }: archive or restore (Python PATCH status archived/active); otherwise { name }.
+      if (typeof input.archived === 'boolean') {
+        store.setArchived(conversation.id, input.archived);
+        return store.conversation(conversation.id);
+      }
+      const name = text(input.name).trim().slice(0, 100);
       if (!name) throw new HttpError(400, '名称不能为空');
       const renamed = { ...conversation, name };
       store.saveConversation(renamed);
       return renamed;
+    }],
+    // Deletes the conversation record (as the Python service); never while one of its turns runs.
+    ['DELETE', /^conversations\/([\w-]+)$/, async (_request, [id]) => {
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      if (turnsOf(conversation.id).some(turn => active(turn) || turn.status === 'queued')) throw new HttpError(409, '这个对话还在运行，先停止再删除');
+      for (const item of followUps.list(conversation.id)) followUps.remove(conversation.id, item.id);
+      store.deleteConversation(conversation.id);
+      return { deleted: true };
     }],
     ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id]) => conversationTurns(identifier(id))],
     // Long poll for phones: the turns that changed since `since` (all of them when it is unknown),
@@ -559,6 +575,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const prompt = text(input.prompt).trim();
       const model = text(input.model).trim();
       const images = uploads(conversation.projectId, input.images);
+      // Writing in an archived conversation brings it back to the list.
+      if (conversation.archived && (prompt || images.length)) store.setArchived(conversation.id, false);
       if ((!prompt && !images.length) || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
       const message_ = { text: prompt, images, auto: input.auto === true, model };
       const running = turnsOf(conversation.id).find(active);

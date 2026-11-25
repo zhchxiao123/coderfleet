@@ -996,3 +996,10 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 .file-markdown { max-height: 64vh; overflow: auto; }
 .files-panel .empty-note { padding: 14px 8px; }
 @media (max-width: 1100px) { .files-panel { width: 280px; } }
+
+/* ── Conversation actions (⋯ on hover) ─────────────────── */
+.conv-actions { display: none; flex: none; width: 22px; height: 22px; margin-right: -4px; border-radius: 6px; align-items: center; justify-content: center; color: var(--text-3); }
+.conv-actions:hover { background: var(--hover); color: var(--text); }
+.conv-item:hover .conv-actions, .conv-item:focus-visible .conv-actions { display: inline-flex; }
+.conv-item:hover > .meta, .conv-item:focus-visible > .meta { display: none; }
+.sidebar-empty.small { padding: 4px 8px; font-size: 12px; }

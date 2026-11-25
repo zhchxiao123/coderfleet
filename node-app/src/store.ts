@@ -5,7 +5,7 @@
 // this service needs and Python does not model live under the Task's "node"
 // key; every Python field is preserved on save.
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, rmSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeLog } from './history.js';
 import { record, text, type Conversation, type ConversationFork, type RecordValue, type Status, type Turn } from './state.js';
@@ -97,18 +97,37 @@ export class WorkspaceStore {
   // ── Conversations ────────────────────────────────────
 
   private conversationView(raw: Raw): Conversation | undefined {
-    if (raw.status === 'archived' || (raw.mode && raw.mode !== 'chat') || raw.ephemeral === true) return undefined;
+    if ((raw.mode && raw.mode !== 'chat') || raw.ephemeral === true) return undefined;
     const projectId = text(raw.project_name) || this.projectForPath(text(raw.project)) || '';
     return {
       id: text(raw.id), projectId, name: text(raw.name) || '对话', createdAt: text(raw.created), updatedAt: text(raw.updated) || text(raw.created),
       nativeSessionId: text(raw.native_session_id), account: text(raw.account), type: text(raw.type), project: text(raw.project),
       ...(raw.fork && typeof raw.fork === 'object' ? { fork: forkOf(record(raw.fork)) } : {}),
+      ...(raw.status === 'archived' ? { archived: true } : {}),
     };
   }
 
-  public conversations(): Conversation[] {
+  /** The chat conversations; archived ones only when asked for (`archived`: only those). */
+  public conversations({ archived = false } = {}): Conversation[] {
     this.refresh();
-    return [...this.conversationIndex.values()].flatMap(({ raw }) => this.conversationView(raw) ?? []);
+    return [...this.conversationIndex.values()].flatMap(({ raw }) => this.conversationView(raw) ?? [])
+      .filter(item => Boolean(item.archived) === archived);
+  }
+
+  /** Archives or restores a conversation (Python: status archived/active); its time does not move. */
+  public setArchived(id: string, archived: boolean): void {
+    this.changeConversation(id, raw => {
+      const status = archived ? 'archived' : 'active';
+      if (raw.status === status) return false;
+      raw.status = status;
+      return true;
+    });
+  }
+
+  /** Deletes the conversation record, like the Python service; its task records and logs stay. */
+  public deleteConversation(id: string): void {
+    rmSync(join(this.conversationsDir, id + '.json'), { force: true });
+    this.conversationIndex.delete(id);
   }
 
   public conversation(id: string): Conversation | undefined {

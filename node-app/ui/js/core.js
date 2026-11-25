@@ -11,7 +11,7 @@
   const transport = window.coderFleet;
   CF.transport = transport;
   CF.state = {
-    backendId: '', profiles: [], overview: null, projects: [], accounts: [], conversations: [],
+    backendId: '', profiles: [], overview: null, projects: [], accounts: [], conversations: [], archived: [],
     view: { name: 'loading' }, connected: false,
   };
 
@@ -64,6 +64,7 @@
     restart: '<path d="M3 8a5 5 0 1 0 1.6-3.7M3 3v2.6h2.6"/>',
     terminal: '<rect x="2" y="3" width="12" height="10" rx="1.8"/><path d="m5 6.5 2 1.5-2 1.5M8.5 10H11"/>',
     more: '<circle cx="4" cy="8" r=".9"/><circle cx="8" cy="8" r=".9"/><circle cx="12" cy="8" r=".9"/>',
+    edit: '<path d="M10.5 3 13 5.5 6 12.5H3.5V10z"/><path d="m9 4.5 2.5 2.5"/>',
     trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/>',
     send: '<path d="M8 13V3.5M3.8 7.5 8 3.3l4.2 4.2"/>',
     square: '<rect x="4.5" y="4.5" width="7" height="7" rx="1.2"/>',
@@ -286,6 +287,46 @@
     document.body.append(dialog);
     dialog.showModal();
     return sheet;
+  };
+
+  /** A conversation from the list or, when archived, from the archived ones. */
+  CF.findConversation = id => CF.state.conversations.find(item => item.id === id) || CF.state.archived.find(item => item.id === id);
+
+  /** Rename / archive or restore / delete one conversation (sidebar and chat menus). */
+  CF.conversationMenu = item => {
+    const viewing = () => CF.state.view.name === 'chat' && CF.state.view.conversationId === item.id;
+    const leave = () => { if (viewing()) CF.app.go({ name: 'chat', projectId: item.projectId }); };
+    const rename = () => {
+      const input = h('input', { value: item.name, maxLength: 100 });
+      const sheet = CF.sheet({ title: '重命名对话' }, () => input);
+      const save = h('button.btn.primary', { on: { click: () => CF.busy(save, async () => {
+        await CF.api('PUT', 'conversations/' + item.id, { name: input.value });
+        sheet.close();
+        await CF.app.refreshConversations();
+      }) } }, '保存');
+      input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) save.click(); });
+      sheet.foot(h('button.btn', { on: { click: () => sheet.close() } }, '取消'), save);
+      input.select();
+    };
+    const archive = async archived => {
+      try { await CF.api('PUT', 'conversations/' + item.id, { archived }); } catch (error) { CF.fail(error); return; }
+      if (archived) leave();
+      await CF.app.refreshConversations();
+      CF.toast(archived ? '已归档「' + item.name + '」' : '已恢复到列表', archived ? { action: { label: '撤销', run: () => void archive(false) } } : {});
+    };
+    const remove = async () => {
+      if (!await CF.confirm('删除对话「' + item.name + '」？', '对话会从列表里删除，不能恢复。项目文件和运行记录不受影响。', { danger: true, label: '删除' })) return;
+      try { await CF.api('DELETE', 'conversations/' + item.id); } catch (error) { CF.fail(error); return; }
+      leave();
+      await CF.app.refreshConversations();
+      CF.toast('已删除对话');
+    };
+    return [
+      { label: '重命名', icon: 'edit', run: rename },
+      item.archived ? { label: '取消归档', icon: 'restart', run: () => void archive(false) } : { label: '归档', icon: 'box', run: () => void archive(true) },
+      '-',
+      { label: '删除', icon: 'trash', danger: true, run: () => void remove() },
+    ];
   };
 
   CF.confirm = (title, text, { danger = false, label = '确定' } = {}) => new Promise(resolve => {

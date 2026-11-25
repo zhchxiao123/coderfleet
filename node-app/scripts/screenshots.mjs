@@ -68,6 +68,15 @@ try {
   await shot('file-preview');
   await page.keyboard.press('Escape');
   await page.click('.files-panel button[title="关闭"]');
+  // Conversation actions: ⋯ on hover, archive, then the 已归档 section.
+  await page.hover('.conv-item:has-text("修一下登录页") >> nth=0');
+  await page.click('.conv-item:has-text("修一下登录页") >> nth=0 >> .conv-actions');
+  await page.waitForSelector('.menu');
+  await shot('conv-menu');
+  await page.click('.menu button:has-text("归档")');
+  await page.click('.recent-head:has-text("已归档")');
+  await page.waitForSelector('.recent-group:has-text("已归档") .conv-item:has-text("修一下登录页")');
+  await shot('archived');
   await page.hover('.project-group-head:not(.recent-head) >> nth=0');
   await page.click('.project-group-head .add:not(.group-more) >> nth=0');
   await shot('chat-new');
