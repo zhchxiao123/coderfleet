@@ -172,6 +172,18 @@ export class Lifecycle {
     });
   }
 
+  /**
+   * Recreates the relay from a freshly written configuration, so a forward added
+   * since it started (the machine helper's) takes effect. Running tasks lose
+   * their connections for a few seconds.
+   */
+  public restartRelay(): Operation {
+    return this.start('restart', 'proxy-relay', async (_log, exec) => {
+      if (!(await writeCompose(this.workspace, this.dockerPath)).gost) throw new WorkspaceError('没有走 relay 的项目，不需要转发');
+      await exec([...this.compose(), 'up', '-d', '--force-recreate', '--no-deps', 'proxy-relay']);
+    });
+  }
+
   /** Stops and removes the project's containers, then removes it from projects.conf. Files stay. */
   public removeProject(name: string): Operation {
     const project = this.project(name);

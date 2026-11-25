@@ -140,6 +140,9 @@
       // Phones
       page.append(CF.mobileCard(current));
 
+      // Machine helper: managed by the backend on its own machine.
+      page.append(CF.helperCard());
+
       // Workspace & image
       let image = overview.image;
       // These parts follow background operations live; the rest of the page (and what is typed in it) stays.

@@ -263,6 +263,23 @@ export function setProjectMounts(workspace: string, name: string, specs: readonl
   if (!found) throw new WorkspaceError('项目不存在');
 }
 
+export type HelperAccess = 'off' | 'command' | 'gui';
+
+/** What the project's tasks may do on this machine through the helper (HELPER_ACCESS in projects.conf). */
+export function projectHelperAccess(project: WorkspaceProject): HelperAccess {
+  const value = (project.record.HELPER_ACCESS ?? '').toLowerCase();
+  return value === 'command' || value === 'gui' ? value : 'off';
+}
+
+export function setProjectHelper(workspace: string, name: string, access: string): void {
+  if (access !== 'off' && access !== 'command' && access !== 'gui') throw new WorkspaceError('机器操作只能是 off、command 或 gui');
+  const found = rewriteConf(join(workspace, 'projects.conf'), 'NAME', name, record => {
+    const { HELPER_ACCESS: _previous, ...rest } = record;
+    return access === 'off' ? rest : { ...rest, HELPER_ACCESS: access };
+  });
+  if (!found) throw new WorkspaceError('项目不存在');
+}
+
 /** Settings shown in the desktop client, with config.conf defaults (compose.py / init_wizard.py). */
 export const SETTINGS: Readonly<Record<string, string>> = {
   PROXY_HOST: 'host.docker.internal', PROXY_HTTP_PORT: '7890', CONTAINER_TIMEZONE: 'Asia/Shanghai',

@@ -24,7 +24,7 @@ function containerTimezone(config: ConfRecord): string {
 }
 
 function gostConfig(relayPort: string, dnsPort: string, dnsUpstream: string, upstreamHost: string, upstreamPort: string,
-  bypass: string[], bridgePort: string, bridgeTarget: string): Json {
+  bypass: string[], bridgePort: string, bridgeTarget: string, helperPort: string, helperTarget: string): Json {
   return {
     services: [
       { name: 'service-0', addr: ':' + relayPort, handler: { type: 'http', chain: 'chain-0' }, listener: { type: 'tcp' } },
@@ -36,6 +36,11 @@ function gostConfig(relayPort: string, dnsPort: string, dnsUpstream: string, ups
         name: 'service-bridge', addr: ':' + bridgePort, handler: { type: 'tcp' }, listener: { type: 'tcp' },
         forwarder: { nodes: [{ name: 'bridge', addr: bridgeTarget }] },
       },
+      // Tasks reach the machine helper on the host through this port; the helper asks for a task token.
+      {
+        name: 'helper-bridge', addr: ':' + helperPort, handler: { type: 'tcp' }, listener: { type: 'tcp' },
+        forwarder: { nodes: [{ name: 'helper', addr: helperTarget }] },
+      },
     ],
     chains: [{
       name: 'chain-0',
@@ -44,6 +49,10 @@ function gostConfig(relayPort: string, dnsPort: string, dnsUpstream: string, ups
     bypasses: [{ name: 'bypass-0', matchers: bypass }],
   };
 }
+
+/** Where the machine helper listens on the host, and the relay port forwarded to it. */
+export function helperPort(config: ConfRecord): string { return config.HELPER_PORT || '8790'; }
+export function helperBridgePort(config: ConfRecord): string { return config.HELPER_BRIDGE_RELAY_PORT || '8767'; }
 
 interface DockerSocket { host: string; container: string }
 
@@ -293,7 +302,8 @@ export async function generateCompose(workspace: string, dockerPath = 'docker'):
       healthcheck: { test: ['CMD', 'sh', '-c', 'nc -z localhost ' + relayPort], interval: '8s', timeout: '4s', retries: 5, start_period: '5s' },
     };
     if (proxyMode === 'xray') relay.depends_on = { 'xray-proxy': { condition: 'service_started' } };
-    gost = gostConfig(relayPort, dnsPort, dnsUpstream, upstreamHost, upstreamPort, bypass, bridgePort, 'host.docker.internal:' + serverPort);
+    gost = gostConfig(relayPort, dnsPort, dnsUpstream, upstreamHost, upstreamPort, bypass, bridgePort, 'host.docker.internal:' + serverPort,
+      helperBridgePort(config), 'host.docker.internal:' + helperPort(config));
     relay.command = '-C /etc/gost/config.yaml';
     relay.volumes = ['./proxy-relay-config.yaml:/etc/gost/config.yaml:ro'];
     services['proxy-relay'] = relay;

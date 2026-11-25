@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectMountSpecs, setProjectMounts,
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
 } from './conf.js';
 import { projectMounts } from './compose.js';
 import { assertContainer, models } from './docker.js';
@@ -16,6 +16,7 @@ import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
 import { acceptPrompt, CHECK_ROUNDS, closedNote, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
 import { ForkError, forkOf, transcript } from './fork.js';
+import { HELPER_ANSWERS, HELPER_CARD, HelperHost, type HelperPending } from './helper-host.js';
 import { Lifecycle } from './lifecycle.js';
 import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
@@ -115,6 +116,44 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const chatProject = (id: string): WorkspaceProject | undefined =>
     readWorkspace(workspace).projects.find(item => item.name === id && chatSupported(item.account.type) && item.account.runtime === 'container');
   const runner = new TaskRunner(store, config.dockerPath, chatProject);
+  const helper = new HelperHost(workspace, config.dockerPath);
+  runner.taskEnv = async (target, turn) => {
+    const granted = await helper.grant(target, turn.id);
+    if (granted.reason) console.error('Turn ' + turn.id + ' runs without the machine helper: ' + granted.reason);
+    return granted.env;
+  };
+  /** Active turns of projects that may use the machine helper, or that still show one of its cards. */
+  const machineTurns = (): Turn[] => {
+    const allowed = new Set(readWorkspace(workspace).projects.filter(item => projectHelperAccess(item) !== 'off').map(item => item.name));
+    return store.liveTurns().filter(turn => active(turn) && turn.origin === 'node' && (allowed.has(turn.projectId) || turn.permission?.id.startsWith(HELPER_CARD)));
+  };
+  const helperCard = (item: HelperPending): NonNullable<Turn['permission']> => {
+    const command = item.argv.map(word => /^[\w@%+=:,./-]+$/.test(word) ? word : JSON.stringify(word)).join(' ');
+    return {
+      id: HELPER_CARD + item.id, title: '要在这台机器上运行命令', details: JSON.stringify({ command, cwd: item.cwd }), allow: true,
+      questions: [{
+        question: '要在这台机器上运行：' + command + '（目录 ' + item.cwd + '）', header: '机器操作', multiSelect: false,
+        options: HELPER_ANSWERS.map(({ label, description }) => ({ label, description })),
+      }],
+    };
+  };
+  let helperSyncing = false;
+  /** Shows what the helper wants confirmed as the turn's approval card, and takes the card away once it is settled. */
+  const syncHelperCards = async (): Promise<void> => {
+    if (helperSyncing || !machineTurns().length) return;
+    helperSyncing = true;
+    try {
+      // A helper that does not answer has nothing waiting: its calls ended with it.
+      const pending = await helper.pending() ?? [];
+      for (const turn of machineTurns()) {
+        const mine = pending.filter(item => item.task === turn.id);
+        const shown = turn.permission?.id.startsWith(HELPER_CARD) ? turn.permission.id : '';
+        if (shown && !mine.some(item => HELPER_CARD + item.id === shown)) { delete turn.permission; store.saveTurn(turn); }
+        // One card at a time: the worker's own approval, when there is one, is answered first.
+        if (!turn.permission && mine[0]) { turn.permission = helperCard(mine[0]); store.saveTurn(turn); }
+      }
+    } finally { helperSyncing = false; }
+  };
   const claudeModelLists = new Map<string, { at: number; list: Promise<ModelChoice[]> }>();
   const project = (name: string): WorkspaceProject => {
     const found = readWorkspace(workspace).projects.find(item => item.name === name);
@@ -313,7 +352,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     catch (error) { jobs.patch(id, ['working'], { state: 'waiting', reason: 'merge', error: undefined, mergeError: '没能确认有没有合并：' + message(error) }); }
     finally { reviewing.delete(id); }
   };
-  runner.onFinish = turn => { titles.observe(turn); settleJob(turn); };
+  runner.onFinish = turn => {
+    // The task's token stops working and whatever it started on the machine is killed.
+    const owner = readWorkspace(workspace).projects.find(item => item.name === turn.projectId);
+    if (owner && projectHelperAccess(owner) !== 'off') void helper.revoke(turn.id);
+    titles.observe(turn); settleJob(turn);
+  };
   /** After a restart (or a missed finish): a working job whose last turn has ended is settled from that turn. */
   const settleJobs = (): void => {
     for (const job of jobs.list()) {
@@ -657,7 +701,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return projects.map(item => ({
         id: item.name, name: item.name, account: item.account.name, type: item.account.type, typeLabel: accountType(item.account.type).label,
         path: item.path, active: item.active, runtime: item.account.runtime, container: item.container,
-        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item),
+        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item), helper: projectHelperAccess(item),
         chat: chatSupported(item.account.type) && item.account.runtime === 'container',
       }));
     }],
@@ -690,6 +734,29 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       setProjectMounts(workspace, target.name, specs);
       return { mounts: specs };
     }],
+    // What the project's tasks may do on this machine through the helper (HELPER_ACCESS); applies to tasks started afterwards.
+    ['PUT', /^projects\/([\w-]+)\/helper$/, async (request, [name]) => {
+      const target = project(name as string);
+      const access = text((await body(request)).access);
+      if (access === 'gui') throw new HttpError(400, '图形界面操作还没有做，现在只能选 off 或 command');
+      setProjectHelper(workspace, target.name, access);
+      // Turned off: running tasks lose their access now, not when they end.
+      if (access === 'off') for (const turn of store.liveTurns()) if (turn.projectId === target.name && active(turn)) await helper.revoke(turn.id);
+      return { helper: access };
+    }],
+    // The machine helper: main token only (none of these is in DEVICE_ROUTES).
+    ['GET', /^helper$/, () => helper.status()],
+    ['POST', /^helper\/(install|start|stop|upgrade)$/, async (_request, [action]) => {
+      if (action === 'install') { await helper.install(); await helper.start(); }
+      else if (action === 'start') await helper.start();
+      else if (action === 'stop') await helper.stop();
+      else await helper.upgrade();
+      return helper.status();
+    }],
+    ['POST', /^helper\/restart-relay$/, async () => lifecycle.restartRelay()],
+    ['GET', /^helper\/policy$/, () => helper.policy()],
+    ['POST', /^helper\/policy$/, async request => helper.changePolicy(await body(request))],
+    ['GET', /^helper\/audit$/, (_request, _params, url) => helper.audit(Math.min(Math.max(Number(url.searchParams.get('n')) || 50, 1), 1000))],
     ['POST', /^projects\/([\w-]+)\/terminal$/, async (request, [name]) => {
       const [cols, rows] = size(await body(request));
       return { terminalId: await terminals.shell(project(name as string).name, cols, rows) };
@@ -1035,6 +1102,17 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const input = await body(request);
       const key = identifier(input.id);
       if (turn.permission?.id !== key) throw new HttpError(409, 'This approval is no longer available');
+      if (key.startsWith(HELPER_CARD)) {
+        // The machine helper's card: the answer goes to the helper, which holds the call until then.
+        const answer = Object.values(record(input.answers)).map(text)[0] || (input.decision === 'allow' ? HELPER_ANSWERS[0]?.label : input.decision === 'deny' ? '拒绝' : '');
+        if (!answer) throw new HttpError(400, 'Answer the question first');
+        // Anything that is not one of the two ways to allow is a refusal.
+        const decision = HELPER_ANSWERS.find(item => item.label === answer)?.decision ?? 'deny';
+        try { await helper.decide(key.slice(HELPER_CARD.length), decision); }
+        catch (error) { throw new HttpError(409, message(error)); }
+        if (turn.permission?.id === key) { delete turn.permission; store.saveTurn(turn); }
+        return { accepted: true, decision };
+      }
       if (turn.permission.questions) {
         const answers = Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)]));
         if (!Object.keys(answers).length) throw new HttpError(400, 'Answer the question first');
@@ -1094,6 +1172,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   let titlesTicked = 0;
   let jobsSettled = 0;
   let schedulesTicked = 0;
+  let helperSynced = 0;
   const timer = setInterval(() => {
     for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
     void drainFollowUps();
@@ -1103,6 +1182,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       try { tickSchedules(); } catch (error) { console.error('Schedules not checked:', message(error)); }
     }
     if (Date.now() - titlesTicked > 1_000) { titlesTicked = Date.now(); titles.tick(); }
+    if (Date.now() - helperSynced > 1_000) {
+      helperSynced = Date.now();
+      void syncHelperCards().catch(error => console.error('Helper confirmations not read:', message(error)));
+    }
   }, 250);
   timer.unref();
   // Subscription usage, asked from the accounts' own containers; see usage.ts for how often.

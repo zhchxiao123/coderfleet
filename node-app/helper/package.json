@@ -1,0 +1,13 @@
+{
+  "name": "coderfleet-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lets tasks holding a token run listed commands on the machine it is installed on",
+  "type": "module",
+  "bin": { "coderfleet-helper": "src/main.ts" },
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "start": "node src/main.ts serve",
+    "test": "node --test test/*.test.mjs"
+  }
+}

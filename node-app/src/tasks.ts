@@ -281,6 +281,8 @@ export class TaskRunner {
   private readonly busy = new Set<string>();
   /** Called once a turn has settled (done, failed or cancelled). */
   public onFinish?: (turn: Turn) => void;
+  /** Extra environment for one turn's worker (the machine helper's connection); it is not saved anywhere. */
+  public taskEnv?: (project: WorkspaceProject, turn: Turn) => Promise<Record<string, string>>;
 
   public constructor(
     private readonly store: WorkspaceStore,
@@ -333,7 +335,8 @@ export class TaskRunner {
       const body = '( setsid -w node ' + quote(inside(bundleName + '/' + workerFile)) + ' --spec ' + quote(inside(turn.id + '.sdk.json'))
         + ' --task-marker ' + quote('coderfleet-task-' + turn.id) + ' ) >> ' + log + ' 2>> ' + quote(inside(turn.id + '.sdk-diagnostic.log'))
         + '; cf_rc=$?; echo $cf_rc > ' + exit + '.tmp; mv ' + exit + '.tmp ' + exit;
-      await execDetached(this.dockerPath, project.container, { CODERFLEET_TASK_ID: turn.id }, body);
+      const extra = await this.taskEnv?.(project, turn) ?? {};
+      await execDetached(this.dockerPath, project.container, { ...extra, CODERFLEET_TASK_ID: turn.id }, body);
     } catch (error) {
       this.finish(turn, 'failed', message(error));
     }

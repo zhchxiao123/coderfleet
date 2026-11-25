@@ -180,10 +180,12 @@
       await session?.refresh();
     });
     if (permission.questions) {
+      // The machine helper's card: its options are the only answers.
+      const machine = permission.id.startsWith('helper-');
       const answers = new Map();
       const blocks = permission.questions.map(question => {
         const picked = new Set();
-        const other = h('input', { placeholder: '其他回答（可选）', on: { input: () => sync() } });
+        const other = h('input', { placeholder: '其他回答（可选）', hidden: machine, on: { input: () => sync() } });
         const buttons = question.options.map(option => h('button.option', {
           title: option.description || '',
           on: { click: event => {
@@ -205,7 +207,7 @@
       });
       const submit = h('button.btn.primary.small', { disabled: true, on: { click: () => decide(submit, { answers: Object.fromEntries(answers) }) } }, '提交回答');
       return h('div.approval',
-        h('div.approval-head', h('span.glyph', CF.icon('question', 15)), h('div', h('strong', '需要你回答'), h('small', '回答后会继续执行'))),
+        h('div.approval-head', h('span.glyph', CF.icon('question', 15)), h('div', h('strong', machine ? permission.title : '需要你回答'), h('small', machine ? '任务在等你决定' : '回答后会继续执行'))),
         blocks, h('div.approval-actions', submit));
     }
     const allow = h('button.btn.primary.small', { disabled: !permission.allow, on: { click: () => decide(allow, { decision: 'allow' }) } }, CF.icon('check', 13), '允许');

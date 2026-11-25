@@ -115,6 +115,20 @@
     },
 
     /**
+     * Lets the project's tasks run the machine helper's listed commands on the
+     * backend's machine, or takes that away (HELPER_ACCESS in projects.conf).
+     */
+    async helper(project) {
+      const on = project.helper === 'command';
+      if (!on && !await CF.confirm('允许 ' + project.name + ' 的任务操作这台机器？',
+        '任务可以通过机器助手运行你在规则里列出的命令，目录限制在项目目录里；规则要求确认的命令会先问你。对之后开始的任务生效。', { label: '允许' })) return;
+      try { await CF.api('PUT', 'projects/' + project.id + '/helper', { access: on ? 'off' : 'command' }); }
+      catch (error) { CF.fail(error); return; }
+      await CF.app.refreshProjects();
+      CF.toast(on ? '已关闭，正在运行的任务也用不了了' : '已允许。机器助手在「设置」里安装和启动');
+    },
+
+    /**
      * Edits the extra host directories in the project's container (EXTRA_MOUNTS in
      * projects.conf, shared with the old Web UI). Like the environment, they reach the
      * container when it is recreated.
@@ -189,6 +203,7 @@
           running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
           { label: '环境变量…', icon: 'key', run: () => CF.projects.env(project) },
           { label: '挂载目录…', icon: 'folder', run: () => CF.projects.mounts(project) },
+          { label: project.helper === 'command' ? '关闭机器操作' : '允许机器操作…', icon: 'terminal', run: () => CF.projects.helper(project) },
           { label: project.active ? '停用项目' : '启用项目', run: () => CF.busy(null, async () => {
             await CF.api('POST', 'projects/' + project.id + '/' + (project.active ? 'disable' : 'enable'));
             await CF.app.refreshProjects();

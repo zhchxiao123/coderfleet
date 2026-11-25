@@ -64,7 +64,16 @@ function cliVersion(path: string): string {
   catch { return ''; }
 }
 
+/** The MCP server name of the machine helper; its tools are `mcp__machine__…`. */
+const MACHINE = 'machine';
+
 export async function runClaude(spec: ClaudeSpec): Promise<number> {
+  // The machine helper's connection for this task, when the project may use it. Taken out of
+  // the environment so that what the agent runs in the container does not inherit the token.
+  const helper = process.env.CODERFLEET_HELPER_URL && process.env.CODERFLEET_HELPER_TOKEN
+    ? { url: process.env.CODERFLEET_HELPER_URL, token: process.env.CODERFLEET_HELPER_TOKEN } : undefined;
+  delete process.env.CODERFLEET_HELPER_URL;
+  delete process.env.CODERFLEET_HELPER_TOKEN;
   const mailbox = openMailbox(spec);
   writeState(spec);
   const pending = new Map<string, (decision: Decision) => void>();
@@ -210,8 +219,12 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
         permissionMode, ...(spec.auto ? { allowDangerouslySkipPermissions: true } : {}),
         ...(spec.read_only ? { disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] } : {}), settingSources: ['user', 'project', 'local'], includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code', append: CF_SEND_HINT },
-        canUseTool: (toolName: string, toolInput: Json, context: Json) =>
-          ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),
+        // A call may wait for a person on the helper's side (10 minutes) and then run for up to 30.
+        ...(helper ? { mcpServers: { [MACHINE]: { type: 'http', url: helper.url, headers: { Authorization: 'Bearer ' + helper.token }, timeout: 2_500_000 } } } : {}),
+        // The helper applies its own rules and asks the person itself: asking here too would ask twice.
+        canUseTool: (toolName: string, toolInput: Json, context: Json) => helper && toolName.startsWith('mcp__' + MACHINE + '__')
+          ? Promise.resolve<PermissionResult>({ behavior: 'allow', updatedInput: toolInput })
+          : ask(toolName, toolInput, str(context.toolUseID) || randomUUID(), context.signal as AbortSignal | undefined),
         stderr: (data: string) => process.stderr.write(data),
       },
     });

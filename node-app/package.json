@@ -9,11 +9,11 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node scripts/vendor.mjs",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && tsc -p helper/tsconfig.json && node scripts/vendor.mjs",
+    "test": "npm run build && node --test test/*.test.mjs helper/test/*.test.mjs",
     "backend": "node dist/cli.js",
     "desktop": "node scripts/dev-app-name.mjs && electron .",
-    "package": "npm run package:backend && electron-packager . CoderFleet --no-asar --icon=icons/coderfleet --out out --ignore='^/(src|test|out|scripts|backend|icons|\\.cache|tsconfig.json|node_modules)'",
+    "package": "npm run package:backend && electron-packager . CoderFleet --no-asar --icon=icons/coderfleet --out out --ignore='^/(src|helper|test|out|scripts|backend|icons|\\.cache|tsconfig.json|node_modules)'",
     "package:backend": "npm run build && node scripts/package-backend.mjs --arch x64 && node scripts/package-backend.mjs --arch arm64"
   },
   "devDependencies": {

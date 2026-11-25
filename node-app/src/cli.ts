@@ -8,6 +8,9 @@
 //                    做完为止 jobs of the running service (config: --config <path>)
 //   schedule list | show <id> | add <project> <rule> <prompt> [--job] | edit <id> … | on|off|run|remove <id>
 //                    定时: things the service starts by itself (rule: daily HH:MM | weekly 1,3 HH:MM | every <hours>)
+//   helper status | install | start | stop | upgrade | restart-relay | access <project> off|command
+//          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | audit [n]
+//                    机器助手: the separate program that runs listed commands on this machine for tasks
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -22,7 +25,7 @@ const argv = process.argv.slice(2);
 const flag = argv.indexOf('--config');
 const flagged = flag >= 0 ? argv.splice(flag, 2)[1] : undefined;
 const [mode, rawPath] = argv;
-const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' ? '' : rawPath) || join(home, 'config.json'));
+const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' || mode === 'helper' ? '' : rawPath) || join(home, 'config.json'));
 
 const JOB_STATES: Readonly<Record<string, string>> = { working: '在做', waiting: '等你', review: '待验收', accepted: '已收下', discarded: '已丢弃' };
 interface JobView { conversationId: string; projectId: string; title: string; branch: string; state: string; error?: string; mergeError?: string; mergedInto?: string; createdAt: string;
@@ -145,6 +148,50 @@ async function scheduleCommand(verb: string | undefined, args: string[]): Promis
   } else throw new Error(SCHEDULE_USAGE);
 }
 
+const HELPER_USAGE = 'Usage: coderfleet-backend helper status | install | start | stop | upgrade | restart-relay | access <project> off|command'
+  + ' | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | audit [n] [--config config.json]';
+interface HelperView { bundled: string; installed: string; running: boolean; version: string; compatible: boolean; upgrade: boolean; host: string; port: number; url: string;
+  relay: string; home: string; tasks: number; pending: number; policyError: string; machine: string }
+
+function helperLines(view: HelperView): string {
+  const state = !view.installed ? '没有安装' : !view.running ? '装了，没有在运行' : !view.compatible ? '在运行，但版本对不上，要先升级' : '在运行';
+  const relay: Record<string, string> = { ready: '有', missing: '没有，运行 helper restart-relay', stopped: 'relay 没有在运行，启动项目时会带上', unknown: '不确定' };
+  return [
+    '机器助手  ' + state + (view.running ? '  ' + view.version + '  ' + view.host + ':' + view.port + (view.machine ? '  ' + view.machine : '') : view.installed ? '  ' + view.installed : ''),
+    ...(view.upgrade ? ['可升级到 ' + view.bundled + '：helper upgrade'] : []),
+    ...(view.running ? ['容器里的地址  ' + view.url, 'relay 转发  ' + (relay[view.relay] ?? view.relay), '有令牌的任务 ' + view.tasks + '  等确认 ' + view.pending] : []),
+    ...(view.policyError ? ['规则文件有错，所有命令都会被拒绝：' + view.policyError] : []),
+    '目录  ' + view.home,
+  ].join('\n');
+}
+
+async function helperCommand(verb: string | undefined, args: string[]): Promise<void> {
+  if (verb === 'status') console.log(helperLines(await call<HelperView>('GET', 'helper')));
+  else if (verb === 'install' || verb === 'start' || verb === 'stop' || verb === 'upgrade') console.log(helperLines(await call<HelperView>('POST', 'helper/' + verb, {})));
+  else if (verb === 'restart-relay') {
+    let operation = await call<{ id: string; status: string; error?: string }>('POST', 'helper/restart-relay', {});
+    while (operation.status === 'running') {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      operation = await call('GET', 'operations/' + operation.id);
+    }
+    if (operation.status !== 'succeeded') throw new Error(operation.error || 'relay 没有重启成功');
+    console.log('relay 已重启');
+  } else if (verb === 'access' && args[0] && args[1]) {
+    console.log(args[0] + '  ' + (await call<{ helper: string }>('PUT', 'projects/' + args[0] + '/helper', { access: args[1] })).helper);
+  } else if (verb === 'policy' && (args[0] === 'show' || (args[0] === 'set' && args[1] && args[2]) || (args[0] === 'remove' && args[1]))) {
+    const words = args.slice(args[0] === 'set' ? 3 : 2);
+    const rule = { program: args[1], ...(args[0] === 'set' ? { action: args[2] } : {}), ...(words.length ? { args_any: words } : {}) };
+    const answer = args[0] === 'show' ? await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('GET', 'helper/policy')
+      : await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('POST', 'helper/policy', { [args[0] as string]: rule });
+    console.log(answer.policy ? JSON.stringify(answer.policy, null, 2) : '规则文件有错：' + answer.error);
+    if (answer.file) console.log('文件  ' + answer.file);
+    if (answer.built_in) console.log('不管规则怎么写都拒绝：\n' + answer.built_in.map(line => '  - ' + line).join('\n'));
+  } else if (verb === 'audit') {
+    const { records } = await call<{ records: unknown[] }>('GET', 'helper/audit?n=' + (Number(args[0]) || 50));
+    console.log(records.length ? records.map(item => JSON.stringify(item)).join('\n') : '还没有操作记录');
+  } else throw new Error(HELPER_USAGE);
+}
+
 try {
   if (mode === 'serve') {
     // Turns run in containers, so stopping the service never stops their work.
@@ -181,9 +228,11 @@ try {
     await jobCommand(argv[1], argv.slice(2));
   } else if (mode === 'schedule') {
     await scheduleCommand(argv[1], argv.slice(2));
+  } else if (mode === 'helper') {
+    await helperCommand(argv[1], argv.slice(2));
   } else if (mode === 'version') {
     console.log(VERSION);
-  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | version');
+  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | helper … | version');
 } catch (error) {
   console.error(message(error));
   process.exitCode = 1;
