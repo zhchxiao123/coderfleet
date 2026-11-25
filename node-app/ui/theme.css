@@ -191,7 +191,6 @@ img.brand-mark { display: block; object-fit: cover; user-select: none; -webkit-u
 .page-head h1 { font-size: 28px; font-weight: 680; letter-spacing: -0.025em; margin: 0; line-height: 1.15; }
 .page-head p { margin: 6px 0 0; color: var(--text-2); }
 .topbar { height: 54px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 22px; -webkit-app-region: drag; }
-.platform-darwin .topbar { height: 50px; }
 .topbar > * { -webkit-app-region: no-drag; }
 .topbar .title { font-weight: 640; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -0.01em; }
 .topbar .meta { color: var(--text-3); font-size: 12.5px; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
@@ -518,8 +517,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 .attention-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
 
 /* Top bar gains a hairline once the transcript scrolls under it. */
-.topbar { transition: box-shadow 0.15s, background 0.15s; position: relative; z-index: 2; }
-.topbar.scrolled { box-shadow: 0 1px 0 var(--line); background: color-mix(in srgb, var(--canvas) 86%, transparent); backdrop-filter: blur(10px); }
 .topbar .container-warn { color: var(--amber); display: inline-flex; align-items: center; gap: 5px; font-weight: 560; }
 
 /* Running status: readable accent text with a gentle highlight sweep. */
@@ -801,8 +798,6 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .app.sidebar-hidden { grid-template-columns: 0 1fr; }
 .app.sidebar-hidden .sidebar { visibility: hidden; border-right: 0; }
 /* Room for the reveal buttons (and the macOS window buttons) while the sidebar is hidden. */
-.app.sidebar-hidden .topbar { padding-left: 96px; }
-.platform-darwin .app.sidebar-hidden .topbar { padding-left: 164px; }
 .app.sidebar-hidden .page-inner { padding-top: 56px; }
 .sidebar-foot { padding: 8px; }
 @media (prefers-reduced-motion: reduce) { .app { transition: none; } }
@@ -1097,12 +1092,18 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 .criteria-title { color: var(--text-3); font-size: 12px; }
 
 /* ── Window bar across the top, icon rail at the far left (like Codex) ── */
-.app { grid-template-columns: 52px 264px 1fr; grid-template-rows: 40px 1fr; background: var(--chrome); --chrome: color-mix(in srgb, var(--sidebar) 94%, var(--text)); }
+.app { grid-template-columns: 52px 264px 1fr; grid-template-rows: 44px 1fr; background: var(--chrome); --chrome: color-mix(in srgb, var(--sidebar) 98%, var(--text)); }
 .app.no-sidebar { grid-template-columns: 1fr; grid-template-rows: 1fr; background: none; }
 .app.sidebar-hidden { grid-template-columns: 52px 0 1fr; }
-.winbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 2px; padding: 0 10px; min-width: 0; -webkit-app-region: drag; }
+.winbar { grid-column: 1 / -1; display: flex; align-items: center; min-width: 0; -webkit-app-region: drag; }
 .winbar[hidden] { display: none; }
-.platform-darwin .winbar { padding-left: 84px; }
+/* Back, forward and the sidebar switch take the width of the rail and sidebar, so a page's row starts above the page. */
+.win-nav { flex: none; display: flex; align-items: center; gap: 2px; width: 316px; padding-left: 10px; }
+.platform-darwin .win-nav { padding-left: 84px; }
+.app.sidebar-hidden .win-nav { width: auto; padding-right: 6px; }
+.win-page { flex: 1; min-width: 0; height: 100%; display: flex; }
+.winbar .topbar { flex: 1; min-width: 0; height: 100%; padding: 0 12px 0 22px; }
+.app.sidebar-hidden .winbar .topbar { padding-left: 8px; }
 .winbar .icon-btn { width: 30px; height: 28px; color: var(--text-2); -webkit-app-region: no-drag; }
 .winbar .icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .winbar .icon-btn:disabled { color: var(--text-3); opacity: 0.45; }
@@ -1126,7 +1127,6 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 /* The window buttons now live in the bar: pages no longer leave room for them. */
 .platform-darwin .sidebar-top { padding-top: 14px; }
 .platform-darwin .page-inner, .app.sidebar-hidden .page-inner { padding-top: 30px; }
-.app.sidebar-hidden .topbar, .platform-darwin .app.sidebar-hidden .topbar { padding-left: 22px; }
 .app.sidebar-hidden .settings-bar, .platform-darwin .app.sidebar-hidden .settings-bar { padding-left: 22px; }
 .sidebar-foot:not(:has(.activity-row)) { display: none; }
 .conv-item .clock-mark { display: grid; color: var(--text-3); flex: none; margin-right: -3px; }

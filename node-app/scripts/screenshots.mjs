@@ -87,6 +87,9 @@ try {
   await page.waitForSelector('.running-status');
   await page.waitForTimeout(700);
   await shot('chat-running');
+  await page.click('.sidebar-toggle');
+  await shot('chat-sidebar-hidden');
+  await page.click('.sidebar-toggle');
   await page.click('.send.stop');
   await page.waitForSelector('.turn-note');
   // A job waiting for review: the card over the top-right corner, then accepting it.

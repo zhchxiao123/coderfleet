@@ -116,6 +116,7 @@
     trail.length = 0; trailAt = -1;
     document.getElementById('app').classList.remove('no-sidebar');
     renderSidebar();
+    setBar(null);
     main.replaceChildren(h('div.welcome', h('div.welcome-card', h('div.spinner', { style: 'margin:0 auto 14px;width:20px;height:20px' }), h('p', '正在连接后端…'))));
     try {
       await CF.transport.connect(id);
@@ -368,12 +369,19 @@
 
   /**
    * The strip across the top of the window (like Codex): the macOS window buttons sit at its
-   * left, then back, forward and the sidebar switch. The rest of it drags the window.
+   * left, then back, forward and the sidebar switch, then the open page's own row
+   * (CF.app.setBar). The rest of it drags the window.
    */
+  const winNav = h('div.win-nav');
+  const winPage = h('div.win-page');
+  winbar.append(winNav, winPage);
+  /** The open page's own row in the window bar (a conversation's title and buttons), or none. */
+  const setBar = node => winPage.replaceChildren(...(node ? [node] : []));
+  CF.app.setBar = setBar;
   function renderWinbar() {
     const mod = CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+';
     const button = (cls, icon, title, run, disabled) => h('button.icon-btn' + cls, { title, 'aria-label': title, disabled: disabled || null, on: { click: run } }, CF.icon(icon, 16));
-    winbar.replaceChildren(
+    winNav.replaceChildren(
       button('.win-back', 'chevron', '后退', () => travel(-1), trailTarget(-1) < 0),
       button('.win-forward', 'chevron', '前进', () => travel(1), trailTarget(1) < 0),
       button('.sidebar-toggle', 'sidebar', (sidebarOpen() ? '隐藏' : '显示') + '侧边栏（' + mod + '\\）', () => CF.app.toggleSidebar()),
@@ -466,6 +474,7 @@
     if (!connected && view.name !== 'settings') return;
     if (view.name === 'chat') CF.state.lastChat = view;
     const container = h('div.view');
+    setBar(null);
     main.replaceChildren(...(SETTINGS_TABS.some(([name]) => name === view.name) ? [settingsBar(view.name)] : []), container);
     if (view.name === 'chat') CF.chat.mount(container, view);
     else if (view.name === 'projects') CF.projects.mount(container);

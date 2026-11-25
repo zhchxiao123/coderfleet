@@ -907,11 +907,9 @@
         });
       };
       const topbar = h('div.topbar', title, meta, h('div.spacer'), jobButton, projectId ? filesButton : null, more);
-      transcript.addEventListener('scroll', () => topbar.classList.toggle('scrolled', transcript.scrollTop > 4), { passive: true });
-      container.replaceChildren(
-        topbar,
-        chatRow,
-      );
+      // The title row sits in the window bar, above the sidebar and the page.
+      CF.app.setBar(topbar);
+      container.replaceChildren(chatRow);
       chatRow.append(
         (chatColumn.append(rail, current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, followHost, h('div.composer', {
