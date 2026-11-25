@@ -1,0 +1,501 @@
+
+> coderfleet-desktop@0.1.0 test
+> npm run build && node --test test/*.test.mjs helper/test/*.test.mjs
+
+
+> coderfleet-desktop@0.1.0 build
+> node -e "require('node:fs').rmSync('dist',{recursive:true,force:true})" && tsc -p tsconfig.json && tsc -p helper/tsconfig.json && node scripts/vendor.mjs
+
+TAP version 13
+# Subtest: MCP: initialize, the tool list, notifications, and GET is not offered
+ok 1 - MCP: initialize, the tool list, notifications, and GET is not offered
+  ---
+  duration_ms: 53.554216
+  type: 'test'
+  ...
+# Subtest: tokens: missing, wrongly signed, expired and revoked ones get 401
+ok 2 - tokens: missing, wrongly signed, expired and revoked ones get 401
+  ---
+  duration_ms: 56.876566
+  type: 'test'
+  ...
+# Subtest: the management port opens only to the master secret
+ok 3 - the management port opens only to the master secret
+  ---
+  duration_ms: 47.534679
+  type: 'test'
+  ...
+# Subtest: the management port signs tokens that the MCP side accepts
+ok 4 - the management port signs tokens that the MCP side accepts
+  ---
+  duration_ms: 26.663422
+  type: 'test'
+  ...
+# Subtest: machine_info tells what the task may do
+ok 5 - machine_info tells what the task may do
+  ---
+  duration_ms: 5.473583
+  type: 'test'
+  ...
+# Subtest: a screen tool is refused for a command-level task, and is not offered at all in this version
+ok 6 - a screen tool is refused for a command-level task, and is not offered at all in this version
+  ---
+  duration_ms: 10.665252
+  type: 'test'
+  ...
+# Subtest: an allowed command runs and returns its output; a failing one returns its exit code
+ok 7 - an allowed command runs and returns its output; a failing one returns its exit code
+  ---
+  duration_ms: 20.265346
+  type: 'test'
+  ...
+# Subtest: what the rules do not list is refused; so are paths and programs that are not installed
+ok 8 - what the rules do not list is refused; so are paths and programs that are not installed
+  ---
+  duration_ms: 24.005191
+  type: 'test'
+  ...
+# Subtest: built-in refusals hold even when the rules file allows them
+ok 9 - built-in refusals hold even when the rules file allows them
+  ---
+  duration_ms: 89.911398
+  type: 'test'
+  ...
+# Subtest: a program that lives in the helper directory is refused, also through a link in the program path
+ok 10 - a program that lives in the helper directory is refused, also through a link in the program path
+  ---
+  duration_ms: 6.567741
+  type: 'test'
+  ...
+# Subtest: order of the rules: deny, then confirm, then allow; no match is a refusal
+ok 11 - order of the rules: deny, then confirm, then allow; no match is a refusal
+  ---
+  duration_ms: 220.248569
+  type: 'test'
+  ...
+# Subtest: a rules file that cannot be read allows nothing, and says so
+ok 12 - a rules file that cannot be read allows nothing, and says so
+  ---
+  duration_ms: 22.255746
+  type: 'test'
+  ...
+# Subtest: the default rules: Mac and Linux lists, esptool reads allowed, writes confirmed
+ok 13 - the default rules: Mac and Linux lists, esptool reads allowed, writes confirmed
+  ---
+  duration_ms: 0.157624
+  type: 'test'
+  ...
+# Subtest: the working directory cannot leave the project directory, by .. or by symlink
+ok 14 - the working directory cannot leave the project directory, by .. or by symlink
+  ---
+  duration_ms: 41.541391
+  type: 'test'
+  ...
+# Subtest: a command sees a fixed small environment, nothing of the helper's own
+ok 15 - a command sees a fixed small environment, nothing of the helper's own
+  ---
+  duration_ms: 6.194203
+  type: 'test'
+  ...
+# Subtest: timeout kills the whole process group, grandchildren included
+ok 16 - timeout kills the whole process group, grandchildren included
+  ---
+  duration_ms: 1010.225627
+  type: 'test'
+  ...
+# Subtest: what a program leaves running dies when the program exits
+ok 17 - what a program leaves running dies when the program exits
+  ---
+  duration_ms: 34.037448
+  type: 'test'
+  ...
+# Subtest: timeout_s and argv are checked
+ok 18 - timeout_s and argv are checked
+  ---
+  duration_ms: 23.155448
+  type: 'test'
+  ...
+# Subtest: the full output goes to a log file in the project; the answer carries the last 200 lines
+ok 19 - the full output goes to a log file in the project; the answer carries the last 200 lines
+  ---
+  duration_ms: 6.168745
+  type: 'test'
+  ...
+# Subtest: a log directory that leads out of the project stops the command
+ok 20 - a log directory that leads out of the project stops the command
+  ---
+  duration_ms: 3.816095
+  type: 'test'
+  ...
+# Subtest: confirmation: waits, is visible on the management port, and runs when allowed
+ok 21 - confirmation: waits, is visible on the management port, and runs when allowed
+  ---
+  duration_ms: 24.289315
+  type: 'test'
+  ...
+# Subtest: confirmation: a refusal and nobody answering both end as deny-unconfirmed
+ok 22 - confirmation: a refusal and nobody answering both end as deny-unconfirmed
+  ---
+  duration_ms: 338.764541
+  type: 'test'
+  ...
+# Subtest: "allow the same command for this task" stops the asking for that exact command only
+ok 23 - "allow the same command for this task" stops the asking for that exact command only
+  ---
+  duration_ms: 646.474194
+  type: 'test'
+  ...
+# Subtest: revoking a task kills that task's processes and its token; other tasks go on
+ok 24 - revoking a task kills that task's processes and its token; other tasks go on
+  ---
+  duration_ms: 38.931203
+  type: 'test'
+  ...
+# Subtest: a caller that goes away takes its command with it
+ok 25 - a caller that goes away takes its command with it
+  ---
+  duration_ms: 46.072816
+  type: 'test'
+  ...
+# Subtest: stopping the helper kills what it started
+ok 26 - stopping the helper kills what it started
+  ---
+  duration_ms: 45.25653
+  type: 'test'
+  ...
+# Subtest: the operation log gets exactly one line per call, whatever the outcome
+ok 27 - the operation log gets exactly one line per call, whatever the outcome
+  ---
+  duration_ms: 238.343432
+  type: 'test'
+  ...
+# Subtest: when the operation log cannot be written, nothing runs
+ok 28 - when the operation log cannot be written, nothing runs
+  ---
+  duration_ms: 11.900492
+  type: 'test'
+  ...
+# Subtest: rules are changed through the management port in one step each
+ok 29 - rules are changed through the management port in one step each
+  ---
+  duration_ms: 31.594426
+  type: 'test'
+  ...
+# Subtest: serial: lists ports and reads what a port sends for the asked time
+ok 30 - serial: lists ports and reads what a port sends for the asked time
+  ---
+  duration_ms: 1029.230858
+  type: 'test'
+  ...
+# Subtest: serial: reset runs esptool under the rules before reading
+ok 31 - serial: reset runs esptool under the rules before reading
+  ---
+  duration_ms: 1016.019375
+  type: 'test'
+  ...
+# Subtest: the firmware rules: reads run, writes ask, efuse and forced writes never
+ok 32 - the firmware rules: reads run, writes ask, efuse and forced writes never
+  ---
+  duration_ms: 419.660132
+  type: 'test'
+  ...
+# Subtest: command line: serve, token, policy, audit, status, stop
+ok 33 - command line: serve, token, policy, audit, status, stop
+  ---
+  duration_ms: 770.126209
+  type: 'test'
+  ...
+# Subtest: kimi conversations run through the ACP worker
+ok 34 - kimi conversations run through the ACP worker
+  ---
+  duration_ms: 850.468096
+  type: 'test'
+  ...
+# Subtest: grok conversations run through the ACP worker
+ok 35 - grok conversations run through the ACP worker
+  ---
+  duration_ms: 847.502869
+  type: 'test'
+  ...
+# Subtest: OpenCode conversations run through the OpenCode SDK and a server in the container
+ok 36 - OpenCode conversations run through the OpenCode SDK and a server in the container
+  ---
+  duration_ms: 5030.107881
+  type: 'test'
+  ...
+# Subtest: Pi conversations run in-process through the Pi SDK
+ok 37 - Pi conversations run in-process through the Pi SDK
+  ---
+  duration_ms: 1558.107782
+  type: 'test'
+  ...
+# Subtest: Hermes conversations use stream-json, or plain text on an older CLI
+ok 38 - Hermes conversations use stream-json, or plain text on an older CLI
+  ---
+  duration_ms: 1034.455942
+  type: 'test'
+  ...
+# Subtest: Antigravity turns run in the persistent project container and survive a service restart
+ok 39 - Antigravity turns run in the persistent project container and survive a service restart
+  ---
+  duration_ms: 3388.404821
+  type: 'test'
+  ...
+# Subtest: a relay account refuses a container attached to a non-internal network
+ok 40 - a relay account refuses a container attached to a non-internal network
+  ---
+  duration_ms: 49.790662
+  type: 'test'
+  ...
+# Subtest: the control mailbox is interchangeable with the Python implementation
+ok 41 - the control mailbox is interchangeable with the Python implementation
+  ---
+  duration_ms: 25.271932
+  type: 'test'
+  ...
+# Subtest: Claude turns run through the TypeScript Agent SDK inside the container
+ok 42 - Claude turns run through the TypeScript Agent SDK inside the container
+  ---
+  duration_ms: 23695.940252
+  type: 'test'
+  ...
+# Subtest: Codex turns run with codex exec in the container
+ok 43 - Codex turns run with codex exec in the container
+  ---
+  duration_ms: 3140.504379
+  type: 'test'
+  ...
+# Subtest: docker-compose generation matches the Python generator
+ok 44 - docker-compose generation matches the Python generator
+  ---
+  duration_ms: 229.072378
+  type: 'test'
+  ...
+# Subtest: conversations are archived, restored and deleted like in the Python service
+ok 45 - conversations are archived, restored and deleted like in the Python service
+  ---
+  duration_ms: 557.78637
+  type: 'test'
+  ...
+# Subtest: the App browses and previews a project's files, never outside it
+ok 46 - the App browses and previews a project's files, never outside it
+  ---
+  duration_ms: 47.236973
+  type: 'test'
+  ...
+# Subtest: an attachment is the request body, written to disk as it arrives, up to 500 MB
+ok 47 - an attachment is the request body, written to disk as it arrives, up to 500 MB
+  ---
+  duration_ms: 131.537247
+  type: 'test'
+  ...
+# Subtest: the relay forwards one more port to the machine helper
+ok 48 - the relay forwards one more port to the machine helper
+  ---
+  duration_ms: 25.95676
+  type: 'test'
+  ...
+# Turn 207672091d89 runs without the machine helper: 不走 relay 的账号连不到机器助手
+# Turn 2a452c54a7fa runs without the machine helper: 机器助手没有在运行
+# Subtest: a project with machine access runs commands through the helper
+ok 49 - a project with machine access runs commands through the helper
+  ---
+  duration_ms: 38035.012127
+  type: 'test'
+  ...
+# Subtest: Python history appears in every account format and new turns continue it
+ok 50 - Python history appears in every account format and new turns continue it
+  ---
+  duration_ms: 3033.462944
+  type: 'test'
+  ...
+# Subtest: a turn the Python service runs is stopped there, never marked by this service
+ok 51 - a turn the Python service runs is stopped there, never marked by this service
+  ---
+  duration_ms: 1067.407983
+  type: 'test'
+  ...
+# Subtest: criteria are read from the last 标准 block of a reply
+ok 52 - criteria are read from the last 标准 block of a reply
+  ---
+  duration_ms: 1.471739
+  type: 'test'
+  ...
+# Subtest: a job works in its own worktree until it is accepted or discarded
+ok 53 - a job works in its own worktree until it is accepted or discarded
+  ---
+  duration_ms: 6817.563163
+  type: 'test'
+  ...
+# Subtest: a job goes back to the agent until its criteria are met, and to the user when it cannot decide
+ok 54 - a job goes back to the agent until its criteria are met, and to the user when it cannot decide
+  ---
+  duration_ms: 3565.72251
+  type: 'test'
+  ...
+# Subtest: another account checks a job before the user does
+ok 55 - another account checks a job before the user does
+  ---
+  duration_ms: 2296.653815
+  type: 'test'
+  ...
+# Subtest: the App-managed backend moves off a busy port, replaces older builds and restarts on request
+ok 56 - the App-managed backend moves off a busy port, replaces older builds and restarts on request
+  ---
+  duration_ms: 1039.411613
+  type: 'test'
+  ...
+# Subtest: the App initializes the workspace and manages accounts, projects, containers and the image
+ok 57 - the App initializes the workspace and manages accounts, projects, containers and the image
+  ---
+  duration_ms: 3526.493809
+  type: 'test'
+  ...
+# Subtest: login runs in the running project container
+ok 58 - login runs in the running project container
+  ---
+  duration_ms: 100.492983
+  type: 'test'
+  ...
+# Subtest: a paired phone gets a chat-only token that can be revoked
+ok 59 - a paired phone gets a chat-only token that can be revoked
+  ---
+  duration_ms: 573.650875
+  type: 'test'
+  ...
+# Subtest: repeated wrong tokens are slowed down; the right token still works
+ok 60 - repeated wrong tokens are slowed down; the right token still works
+  ---
+  duration_ms: 7.748608
+  type: 'test'
+  ...
+# Subtest: change feeds answer at once on a change and wait otherwise
+ok 61 - change feeds answer at once on a change and wait otherwise
+  ---
+  duration_ms: 2586.043065
+  type: 'test'
+  ...
+# Subtest: phone addresses: https anywhere, http only to private and mesh hosts
+ok 62 - phone addresses: https anywhere, http only to private and mesh hosts
+  ---
+  duration_ms: 0.498121
+  type: 'test'
+  ...
+# Subtest: a turn that ends or a question that comes up is an event; nothing else is
+ok 63 - a turn that ends or a question that comes up is an event; nothing else is
+  ---
+  duration_ms: 2.026068
+  type: 'test'
+  ...
+# Subtest: the watcher notifies about a real backend: approval, then the finished turn
+ok 64 - the watcher notifies about a real backend: approval, then the finished turn
+  ---
+  duration_ms: 1794.204273
+  type: 'test'
+  ...
+# Subtest: the Python service is reported only when it serves this workspace
+ok 65 - the Python service is reported only when it serves this workspace
+  ---
+  duration_ms: 25.063975
+  type: 'test'
+  ...
+# Subtest: the App installs the backend over SSH and reaches it through a tunnel
+ok 66 - the App installs the backend over SSH and reaches it through a tunnel
+  ---
+  duration_ms: 10257.883505
+  type: 'test'
+  ...
+# Subtest: rules: how they read, how the command line writes them, when they next fall
+ok 67 - rules: how they read, how the command line writes them, when they next fall
+  ---
+  duration_ms: 1.479822
+  type: 'test'
+  ...
+# Schedule not started: 03e3864f 这个项目用不了「做完为止」：项目不是 git 仓库，或它的 .git 在容器里访问不到
+# Subtest: a schedule starts a new conversation by itself, on request and by the clock
+ok 68 - a schedule starts a new conversation by itself, on request and by the clock
+  ---
+  duration_ms: 2387.214541
+  type: 'test'
+  ...
+# Subtest: while the previous run is still going the next one is skipped
+ok 69 - while the previous run is still going the next one is skipped
+  ---
+  duration_ms: 1083.83665
+  type: 'test'
+  ...
+# Subtest: the command line manages schedules like the App
+ok 70 - the command line manages schedules like the App
+  ---
+  duration_ms: 1087.608995
+  type: 'test'
+  ...
+# Subtest: title rules follow the Python service
+ok 71 - title rules follow the Python service
+  ---
+  duration_ms: 2.043942
+  type: 'test'
+  ...
+# Subtest: a new conversation is named once by the system model; a manual name is never replaced
+ok 72 - a new conversation is named once by the system model; a manual name is never replaced
+  ---
+  duration_ms: 4567.027455
+  type: 'test'
+  ...
+# Subtest: a tool call moves through running, waiting, approved and completed
+ok 73 - a tool call moves through running, waiting, approved and completed
+  ---
+  duration_ms: 1.075242
+  type: 'test'
+  ...
+# Subtest: a rejected call stays denied after its error result; a failing call is failed
+ok 74 - a rejected call stays denied after its error result; a failing call is failed
+  ---
+  duration_ms: 0.258165
+  type: 'test'
+  ...
+# Subtest: tool details summarize the input
+ok 75 - tool details summarize the input
+  ---
+  duration_ms: 0.129415
+  type: 'test'
+  ...
+# Subtest: steps of a sub-agent belong to its Agent call, and its text is not the answer
+ok 76 - steps of a sub-agent belong to its Agent call, and its text is not the answer
+  ---
+  duration_ms: 0.197165
+  type: 'test'
+  ...
+# Subtest: text and tool calls keep the order they happened in
+ok 77 - text and tool calls keep the order they happened in
+  ---
+  duration_ms: 0.158416
+  type: 'test'
+  ...
+# Subtest: a tool call keeps its input and output for the detail panel
+ok 78 - a tool call keeps its input and output for the detail panel
+  ---
+  duration_ms: 0.25304
+  type: 'test'
+  ...
+# Subtest: translation keeps code, splits long replies, retries cut-off parts and goes through the proxy
+ok 79 - translation keeps code, splits long replies, retries cut-off parts and goes through the proxy
+  ---
+  duration_ms: 25.251724
+  type: 'test'
+  ...
+# Subtest: subscription usage is asked from the account's own container
+ok 80 - subscription usage is asked from the account's own container
+  ---
+  duration_ms: 516.001314
+  type: 'test'
+  ...
+1..80
+# tests 80
+# suites 0
+# pass 80
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 38158.029063
