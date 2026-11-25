@@ -15,6 +15,7 @@ import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
 import { Titles } from './titles.js';
+import { FileAccessError, listFiles, previewFile, rawFile } from './files.js';
 import { configured, SystemLLMError, systemLLM, TranslationCache, translateText } from './translate.js';
 import { findPythonService, stopPythonTask, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
@@ -508,6 +509,13 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return result ?? { etag: since, unchanged: true };
     }],
     // Project environment variables (applied when the project's container is recreated).
+    // Browsing a project's files (the Python Web UI's 文件 panel); not for phones.
+    ['GET', /^projects\/([\w.-]+)\/files$/, async (_request, [name], url) =>
+      fileCall(() => listFiles(project(name as string).path, url.searchParams.get('path') ?? ''))],
+    ['GET', /^projects\/([\w.-]+)\/files\/preview$/, async (_request, [name], url) =>
+      fileCall(() => previewFile(project(name as string).path, url.searchParams.get('path') ?? ''))],
+    ['GET', /^projects\/([\w.-]+)\/files\/raw$/, async (_request, [name], url) =>
+      fileCall(() => rawFile(project(name as string).path, url.searchParams.get('path') ?? ''))],
     ['GET', /^projects\/([\w.-]+)\/env$/, async (_request, [name]) => ({ vars: readProjectEnv(workspace, project(name as string).name) })],
     ['PUT', /^projects\/([\w.-]+)\/env$/, async (request, [name]) => {
       const target = project(name as string);
@@ -695,6 +703,13 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
 }
 
 /** A turn for the client: no control fields, and tool input/output only as a flag (fetched per tool). */
+function fileCall<T>(run: () => T): T {
+  try { return run(); } catch (error) {
+    if (error instanceof FileAccessError) throw new HttpError(error.status, error.message);
+    throw error;
+  }
+}
+
 function publicTurn(turn: Turn): Record<string, unknown> {
   const { resumeId: _resume, controlToken: _token, logOffset: _offset, launchedAt: _launched, cancelRequested: _cancel,
     heldMessages, messageStarted: _started, ...visible } = turn;

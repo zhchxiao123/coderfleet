@@ -19,6 +19,15 @@ const env = await environment({
   containers: {},
 });
 await env.post('workspace/init');
+// A few project files for the 文件 panel.
+{
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(env.project, 'src'), { recursive: true });
+  mkdirSync(join(env.project, 'docs'), { recursive: true });
+  writeFileSync(join(env.project, 'README.md'), '# coderfleet\n\n把多个 AI 编程账号放进各自的容器里，一起用它们的额度。\n\n- `src/server.ts`：后端入口\n- `docs/`：说明文档\n');
+  writeFileSync(join(env.project, 'package.json'), JSON.stringify({ name: 'coderfleet', version: '0.1.0', scripts: { test: 'node --test' } }, null, 2) + '\n');
+  writeFileSync(join(env.project, 'src', 'server.ts'), 'export async function serve(configPath: string) {\n  const config = readConfig(configPath);\n  return listen(config.port, config.host);\n}\n');
+}
 await env.post('accounts', { name: 'claude-work', type: 'claude' });
 await env.post('accounts', { name: 'codex-team', type: 'codex' });
 await env.post('accounts', { name: 'google-agy', type: 'antigravity' });

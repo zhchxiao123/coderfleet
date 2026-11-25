@@ -773,10 +773,25 @@
         { label: '查看项目', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
       ].filter(Boolean)) } }, CF.icon('more', 16));
 
-      const topbar = h('div.topbar', title, meta, h('div.spacer'), more);
+      // The project's files on the right, like the Python Web UI; stays open across conversations.
+      let filesPanel = null;
+      const chatRow = h('div.chat-row');
+      const filesButton = h('button.btn.ghost.small.files-toggle', { title: '浏览项目文件', on: { click: () => toggleFiles() } }, CF.icon('folder', 14), '文件');
+      const toggleFiles = (show = !filesPanel) => {
+        try { localStorage.setItem('cf.filesOpen', show ? '1' : ''); } catch { /* storage unavailable */ }
+        filesPanel?.remove();
+        filesPanel = show && projectId ? CF.files.panel(projectId, () => toggleFiles(false)) : null;
+        if (filesPanel) chatRow.append(filesPanel);
+        filesButton.classList.toggle('on', Boolean(filesPanel));
+        filesButton.setAttribute('aria-pressed', String(Boolean(filesPanel)));
+      };
+      const topbar = h('div.topbar', title, meta, h('div.spacer'), projectId ? filesButton : null, more);
       transcript.addEventListener('scroll', () => topbar.classList.toggle('scrolled', transcript.scrollTop > 4), { passive: true });
       container.replaceChildren(
         topbar,
+        chatRow,
+      );
+      chatRow.append(
         h('div.chat', rail, current.conversationId ? transcript : welcome,
           h('div.composer-wrap', notice, followHost, h('div.composer', {
             on: {
@@ -787,6 +802,9 @@
           }, attachRow, textarea, fileInput,
             h('div.composer-bar', attachButton, chip, modelSelect, autoButton, hint, sendButton)))),
       );
+      let filesOpen = false;
+      try { filesOpen = localStorage.getItem('cf.filesOpen') === '1'; } catch { /* storage unavailable */ }
+      if (filesOpen) toggleFiles(true);
       renderHeader();
       autosize();
       void loadModels(projectId, modelSelect);

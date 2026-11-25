@@ -60,6 +60,14 @@ try {
   await shot('chat-approval');
   await page.evaluate(() => { document.querySelector('.transcript').scrollTop = 0; });
   await shot('chat-markdown');
+  await page.click('.files-toggle');
+  await page.waitForSelector('.file-row:has-text("README.md")');
+  await shot('files');
+  await page.click('.file-row:has-text("README.md")');
+  await page.waitForSelector('.file-markdown');
+  await shot('file-preview');
+  await page.keyboard.press('Escape');
+  await page.click('.files-panel button[title="关闭"]');
   await page.hover('.project-group-head:not(.recent-head) >> nth=0');
   await page.click('.project-group-head .add:not(.group-more) >> nth=0');
   await shot('chat-new');
