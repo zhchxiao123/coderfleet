@@ -74,6 +74,9 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     const chineseImage = (await env.post('projects/app/uploads', { name: '截图 1.png', data: png })).body;
     assert.equal((await env.get('projects/app/uploads/' + encodeURIComponent(chineseImage.path.split('/').pop()))).body.data, png);
     assert.match(csv.path, /-data\.csv$/);
+    // An image the Python service uploaded is named <16 hex>.png.
+    writeFileSync(join(env.project, '.coderfleet-uploads', '296f9b412d1940f6.png'), Buffer.from(png, 'base64'));
+    assert.equal((await env.get('projects/app/uploads/296f9b412d1940f6.png')).body.data, png);
     await env.post('conversations/' + conversation + '/turns', { prompt: 'files', images: [pdf.path, csv.path] });
     turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'files' && value.status === 'done', 'file turn');
     assert.match(turn.answer, /^images:application\/pdf:\d+:files\[Attached file: \S+-data\.csv\]$/);

@@ -67,7 +67,7 @@ const DEVICE_ROUTES: readonly [string, RegExp][] = [
   ['GET', /^conversations$/], ['GET', /^conversations\/changes$/], ['POST', /^conversations$/], ['PUT', /^conversations\/[\w-]+$/],
   ['GET', /^conversations\/[\w-]+\/(turns|changes|follow-ups)$/], ['POST', /^conversations\/[\w-]+\/(turns|fork)$/],
   ['DELETE', /^conversations\/[\w-]+\/follow-ups\/[\w-]+$/],
-  ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[\w.]+$/],
+  ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[^/]+$/],
   ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
   ['GET', /^system-llm$/], ['POST', /^translate$/],
 ];
@@ -588,7 +588,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       writeFileSync(join(directory, file), data, { mode: 0o644 });
       return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size: data.length };
     }],
-    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}[-.%][^/]*\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) => {
+    // `<16 hex>-<name>.png` (this service) or `<16 hex>.png` (the Python service).
+    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}(?:[-%][^/]*)?\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) => {
       let file = '';
       try { file = decodeURIComponent(encoded as string); } catch { throw new HttpError(400, '无效的文件名'); }
       if (!/^[a-f0-9]{16}[-.][\p{L}\p{N}_.-]*$/u.test(file)) throw new HttpError(400, '无效的文件名');
