@@ -80,6 +80,15 @@ await say('coderfleet', ['请帮我梳理一下服务启动流程', '请修改�
   writeFileSync(join(work, 'src', 'server.ts'), "import { port } from './port.js';\n\nexport async function serve(configPath: string) {\n  const config = readConfig(configPath);\n  return listen(port(), config.host);\n}\n");
   writeFileSync(join(work, 'README.md'), '# coderfleet\n\n把多个 AI 编程账号放进各自的容器里，一起用它们的额度。\n\n- `src/server.ts`：后端入口\n- `docs/`：说明文档\n- 端口：环境变量 `PORT`，默认 8765\n');
 }
+// 定时: one that has run (its conversation carries the clock), a weekly job, and one turned off.
+{
+  const daily = (await env.post('schedules', { projectId: 'coderfleet', prompt: '看看昨天的提交有没有问题，有就列出来', rule: { kind: 'daily', time: '09:00' } })).body;
+  const run = (await env.post('schedules/' + daily.id + '/run')).body;
+  await until(() => lastTurn(env, run.conversationId), turn => turn.status === 'done', 'scheduled run');
+  await env.post('schedules', { projectId: 'reminis-app', prompt: '升级依赖，测试都过了再交给我', rule: { kind: 'weekly', days: [1], time: '10:00' }, job: true });
+  const off = (await env.post('schedules', { projectId: 'coderfleet', prompt: '跑一遍测试，失败了告诉我原因', rule: { kind: 'every', hours: 6 } })).body;
+  await env.put('schedules/' + off.id, { enabled: false });
+}
 await say('coderfleet', ['请运行检查并修复']);
 
 const token = 'synthetic-node-test-token-0000000';

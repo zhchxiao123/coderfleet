@@ -798,15 +798,8 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
   background: var(--sidebar, color-mix(in srgb, var(--panel) 92%, var(--canvas)));
 }
 .platform-darwin .sidebar-top { padding-top: 40px; }
-.workspace-head .sidebar-toggle { margin-left: auto; color: var(--text-3); }
-.workspace-head .sidebar-toggle:hover { color: var(--text); }
 .app.sidebar-hidden { grid-template-columns: 0 1fr; }
 .app.sidebar-hidden .sidebar { visibility: hidden; border-right: 0; }
-.sidebar-reveal { position: fixed; top: 12px; left: 12px; z-index: 5; display: none; gap: 2px; -webkit-app-region: no-drag; }
-.platform-darwin .sidebar-reveal { top: 12px; left: 80px; }
-.app.sidebar-hidden .sidebar-reveal { display: flex; }
-.sidebar-reveal .icon-btn { width: 30px; height: 30px; color: var(--text-2); }
-.sidebar-reveal .icon-btn:hover { background: var(--hover); color: var(--text); }
 /* Room for the reveal buttons (and the macOS window buttons) while the sidebar is hidden. */
 .app.sidebar-hidden .topbar { padding-left: 96px; }
 .platform-darwin .app.sidebar-hidden .topbar { padding-left: 164px; }
@@ -1102,3 +1095,80 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 .criteria-block .criterion { font-size: inherit; }
 .criteria-block .criterion small { font-size: 12.5px; }
 .criteria-title { color: var(--text-3); font-size: 12px; }
+
+/* ── Window bar across the top, icon rail at the far left (like Codex) ── */
+.app { grid-template-columns: 52px 264px 1fr; grid-template-rows: 40px 1fr; background: var(--chrome); --chrome: color-mix(in srgb, var(--sidebar) 94%, var(--text)); }
+.app.no-sidebar { grid-template-columns: 1fr; grid-template-rows: 1fr; background: none; }
+.app.sidebar-hidden { grid-template-columns: 52px 0 1fr; }
+.winbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 2px; padding: 0 10px; min-width: 0; -webkit-app-region: drag; }
+.winbar[hidden] { display: none; }
+.platform-darwin .winbar { padding-left: 84px; }
+.winbar .icon-btn { width: 30px; height: 28px; color: var(--text-2); -webkit-app-region: no-drag; }
+.winbar .icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.winbar .icon-btn:disabled { color: var(--text-3); opacity: 0.45; }
+.winbar .win-back svg { transform: rotate(180deg); }
+.winbar .sidebar-toggle { margin-left: 6px; }
+.rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0 10px; min-height: 0; }
+.rail[hidden] { display: none; }
+.rail-btn {
+  position: relative; width: 36px; height: 36px; border: 0; border-radius: 10px; background: none; color: var(--text-3);
+  display: grid; place-items: center; transition: background 0.12s, color 0.12s;
+}
+.rail-btn:hover { background: var(--hover); color: var(--text); }
+.rail-btn.on { background: color-mix(in srgb, var(--chrome) 90%, var(--text)); color: var(--text); }
+.rail-btn .dot { position: absolute; top: 5px; right: 5px; }
+.rail-space { flex: 1; }
+/* The sidebar and the page form one sheet under the bar, rounded at its top left corner. */
+.sidebar { border-top: 1px solid var(--line); border-left: 1px solid var(--line); border-top-left-radius: 12px; }
+.main { border-top: 1px solid var(--line); background: var(--canvas); min-height: 0; }
+.app.sidebar-hidden .main { border-left: 1px solid var(--line); border-top-left-radius: 12px; overflow: hidden; }
+.app.no-sidebar .main { border: 0; border-radius: 0; }
+/* The window buttons now live in the bar: pages no longer leave room for them. */
+.platform-darwin .sidebar-top { padding-top: 14px; }
+.platform-darwin .page-inner, .app.sidebar-hidden .page-inner { padding-top: 30px; }
+.app.sidebar-hidden .topbar, .platform-darwin .app.sidebar-hidden .topbar { padding-left: 22px; }
+.app.sidebar-hidden .settings-bar, .platform-darwin .app.sidebar-hidden .settings-bar { padding-left: 22px; }
+.sidebar-foot:not(:has(.activity-row)) { display: none; }
+.conv-item .clock-mark { display: grid; color: var(--text-3); flex: none; margin-right: -3px; }
+.conv-item.selected .clock-mark { color: var(--accent); }
+
+/* ── 定时 page ──────────────────────────────────────── */
+.schedule-list { padding: 6px 0; }
+.schedule-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 170px minmax(0, 220px) 40px 30px; gap: 18px; align-items: center;
+  padding: 13px 20px; border-top: 1px solid var(--line);
+}
+.schedule-row.schedule-head { border-top: 0; padding-top: 8px; padding-bottom: 8px; font-size: 12px; color: var(--text-3); }
+.schedule-row strong { display: block; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schedule-row small { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12px; margin-top: 2px; }
+.schedule-row .tag { padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 550; }
+.schedule-row.off .what, .schedule-row.off .when, .schedule-row.off .last { opacity: 0.5; }
+.schedule-row .last, .run-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--text-2); }
+.run-time { white-space: nowrap; color: var(--text-3); }
+.run-text, .run-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.run-link { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; }
+.run-link:hover { text-decoration: underline; }
+.run-text.bad, .run-link.bad { color: var(--red); }
+.run-text.warn, .run-link.warn { color: var(--amber); }
+.schedule-note { margin: 14px 4px 0; color: var(--text-3); font-size: 12px; }
+.schedule-examples { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.run-list { display: grid; }
+.run-row { padding: 9px 0; border-top: 1px solid var(--line); }
+.run-row:first-child { border-top: 0; }
+.run-row .run-time { width: 118px; flex: none; }
+.run-row .run-text, .run-row .run-link { flex: none; max-width: 60%; }
+.run-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+.days { display: flex; gap: 6px; }
+.days button { width: 34px; height: 32px; border: 0; border-radius: 9px; background: var(--fill); color: var(--text-2); font-size: 13px; }
+.days button.on { background: var(--ink); color: var(--ink-text); font-weight: 600; }
+input[type=time], input[type=number] {
+  width: 140px; height: 36px; padding: 0 11px; border-radius: 10px; border: 0; box-shadow: inset 0 0 0 1px var(--line-strong); background: var(--surface); outline: none;
+}
+.field[hidden] { display: none; }
+.sheet-next { margin-right: auto; align-self: center; color: var(--text-2); font-size: 12.5px; }
+.sheet-note { margin: 4px 0 0; color: var(--text-3); font-size: 12px; }
+@media (max-width: 1100px) {
+  .schedule-row { grid-template-columns: minmax(0, 1fr) 150px 40px 30px; }
+  .schedule-row .last, .schedule-head span:nth-child(3) { display: none; }
+}
+.job-origin { display: flex; align-items: center; gap: 6px; }

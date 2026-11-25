@@ -154,6 +154,7 @@
             h('code', { title: '分支 ' + job.branch }, job.branch),
             h('span.job-time', elapsed(job)),
             h('button.icon-btn.job-close', { title: '收起', on: { click: () => controller.toggle(false) } }, CF.icon('x', 12))),
+          CF.findConversation(conversationId)?.schedule ? h('div.job-hint.job-origin', CF.icon('clock', 12), '定时开的：' + CF.findConversation(conversationId).schedule) : null,
           job.state === 'waiting' ? h('div.job-ask',
             h('strong', job.reason === 'stopped' ? '你把它停下了' : job.reason === 'question' ? '有事要你来定' : job.reason === 'checks' ? '改了 ' + (job.round || 3) + ' 轮，还有标准没做到' : job.reason === 'review' ? '改了 ' + (job.round || 3) + ' 轮，核对还是认为要改' : '这一轮出错了'),
             job.error ? h('p', job.error) : null,

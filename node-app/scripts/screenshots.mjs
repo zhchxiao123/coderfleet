@@ -19,9 +19,9 @@ try {
   const errors = globalThis.pageErrors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  // 项目 / 账号 / 通用 are tabs of the settings screen, opened from the backend menu.
-  const openTab = async (tab, menuLabel) => {
-    if (!(await page.$('.settings-tab'))) { await page.click('.backend-row'); await page.click('.menu button:has-text("' + menuLabel + '")'); }
+  // 项目 / 账号 / 通用 are tabs of the settings screen, opened from the rail.
+  const openTab = async tab => {
+    if (!(await page.$('.settings-tab'))) await page.click('.rail-btn[title^="设置"]');
     await page.click('.settings-tab:has-text("' + tab + '")');
   };
   const shot = async name => { await page.waitForTimeout(500); await page.screenshot({ path: join(out, scheme + '-' + name + '.png') }); };
@@ -119,6 +119,30 @@ try {
   await page.waitForSelector('.job-card:not([hidden])');
   await shot('job-wide');
   await page.setViewportSize({ width: 1280, height: 820 });
+  // 定时: the page from the rail, the new sheet, and a conversation the clock opened.
+  await page.click('.rail-btn[title="定时"]');
+  await page.waitForSelector('.schedule-row .switch');
+  await shot('schedules');
+  await page.click('.schedule-row .icon-btn >> nth=0');
+  await page.waitForSelector('.menu');
+  await shot('schedules-menu');
+  await page.click('.menu button:has-text("历次运行")');
+  await page.waitForSelector('.run-row');
+  await shot('schedules-history');
+  await page.keyboard.press('Escape');
+  await page.click('.page-head button:has-text("新建定时")');
+  await page.click('.segmented button:has-text("每周")');
+  await page.waitForSelector('.sheet-next:has-text("下次")');
+  await shot('schedules-new');
+  await page.keyboard.press('Escape');
+  await page.click('.schedule-row .run-link >> nth=0');
+  await page.waitForSelector('.job-divider:has-text("定时")');
+  await shot('schedules-conversation');
+  await page.click('.rail-btn[title="定时"]');
+  await page.waitForSelector('.schedule-row .switch');
+  await page.click('.sidebar-toggle');
+  await shot('schedules-sidebar-hidden');
+  await page.click('.sidebar-toggle');
   await openTab('项目', '项目');
   await page.waitForSelector('.row');
   await shot('projects');

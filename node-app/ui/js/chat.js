@@ -601,6 +601,7 @@
           source ? h('button.btn.ghost.small', { on: { click: () => CF.app.go({ name: 'chat', conversationId: source.id, projectId: source.projectId }) } }, '查看原对话') : null);
       };
       let bannerNode = null;
+      let scheduleNode = null;
       let dividerNode = null;
       // The conversation map at the left edge (like Codex): one dash per turn, the one in view
       // darker; hover shows the question and the start of the reply; click jumps there.
@@ -698,6 +699,9 @@
         if (!current.turns.length) { if (!welcome.isConnected) transcript.replaceWith(welcome); return; }
         if (welcome.isConnected) welcome.replaceWith(transcript);
         if (!bannerNode) { bannerNode = forkBanner(); if (bannerNode) inner.prepend(bannerNode); }
+        // A conversation the clock opened says so at its top.
+        const schedule = CF.findConversation(current.conversationId)?.schedule;
+        if (schedule && !scheduleNode) { scheduleNode = h('div.job-divider', h('span', h('b', '定时'), schedule + ' · 到点自动开始')); inner.prepend(scheduleNode); }
         const atBottom = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 40;
         for (const turn of current.turns) {
           const existing = nodes.get(turn.id);

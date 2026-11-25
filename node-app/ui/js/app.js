@@ -1,8 +1,10 @@
 'use strict';
-// App shell: backend connection, sidebar, routing and periodic refresh.
+// App shell: backend connection, window bar, icon rail, sidebar, routing and periodic refresh.
 (() => {
   const CF = window.CF;
   const { h } = CF;
+  const winbar = document.getElementById('winbar');
+  const rail = document.getElementById('rail');
   const sidebar = document.getElementById('sidebar');
   const main = document.getElementById('main');
   const expanded = new Set();
@@ -13,6 +15,24 @@
   };
   const restore = () => {
     try { return JSON.parse(localStorage.getItem('cf.view') || 'null'); } catch { return null; }
+  };
+
+  // Pages visited in this window, for the back and forward buttons in the window bar.
+  const trail = [];
+  let trailAt = -1;
+  const reachable = view => view.name !== 'chat' || !view.conversationId
+    || CF.state.conversations.some(item => item.id === view.conversationId)
+    || (CF.state.archived || []).some(item => item.id === view.conversationId);
+  /** The nearest page in that direction that still exists (a deleted conversation is passed over). */
+  const trailTarget = step => {
+    for (let index = trailAt + step; index >= 0 && index < trail.length; index += step) if (reachable(trail[index])) return index;
+    return -1;
+  };
+  const travel = step => {
+    const index = trailTarget(step);
+    if (index < 0) return;
+    trailAt = index;
+    CF.app.go(trail[index], true);
   };
 
   CF.app = {
@@ -26,8 +46,13 @@
     rerender() { renderSidebar(); if (['projects'].includes(CF.state.view.name)) renderMain(); },
     isLocal: () => CF.state.profiles.find(item => item.id === CF.state.backendId)?.kind === 'local',
 
-    go(view) {
+    go(view, fromTrail = false) {
       if (CF.state.view.name === 'chat' && view.name !== 'chat') CF.chat.stop();
+      if (!fromTrail && JSON.stringify(trail[trailAt]) !== JSON.stringify(view)) {
+        trail.splice(trailAt + 1, Infinity, view);
+        if (trail.length > 50) trail.shift();
+        trailAt = trail.length - 1;
+      }
       CF.state.view = view;
       remember(view);
       renderSidebar();
@@ -86,6 +111,9 @@
     CF.state.connected = false;
     localStorage.setItem('cf.backend', id);
     sidebar.hidden = false;
+    rail.hidden = false;
+    winbar.hidden = false;
+    trail.length = 0; trailAt = -1;
     document.getElementById('app').classList.remove('no-sidebar');
     renderSidebar();
     main.replaceChildren(h('div.welcome', h('div.welcome-card', h('div.spinner', { style: 'margin:0 auto 14px;width:20px;height:20px' }), h('p', '正在连接后端…'))));
@@ -129,6 +157,8 @@
 
   function showWelcome() {
     sidebar.hidden = true;
+    rail.hidden = true;
+    winbar.hidden = true;
     document.getElementById('app').classList.add('no-sidebar');
     const remote = h('div.welcome-remote', { hidden: true });
     const name = h('input', { placeholder: '名称，例如 Linux 工作机' });
@@ -189,12 +219,7 @@
   };
   const sidebarOpen = () => !appNode.classList.contains('sidebar-hidden');
   try { if (localStorage.getItem('cf.sidebarHidden') === '1') appNode.classList.add('sidebar-hidden'); } catch { /* storage unavailable */ }
-  // Shown at the top left while the sidebar is hidden: reopen it, or start a new chat.
-  const reveal = h('div.sidebar-reveal',
-    h('button.icon-btn', { title: '显示侧边栏（' + (CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+') + '\\）', on: { click: () => setSidebar(true) } }, CF.icon('sidebar', 16)),
-    h('button.icon-btn', { title: '新对话', on: { click: () => sidebar.querySelector('.new-chat')?.click() } }, CF.icon('compose', 16)));
-  appNode.append(reveal);
-  CF.app.toggleSidebar = () => setSidebar(!sidebarOpen());
+  CF.app.toggleSidebar = () => { setSidebar(!sidebarOpen()); renderWinbar(); };
   document.addEventListener('keydown', event => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
@@ -232,7 +257,8 @@
         click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }),
         contextmenu: event => { event.preventDefault(); CF.menu(node, CF.conversationMenu(item)); },
       },
-    }, sub ? h('span.lines', h('span.title', item.name), h('span.sub', sub)) : h('span.title', item.name), conversationMeta(item), more);
+    }, item.schedule ? h('span.clock-mark', { title: '定时开的：' + item.schedule }, CF.icon('clock', 13)) : null,
+      sub ? h('span.lines', h('span.title', item.name), h('span.sub', sub)) : h('span.title', item.name), conversationMeta(item), more);
     return node;
   }
 
@@ -340,11 +366,56 @@
       : h('div.sidebar-empty', filter ? '没有匹配的对话。' : connected ? '添加 Claude、Codex 或 Antigravity 项目后，在这里开始对话。' : '连接后端后显示对话。'));
   }
 
-  function renderSidebar() {
-    if (!CF.state.backendId) return;
-    const { view, profiles, backendId, projects, accounts, conversations, connected } = CF.state;
+  /**
+   * The strip across the top of the window (like Codex): the macOS window buttons sit at its
+   * left, then back, forward and the sidebar switch. The rest of it drags the window.
+   */
+  function renderWinbar() {
+    const mod = CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+';
+    const button = (cls, icon, title, run, disabled) => h('button.icon-btn' + cls, { title, 'aria-label': title, disabled: disabled || null, on: { click: run } }, CF.icon(icon, 16));
+    winbar.replaceChildren(
+      button('.win-back', 'chevron', '后退', () => travel(-1), trailTarget(-1) < 0),
+      button('.win-forward', 'chevron', '前进', () => travel(1), trailTarget(1) < 0),
+      button('.sidebar-toggle', 'sidebar', (sidebarOpen() ? '隐藏' : '显示') + '侧边栏（' + mod + '\\）', () => CF.app.toggleSidebar()),
+      sidebarOpen() ? null : button('.win-new', 'compose', '新对话', () => sidebar.querySelector('.new-chat')?.click()),
+    );
+  }
+
+  /**
+   * The icon rail at the far left (like Codex): 对话 and 定时 at the top, 设置 and the
+   * backend at the bottom. The sidebar next to it always lists conversations.
+   */
+  function renderRail() {
+    const { view, profiles, backendId, projects, connected } = CF.state;
     const current = profiles.find(item => item.id === backendId);
     const running = projects.filter(item => item.state === 'running').length;
+    const kindText = profile => profile.kind === 'local' ? '这台电脑' : profile.kind === 'ssh' ? 'SSH · ' + profile.host : '远端';
+    const item = (icon, label, active, run) => h('button.rail-btn' + (active ? '.on' : ''), {
+      title: label, 'aria-label': label, 'aria-current': active ? 'page' : null, on: { click: run },
+    }, CF.icon(icon, 18));
+    const backendButton = item('device', (current?.name || '未连接') + (connected && current ? ' · ' + kindText(current) + ' · ' + running + ' 个容器运行中' : ' · 未连接') + '（点击切换后端）', false,
+      () => CF.menu(backendButton, [
+        ...profiles.map(profile => ({ label: profile.name, hint: kindText(profile), avatar: (profile.name || '?').slice(0, 1), checked: profile.id === backendId,
+          run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
+        '-',
+        { label: '通过 SSH 添加后端…', icon: 'plus', run: async () => { const result = await CF.addSshBackend(); if (result?.id) await CF.app.loadProfiles(result.id); } },
+      ]));
+    if (!connected) backendButton.append(h('span.dot.failed'));
+    rail.replaceChildren(
+      item('home', '对话', view.name === 'chat', () => { if (view.name !== 'chat') CF.app.closeSettings(); }),
+      item('clock', '定时', view.name === 'schedules', () => CF.app.go({ name: 'schedules' })),
+      h('span.rail-space'),
+      item('sliders', '设置（' + (CF.transport?.platform === 'darwin' ? '⌘,' : 'Ctrl+,') + '）', SETTINGS_TABS.some(([name]) => name === view.name),
+        () => { if (!SETTINGS_TABS.some(([name]) => name === view.name)) CF.app.go({ name: 'projects' }); }),
+      backendButton,
+    );
+  }
+
+  function renderSidebar() {
+    if (!CF.state.backendId) return;
+    const { view, conversations } = CF.state;
+    renderWinbar();
+    renderRail();
     const waiting = conversations.filter(item => item.attention);
     const attention = waiting.length ? h('button.attention-row', {
       title: waiting.map(item => item.name).join('\n'),
@@ -362,19 +433,6 @@
       if (!target) { CF.app.go({ name: 'projects' }); CF.toast('先新建一个项目'); return; }
       CF.app.go({ name: 'chat', projectId: target.id });
     } } }, CF.icon('compose', 15), h('span.label', '新对话'));
-    const kindText = profile => profile.kind === 'local' ? '这台电脑' : profile.kind === 'ssh' ? 'SSH · ' + profile.host : '远端';
-    const backendButton = h('button.backend-row', { title: '切换后端', on: { click: () => CF.menu(backendButton, [
-      ...profiles.map(profile => ({ label: profile.name, hint: kindText(profile), avatar: (profile.name || '?').slice(0, 1), checked: profile.id === backendId,
-        run: () => { if (profile.id !== backendId) void connect(profile.id); } })),
-      '-',
-      { label: '通过 SSH 添加后端…', icon: 'plus', run: async () => { const result = await CF.addSshBackend(); if (result?.id) await CF.app.loadProfiles(result.id); } },
-      '-',
-      { label: '项目', trail: connected ? String(projects.length) : '', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
-      { label: '账号', trail: connected ? String(accounts.length) : '', icon: 'user', run: () => CF.app.go({ name: 'accounts' }) },
-      { label: '设置', trail: CF.transport?.platform === 'darwin' ? '⌘,' : 'Ctrl+,', icon: 'gear', run: () => CF.app.go({ name: 'settings' }) },
-    ], { matchWidth: true }) } }, h('span.backend-avatar', (current?.name || '?').slice(0, 1)),
-      h('span.names', h('strong', current?.name || '未连接'), h('small', connected ? (current?.kind === 'local' ? '这台电脑' : current?.kind === 'ssh' ? '远程 · ' + current.host : '远端') + ' · ' + running + ' 个容器运行中' : '未连接')),
-      CF.icon('down', 13));
     renderConversations();
     // Re-rendering must not interrupt typing in the search field.
     const typing = document.activeElement === search ? [search.selectionStart, search.selectionEnd] : null;
@@ -382,21 +440,20 @@
     const scrollTop = sidebar.querySelector('.sidebar-scroll')?.scrollTop ?? 0;
     sidebar.replaceChildren(
       h('div.sidebar-top',
-        h('div.workspace-head', CF.brandMark(), h('div.names', h('strong', 'CoderFleet')),
-          h('button.icon-btn.sidebar-toggle', { title: '隐藏侧边栏（' + (CF.transport?.platform === 'darwin' ? '⌘' : 'Ctrl+') + '\\）', on: { click: () => CF.app.toggleSidebar() } }, CF.icon('sidebar', 16))),
+        h('div.workspace-head', CF.brandMark(), h('div.names', h('strong', 'CoderFleet'))),
         newChat,
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),
       attention,
       h('div.sidebar-scroll',
         conversationsHost),
-      h('div.sidebar-foot', activityHost, backendButton),
+      h('div.sidebar-foot', activityHost),
     );
     const scroller = sidebar.querySelector('.sidebar-scroll');
     if (scroller) scroller.scrollTop = scrollTop;
     if (typing) { search.focus(); search.setSelectionRange(typing[0], typing[1]); }
   }
 
-  // 项目, 账号 and the rest are tabs of one 设置 screen, opened from the backend menu (or ⌘,).
+  // 项目, 账号 and the rest are tabs of one 设置 screen, opened from the rail (or ⌘,).
   const SETTINGS_TABS = [['projects', '项目', 'folder'], ['accounts', '账号', 'user'], ['settings', '通用', 'gear']];
   const settingsBar = active => h('div.settings-bar',
     h('button.btn.ghost.small.settings-back', { title: '返回对话（Esc）', on: { click: () => CF.app.closeSettings() } }, CF.icon('chevron', 13), '返回'),
@@ -409,16 +466,18 @@
     if (!connected && view.name !== 'settings') return;
     if (view.name === 'chat') CF.state.lastChat = view;
     const container = h('div.view');
-    main.replaceChildren(...(view.name === 'chat' ? [] : [settingsBar(view.name)]), container);
+    main.replaceChildren(...(SETTINGS_TABS.some(([name]) => name === view.name) ? [settingsBar(view.name)] : []), container);
     if (view.name === 'chat') CF.chat.mount(container, view);
     else if (view.name === 'projects') CF.projects.mount(container);
     else if (view.name === 'accounts') CF.accounts.mount(container);
     else if (view.name === 'settings') void CF.settings.mount(container);
+    else if (view.name === 'schedules') CF.schedules.mount(container);
   }
 
   // Container states and conversation status dots stay current while the App is visible.
   setInterval(() => {
     if (document.hidden || !CF.state.connected) return;
+    if (CF.state.view.name === 'schedules') void CF.schedules.refresh();
     void CF.get('projects').then(projects => {
       const changed = JSON.stringify(projects) !== JSON.stringify(CF.state.projects);
       CF.state.projects = projects;

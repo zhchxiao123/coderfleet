@@ -14,6 +14,7 @@ import { FollowUps, type FollowUp } from './follow-ups.js';
 import { CHECK_ROUNDS, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
+import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
 import { Titles } from './titles.js';
 import { FileAccessError, listFiles, previewFile, rawFile } from './files.js';
@@ -121,6 +122,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const turnsOf = (conversationId: string): Turn[] => store.turns(conversationId);
   const followUps = new FollowUps(config.stateDirectory);
   const jobs = new Jobs(config.stateDirectory, config.dockerPath);
+  const schedules = new Schedules(config.stateDirectory);
+  schedules.recover();
   /** The conversation list (desktop and phone change feed). */
   const conversationList = (archived = false) => {
     // Like the Python service (Conversation.touch at a task's start and end): a conversation's time is
@@ -142,13 +145,16 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       });
     }
     const jobStates = new Map(jobs.list().map(job => [job.conversationId, job.state]));
+    const origins = schedules.origins();
     return store.conversations({ archived }).map(item => {
       const summary = summaries.get(item.id);
       return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
         forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
         updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false,
         // 做完为止: the state of the job this conversation works on ('' when it has none).
-        job: jobStates.get(item.id) ?? '' };
+        job: jobStates.get(item.id) ?? '',
+        // 定时: the rule of the schedule that started this conversation ('' when the user did).
+        schedule: origins[item.id] ?? '' };
     }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   };
   const conversationTurns = (id: string): Record<string, unknown>[] => {
@@ -401,6 +407,109 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     } finally { draining = false; }
   };
 
+  const newConversation = (target: WorkspaceProject, name: string): Conversation => {
+    const conversation = { id: randomUUID().replaceAll('-', '').slice(0, 12), projectId: target.name, name: name.trim().slice(0, 100) || '新对话',
+      createdAt: new Date().toISOString(), account: target.account.name, type: target.account.type, project: target.path, nativeSessionId: '' };
+    store.saveConversation(conversation);
+    return conversation;
+  };
+  /** 做完为止: opens a worktree and branch for the conversation and starts its first turn there. */
+  const startJob = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
+    const target = project(conversation.projectId);
+    const support = await jobs.support(target);
+    if (!support.supported) throw new HttpError(409, '这个项目用不了「做完为止」：' + support.reason);
+    await jobCall(() => jobs.start(target, conversation.id, randomUUID().replaceAll('-', '').slice(0, 8), input.text || '图片'));
+    try { return await startTurn(conversation, input, { jobStart: true }); }
+    catch (error) {
+      const job = jobs.get(conversation.id);
+      if (job) { await jobs.discard(target, job).catch(() => undefined); jobs.forget(conversation.id); }
+      throw error;
+    }
+  };
+
+  // 定时
+  /** Whether the item's latest run is still going: starting, a turn running or queued, or its job working. */
+  const scheduleBusy = (item: Schedule): boolean => {
+    const last = item.runs.findLast(run => run.result === 'starting' || run.conversationId);
+    if (!last) return false;
+    if (last.result === 'starting') return true;
+    const id = last.conversationId as string;
+    return turnsOf(id).some(turn => active(turn) || turn.status === 'queued') || followUps.list(id).length > 0 || jobs.get(id)?.state === 'working';
+  };
+  /** A stopped container is started for the run; a run never waits more than three minutes for it. */
+  const containerFor = async (target: WorkspaceProject): Promise<void> => {
+    try { await assertContainer(config.dockerPath, target); return; } catch { /* started below */ }
+    const operation = lifecycle.startProject(target.name);
+    const deadline = Date.now() + 180_000;
+    while (operation.status === 'running' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 500));
+    if (operation.status !== 'succeeded') throw new Error('容器没有启动起来' + (operation.error ? '：' + operation.error : ''));
+    await assertContainer(config.dockerPath, target);
+  };
+  /** Starts a run claimed as `at`: a new conversation with the prompt as its first message, tools not asked for. */
+  const runSchedule = async (id: string, at: string): Promise<void> => {
+    const item = schedules.get(id);
+    if (!item) return;
+    let conversation: Conversation | undefined;
+    try {
+      const target = chatProject(item.projectId);
+      if (!target) throw new Error('项目不存在或不支持对话');
+      await containerFor(target);
+      conversation = newConversation(target, '');
+      const input = { text: item.prompt, images: [], auto: true, model: '' };
+      if (item.job) await startJob(conversation, input); else await startTurn(conversation, input);
+      schedules.finish(id, at, { result: 'started', conversationId: conversation.id });
+    } catch (error) {
+      // A turn that exists shows what went wrong in its conversation; before that, nothing is left behind.
+      if (conversation && turnsOf(conversation.id).length) { schedules.finish(id, at, { result: 'started', conversationId: conversation.id }); return; }
+      if (conversation) store.deleteConversation(conversation.id);
+      schedules.finish(id, at, { result: 'failed', note: message(error) });
+      console.error('Schedule not started:', id, message(error));
+    }
+  };
+  const tickSchedules = (): void => {
+    for (const due of schedules.claimDue(new Date(), scheduleBusy)) void runSchedule(due.id, due.at);
+  };
+  /** A run with what became of it: its conversation's name, latest turn and job. */
+  const runView = (run: Run): Record<string, unknown> => {
+    if (!run.conversationId) return { ...run };
+    const conversation = store.conversation(run.conversationId);
+    if (!conversation) return { ...run, gone: true };
+    const last = turnsOf(conversation.id).at(-1);
+    return { ...run, name: conversation.name, status: last?.status ?? '', error: last?.error ?? '', job: jobs.get(conversation.id)?.state ?? '' };
+  };
+  const scheduleView = (item: Schedule, all = false): Record<string, unknown> => {
+    const { runs, ...rest } = item;
+    const last = runs.at(-1);
+    return { ...rest, label: ruleLabel(item.rule), busy: scheduleBusy(item), last: last ? runView(last) : null,
+      ...(all ? { runs: runs.map(runView).reverse() } : {}) };
+  };
+  const scheduleOf = (id: string | undefined): Schedule => {
+    const item = schedules.get(identifier(id));
+    if (!item) throw new HttpError(404, '这个定时不存在');
+    return item;
+  };
+  /** The fields of a create or change request that are present, validated. */
+  const scheduleInput = (input: Record<string, unknown>): { projectId?: string; prompt?: string; rule?: Schedule['rule']; job?: boolean; enabled?: boolean } => {
+    const result: { projectId?: string; prompt?: string; rule?: Schedule['rule']; job?: boolean; enabled?: boolean } = {};
+    if (input.projectId !== undefined) {
+      const target = chatProject(text(input.projectId));
+      if (!target) throw new HttpError(404, '项目不存在或不支持对话');
+      result.projectId = target.name;
+    }
+    if (input.prompt !== undefined) {
+      const prompt = text(input.prompt).trim();
+      if (!prompt || prompt.length > 60_000) throw new HttpError(400, '写上要做的事');
+      result.prompt = prompt;
+    }
+    if (input.rule !== undefined) {
+      try { result.rule = parseRule(input.rule); }
+      catch (error) { throw new HttpError(400, error instanceof ScheduleError ? error.message : '不认识的时间规则'); }
+    }
+    if (typeof input.job === 'boolean') result.job = input.job;
+    if (typeof input.enabled === 'boolean') result.enabled = input.enabled;
+    return result;
+  };
+
   const UPLOAD_TYPES: Readonly<Record<string, string>> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
   // <16 hex>-<name> (or the older <16 hex>.<ext>); only characters the Python service also accepts.
   const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}[-.][\p{L}\p{N}_.-]{0,120}$/u;
@@ -629,10 +738,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const input = await body(request);
       const target = chatProject(text(input.projectId));
       if (!target) throw new HttpError(404, '项目不存在或不支持对话');
-      const conversation = { id: randomUUID().replaceAll('-', '').slice(0, 12), projectId: target.name, name: text(input.name).trim().slice(0, 100) || '新对话',
-        createdAt: new Date().toISOString(), account: target.account.name, type: target.account.type, project: target.path, nativeSessionId: '' };
-      store.saveConversation(conversation);
-      return conversation;
+      return newConversation(target, text(input.name));
     }],
     ['PUT', /^conversations\/([\w-]+)$/, async (request, [id]) => {
       const conversation = store.conversation(identifier(id));
@@ -743,16 +849,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       // new or already going (its agent session is resumed there).
       if (input.job === true && !jobs.get(conversation.id)) {
         if (running) throw new HttpError(409, '等这一轮结束，再开「做完为止」');
-        const target = project(conversation.projectId);
-        const support = await jobs.support(target);
-        if (!support.supported) throw new HttpError(409, '这个项目用不了「做完为止」：' + support.reason);
-        await jobCall(() => jobs.start(target, conversation.id, randomUUID().replaceAll('-', '').slice(0, 8), prompt || '图片'));
-        try { return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_, { jobStart: true })) }; }
-        catch (error) {
-          const job = jobs.get(conversation.id);
-          if (job) { await jobs.discard(target, job).catch(() => undefined); jobs.forget(conversation.id); }
-          throw error;
-        }
+        return { delivered: 'turn', turn: publicTurn(await startJob(conversation, message_)) };
       }
       if (!running) return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_)) };
       // A reviewer's turn takes no messages: what the user says waits for the author.
@@ -784,6 +881,37 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       try { await assertContainer(config.dockerPath, target); }
       catch (error) { throw new HttpError(409, message(error)); }
       return { job: await jobCall(() => action === 'accept' ? jobs.accept(target, job) : jobs.discard(target, job)) };
+    }],
+    // 定时: things started by the clock, each run in a new conversation (main token only).
+    ['GET', /^schedules$/, async () => schedules.list().map(item => scheduleView(item))],
+    ['GET', /^schedules\/([\w-]+)$/, async (_request, [id]) => scheduleView(scheduleOf(id), true)],
+    // How a rule reads and when it next falls, before it is saved (the sheet's 下次 line).
+    ['POST', /^schedules\/preview$/, async request => {
+      const { rule } = scheduleInput({ rule: (await body(request)).rule });
+      if (!rule) throw new HttpError(400, '不认识的时间规则');
+      return { label: ruleLabel(rule), nextAt: nextAfter(rule, new Date()).toISOString() };
+    }],
+    ['POST', /^schedules$/, async request => {
+      const input = scheduleInput(await body(request));
+      if (!input.projectId || !input.prompt || !input.rule) throw new HttpError(400, '要有项目、要做的事和时间');
+      return scheduleView(schedules.create({ projectId: input.projectId, prompt: input.prompt, rule: input.rule, job: input.job === true }));
+    }],
+    ['PUT', /^schedules\/([\w-]+)$/, async (request, [id]) => {
+      const changed = schedules.change(scheduleOf(id).id, scheduleInput(await body(request)));
+      if (!changed) throw new HttpError(404, '这个定时不存在');
+      return scheduleView(changed);
+    }],
+    ['DELETE', /^schedules\/([\w-]+)$/, async (_request, [id]) => { schedules.remove(scheduleOf(id).id); return { removed: true }; }],
+    // 立即跑一次: starts a run now; the next time by the clock stays as it is.
+    ['POST', /^schedules\/([\w-]+)\/run$/, async (_request, [id]) => {
+      const item = scheduleOf(id);
+      if (scheduleBusy(item)) throw new HttpError(409, '上一次还在做，等它结束再跑');
+      const at = schedules.begin(item.id);
+      if (!at) throw new HttpError(404, '这个定时不存在');
+      await runSchedule(item.id, at);
+      const run = schedules.get(item.id)?.runs.find(entry => entry.at === at);
+      if (run?.result !== 'started') throw new HttpError(409, '没有跑起来：' + (run?.note ?? ''));
+      return { conversationId: run.conversationId, schedule: scheduleView(scheduleOf(id)) };
     }],
     ['GET', /^conversations\/([\w-]+)\/follow-ups$/, async (_request, [id]) => followUps.list(identifier(id))],
     ['DELETE', /^conversations\/([\w-]+)\/follow-ups\/([\w-]+)$/, async (_request, [id, item]) => {
@@ -881,7 +1009,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         const match = pattern.exec(path);
         if (!match || method !== request.method) continue;
         const result = await handler(request, match.slice(1), url);
-        reply(response, request.method === 'POST' && /^(accounts|projects|conversations)$/.test(path) ? 201 : 200, result);
+        reply(response, request.method === 'POST' && /^(accounts|projects|conversations|schedules)$/.test(path) ? 201 : 200, result);
         return;
       }
       throw new HttpError(404, 'Unknown API endpoint');
@@ -898,10 +1026,15 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   // Follows every active turn; after a restart this resumes from the saved log offsets.
   let titlesTicked = 0;
   let jobsSettled = 0;
+  let schedulesTicked = 0;
   const timer = setInterval(() => {
     for (const turn of store.liveTurns()) if (active(turn)) void runner.tick(turn);
     void drainFollowUps();
     if (Date.now() - jobsSettled > 2_000) { jobsSettled = Date.now(); settleJobs(); }
+    if (Date.now() - schedulesTicked > 5_000) {
+      schedulesTicked = Date.now();
+      try { tickSchedules(); } catch (error) { console.error('Schedules not checked:', message(error)); }
+    }
     if (Date.now() - titlesTicked > 1_000) { titlesTicked = Date.now(); titles.tick(); }
   }, 250);
   timer.unref();
