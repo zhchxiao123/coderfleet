@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, type IpcMainInvokeEvent } from 'electron';
 import { findBundle, freePort, install, probe, Tunnel, validateTarget, type SshTarget } from './remote.js';
 import { atomicJSON, LOCAL_HOSTS, localUrl, message, readConfig, record, text } from './state.js';
 import { BUILD_ID } from './version.js';
@@ -333,7 +333,7 @@ function register(): void {
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1280, height: 840, minWidth: 900, minHeight: 600, title: 'CoderFleet',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', backgroundColor: '#f6f5f2', icon: appIcon,
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#ffffff', icon: appIcon,
     webPreferences: {
       sandbox: true, contextIsolation: true, nodeIntegration: false,
       preload: fileURLToPath(new URL('../ui/preload.cjs', import.meta.url)),
