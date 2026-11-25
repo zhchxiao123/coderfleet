@@ -1,0 +1,7 @@
+tool calls: ['ToolSearch', 'mcp__mac__host_info', 'mcp__mac__run_command', 'mcp__mac__screenshot', 'mcp__mac__run_command']
+SYSTEM=Linux
+UNAME=Linux aarch64
+CODE=476561
+BURN=deny
+expected CODE: 476561
+RESULT: PASS

@@ -1,0 +1,9 @@
+{"ts": "2026-11-25T01:41:54-0800", "task_id": "check-task", "tool": "run_command", "argv": ["uname", "-s"], "verdict": "allow", "rule": "^(uname|sw_vers|hostname|date|echo|ls|system_profiler SPUSBDataType)\\b", "exit_code": 0, "seconds": 0.0}
+{"ts": "2026-11-25T01:41:54-0800", "task_id": "check-task", "tool": "run_command", "argv": ["espefuse", "burn-efuse", "DIS_DOWNLOAD_MODE", "1"], "verdict": "deny", "rule": "\\bespefuse(\\.py)?\\b.*\\b(burn|write-protect|read-protect)"}
+{"ts": "2026-11-25T01:41:54-0800", "task_id": "check-task", "tool": "run_command", "argv": ["esptool", "write-flash", "0x0", "merged.bin"], "verdict": "deny-unconfirmed", "rule": "\\bwrite[-_]flash\\b"}
+{"ts": "2026-11-25T01:41:54-0800", "task_id": "check-task", "tool": "run_command", "argv": ["cat", "/etc/passwd"], "verdict": "deny", "rule": "(no rule matched)"}
+{"ts": "2026-11-25T01:41:54-0800", "task_id": "check-task", "tool": "screenshot", "kind": "synthetic", "bytes": 9157}
+{"ts": "2026-11-25T01:42:04-0800", "task_id": "78805de3cdb4", "tool": "host_info"}
+{"ts": "2026-11-25T01:42:06-0800", "task_id": "78805de3cdb4", "tool": "run_command", "argv": ["uname", "-sm"], "verdict": "allow", "rule": "^(uname|sw_vers|hostname|date|echo|ls|system_profiler SPUSBDataType)\\b", "exit_code": 0, "seconds": 0.0}
+{"ts": "2026-11-25T01:42:07-0800", "task_id": "78805de3cdb4", "tool": "screenshot", "kind": "synthetic", "bytes": 9157}
+{"ts": "2026-11-25T01:42:10-0800", "task_id": "78805de3cdb4", "tool": "run_command", "argv": ["espefuse", "burn-efuse", "DIS_DOWNLOAD_MODE", "1"], "verdict": "deny", "rule": "\\bespefuse(\\.py)?\\b.*\\b(burn|write-protect|read-protect)"}

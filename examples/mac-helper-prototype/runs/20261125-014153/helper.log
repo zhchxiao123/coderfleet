@@ -1,0 +1,19 @@
+StreamableHTTP session manager started
+Created new transport with session ID: dec8ccdb6c814c2b897c4cf1d7df42bf
+Processing request of type ListToolsRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+Terminating session: dec8ccdb6c814c2b897c4cf1d7df42bf
+Created new transport with session ID: 71c49dc5f76b4fbb98c8b32a8df80137
+Created new transport with session ID: 3a227ed7083e4699a84d2332e5e6cf03
+Processing request of type ListToolsRequest
+Processing request of type ListPromptsRequest
+Processing request of type ListResourcesRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+Processing request of type CallToolRequest
+StreamableHTTP session manager shutting down

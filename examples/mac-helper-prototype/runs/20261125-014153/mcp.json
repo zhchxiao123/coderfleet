@@ -1,0 +1,2 @@
+{"mcpServers": {"mac": {"type": "http", "url": "${MAC_HELPER_URL}",
+  "headers": {"Authorization": "Bearer ${MAC_HELPER_TOKEN}", "X-CoderFleet-Task-Id": "${CODERFLEET_TASK_ID:-demo}"}}}}
