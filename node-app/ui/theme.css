@@ -751,6 +751,14 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .recent-group { display: block; min-width: 0; margin-bottom: 4px; }
 .recent-group.collapsed .chev { transform: rotate(-90deg); }
 .recent-head .name { color: var(--text-2); }
+.recent-head .count { margin-left: auto; }
+.project-group-head .count { margin-left: 4px; }
+/* A folded project's last-used time sits at the right edge; the buttons take its place on hover. */
+.project-group-head:not(:hover):not(:focus-within) .add { display: none; }
+.project-group-head:hover .count, .project-group-head:focus-within .count { display: none; }
+.recent-head .count { display: inline !important; }
+.older-projects { padding-left: 8px; }
+.project-group.older .project-group-head { color: var(--text-2); font-weight: 500; }
 .conv-item.recent { height: 44px; }
 .conv-item.recent .lines { flex: 1; min-width: 0; display: grid; gap: 1px; line-height: 1.3; }
 .conv-item.recent .title, .conv-item.recent .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

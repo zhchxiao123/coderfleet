@@ -209,57 +209,106 @@
     return h('span.meta', { title: CF.fullTime(item.updatedAt) }, CF.shortTime(item.updatedAt));
   }
 
+  const DAY = 86_400_000;
+  /** Projects the user opened or folded by hand (the defaults depend on pinning and age). */
+  const opened = new Set();
+
+  function conversationButton(item, extra = '', sub = null) {
+    const { view } = CF.state;
+    return h('button.conv-item' + extra + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
+      title: item.name + ' · ' + CF.fullTime(item.updatedAt), on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
+    }, sub ? h('span.lines', h('span.title', item.name), h('span.sub', sub)) : h('span.title', item.name), conversationMeta(item));
+  }
+
+  /**
+   * The sidebar (A+B): 进行中 and 最近 (today and yesterday, at most 5) follow
+   * time; below, projects: pinned ones open, ones used in the last 30 days one
+   * row each (open on click), older ones folded into 更早的项目. Search shows all.
+   */
   function renderConversations() {
     const { view, projects, conversations, connected } = CF.state;
     const chatProjects = CF.pins.sort(projects.filter(item => item.chat && item.active));
-    const groups = chatProjects.flatMap(project => {
+    const visible = conversations.filter(item => chatProjects.some(project => project.id === item.projectId));
+    const projectName = id => projects.find(project => project.id === id)?.name || id;
+    const lastUsed = new Map();
+    for (const item of visible) {
+      const time = Date.parse(item.updatedAt) || 0;
+      if (time > (lastUsed.get(item.projectId) ?? 0)) lastUsed.set(item.projectId, time);
+    }
+    const selectedProject = view.name === 'chat' ? view.projectId : '';
+
+    const group = (project, kind) => {
       const all = conversations.filter(item => item.projectId === project.id);
       const items = filter ? all.filter(item => item.name.toLowerCase().includes(filter)) : all;
-      if (filter && !items.length) return [];
-      const folded = collapsed.has(project.id) && !filter;
+      if (filter && !items.length) return null;
+      const pinned = CF.pins.has(project.id);
+      const openByDefault = pinned || project.id === selectedProject;
+      const folded = !filter && (collapsed.has(project.id) || (!openByDefault && !opened.has(project.id)));
       const showAll = expanded.has(project.id) || Boolean(filter);
       const shown = showAll ? items : items.slice(0, 6);
       const add = h('button.icon-btn.add', { title: '在 ' + project.name + ' 新建对话', on: { click: event => { event.stopPropagation(); CF.app.go({ name: 'chat', projectId: project.id }); } } }, CF.icon('plus', 14));
-      const pinned = CF.pins.has(project.id);
       const menuItems = () => [
         { label: pinned ? '取消置顶' : '置顶项目', icon: 'pin', run: () => CF.togglePin(project.id) },
         { label: '新对话', icon: 'compose', run: () => CF.app.go({ name: 'chat', projectId: project.id }) },
         { label: '查看项目', icon: 'folder', run: () => CF.app.go({ name: 'projects' }) },
       ];
       const more = h('button.icon-btn.add.group-more', { title: '更多', on: { click: event => { event.stopPropagation(); CF.menu(more, menuItems()); } } }, CF.icon('more', 14));
+      const used = lastUsed.get(project.id);
       const head = h('div.project-group-head' + (pinned ? '.pinned' : ''), {
-        role: 'button', tabIndex: 0, title: project.name + ' · ' + project.typeLabel + ' · ' + CF.stateText(project.state) + (pinned ? ' · 已置顶' : ''),
+        role: 'button', tabIndex: 0, 'aria-expanded': String(!folded),
+        title: project.name + ' · ' + project.typeLabel + ' · ' + CF.stateText(project.state) + (pinned ? ' · 已置顶' : '') + (used ? ' · 最近使用 ' + CF.fullTime(new Date(used).toISOString()) : ''),
         on: {
-          click: () => { folded ? collapsed.delete(project.id) : collapsed.add(project.id); renderConversations(); },
+          click: () => {
+            if (folded) { collapsed.delete(project.id); opened.add(project.id); } else { collapsed.add(project.id); opened.delete(project.id); }
+            renderConversations();
+          },
           contextmenu: event => { event.preventDefault(); CF.menu(head, menuItems()); },
         },
       }, h('span.chev', CF.icon('down', 12)), h('span.name', project.name),
         pinned ? h('span.pin-mark', { title: '已置顶' }, CF.icon('pin', 11)) : null,
-        project.state === 'running' ? null : h('span.dot', { title: CF.stateText(project.state) }), more, add);
+        project.state === 'running' ? null : h('span.dot', { title: CF.stateText(project.state) }),
+        folded && used ? h('span.count', CF.shortTime(new Date(used).toISOString())) : null, more, add);
       const newItem = view.name === 'chat' && !view.conversationId && view.projectId === project.id
         ? h('button.conv-item.selected', h('span.title', '新对话')) : null;
-      return [h('div.project-group' + (folded ? '.collapsed' : ''), head, folded ? null : h('div.conv-list',
+      return h('div.project-group' + (folded ? '.collapsed' : '') + (kind === 'older' ? '.older' : ''), head, folded ? null : h('div.conv-list',
         newItem,
-        shown.map(item => h('button.conv-item' + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
-          title: item.name + ' · ' + CF.fullTime(item.updatedAt), on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
-        }, h('span.title', item.name), conversationMeta(item))),
+        shown.map(item => conversationButton(item)),
         !items.length && !newItem ? h('button.conv-more', { on: { click: () => CF.app.go({ name: 'chat', projectId: project.id }) } }, '开始第一个对话') : null,
-        items.length > 6 && !filter ? h('button.conv-more', { on: { click: () => { showAll ? expanded.delete(project.id) : expanded.add(project.id); renderConversations(); } } }, showAll ? '收起' : '显示更多') : null))];
-    });
-    // 最近: the latest conversations across all projects (the old Web UI's 最近访问).
-    const recentFolded = localStorage.getItem('cf.recentFolded') === '1';
-    const recent = filter ? [] : conversations.filter(item => chatProjects.some(project => project.id === item.projectId)).slice(0, 8);
-    const recentGroup = recent.length ? h('div.recent-group' + (recentFolded ? '.collapsed' : ''),
-      h('div.project-group-head.recent-head', {
-        role: 'button', tabIndex: 0,
-        on: { click: () => { localStorage.setItem('cf.recentFolded', recentFolded ? '' : '1'); renderConversations(); } },
-      }, h('span.chev', CF.icon('down', 12)), h('span.name', '最近')),
-      recentFolded ? null : h('div.conv-list', recent.map(item => h('button.conv-item.recent' + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
-        title: item.name + ' · ' + CF.fullTime(item.updatedAt),
-        on: { click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }) },
-      }, h('span.lines', h('span.title', item.name), h('span.sub', projects.find(project => project.id === item.projectId)?.name || item.projectId)),
-        conversationMeta(item))))) : null;
-    conversationsHost.replaceChildren(groups.length ? h('div', recentGroup, groups)
+        items.length > 6 && !filter ? h('button.conv-more', { on: { click: () => { showAll ? expanded.delete(project.id) : expanded.add(project.id); renderConversations(); } } }, showAll ? '收起' : '全部 ' + items.length + ' 个对话') : null));
+    };
+
+    const section = (key, label, body, count, foldedByDefault = false) => {
+      const stored = localStorage.getItem('cf.folded.' + key);
+      const folded = stored === null ? foldedByDefault : stored === '1';
+      return h('div.recent-group' + (folded ? '.collapsed' : ''),
+        h('div.project-group-head.recent-head', {
+          role: 'button', tabIndex: 0, 'aria-expanded': String(!folded),
+          on: { click: () => { localStorage.setItem('cf.folded.' + key, folded ? '0' : '1'); renderConversations(); } },
+        }, h('span.chev', CF.icon('down', 12)), h('span.name', label), count !== undefined ? h('span.count', String(count)) : null),
+        folded ? null : body());
+    };
+
+    let top = [];
+    if (!filter) {
+      const active = visible.filter(item => item.attention || ['starting', 'running'].includes(item.status));
+      const since = new Date(); since.setHours(0, 0, 0, 0);
+      const yesterday = since.getTime() - DAY;
+      const recent = visible.filter(item => !active.includes(item) && (Date.parse(item.updatedAt) || 0) >= yesterday).slice(0, 5);
+      if (active.length) top.push(section('active', '进行中', () => h('div.conv-list', active.map(item => conversationButton(item, '.recent', projectName(item.projectId))))));
+      if (recent.length) top.push(section('recent', '最近', () => h('div.conv-list', recent.map(item => conversationButton(item, '.recent', projectName(item.projectId))))));
+    }
+
+    const cutoff = Date.now() - 30 * DAY;
+    const isOlder = project => !filter && !CF.pins.has(project.id) && project.id !== selectedProject && (lastUsed.get(project.id) ?? 0) < cutoff;
+    const current = chatProjects.filter(project => !isOlder(project))
+      .sort((a, b) => Number(CF.pins.has(b.id)) - Number(CF.pins.has(a.id)) || (lastUsed.get(b.id) ?? 0) - (lastUsed.get(a.id) ?? 0));
+    const older = chatProjects.filter(isOlder).sort((a, b) => (lastUsed.get(b.id) ?? 0) - (lastUsed.get(a.id) ?? 0));
+    const groups = current.map(project => group(project, 'current')).filter(Boolean);
+    const olderGroup = older.length
+      ? section('older', '更早的项目', () => h('div.older-projects', older.map(project => group(project, 'older'))), older.length, true) : null;
+
+    conversationsHost.replaceChildren(groups.length || olderGroup
+      ? h('div', top, groups.length && top.length ? h('div.sidebar-label', '项目') : null, groups, olderGroup)
       : h('div.sidebar-empty', filter ? '没有匹配的对话。' : connected ? '添加 Claude、Codex 或 Antigravity 项目后，在这里开始对话。' : '连接后端后显示对话。'));
   }
 
