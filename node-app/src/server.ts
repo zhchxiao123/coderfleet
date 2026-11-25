@@ -11,7 +11,7 @@ import {
 import { assertContainer, models } from './docker.js';
 import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
-import { acceptPrompt, CHECK_ROUNDS, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
+import { acceptPrompt, CHECK_ROUNDS, closedNote, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { Lifecycle } from './lifecycle.js';
 import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
@@ -202,6 +202,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
    * at most, then the user is asked; all met → the reviewer. Failed or stopped → waiting.
    * Once the user has accepted, a turn ends with a look at whether the branch is merged instead.
    */
+  /** The turns of one job: a conversation can have had others before it, and goes on after it is closed. */
+  const jobTurns = (job: Job): Turn[] => turnsOf(job.conversationId).filter(turn => turn.createdAt >= job.createdAt && (!job.closedAt || turn.createdAt <= job.closedAt));
   const settleJob = (turn: Turn): void => {
     const id = turn.conversationId;
     const job = jobs.get(id);
@@ -214,7 +216,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }
     if (turn.status !== 'done') return;
     if (job.accepting) { void settleAccept(job); return; }
-    const items = criteria(turnsOf(id));
+    const items = criteria(jobTurns(job));
     if (items.some(item => item.state === 'ask')) { jobs.patch(id, ['working'], { state: 'waiting', reason: 'question', error: undefined }); return; }
     if (items.length && items.every(item => item.state === 'done')) { void review(job); return; }
     const round = (job.round ?? 0) + 1;
@@ -261,7 +263,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (turns.some(active) || followUps.list(id).length || jobs.get(id)?.state !== 'working') return;
       const turn: Turn = {
         id: turnId, origin: 'node', conversationId: id, projectId: reviewer.name, account, type: reviewer.account.type,
-        prompt: reviewPrompt(job, turns.find(item => !item.role && !item.checkRound && item.createdAt >= job.createdAt)?.prompt || job.title, criteria(turns)), images: [], auto: true,
+        prompt: reviewPrompt(job, turns.find(item => !item.role && !item.checkRound && item.createdAt >= job.createdAt)?.prompt || job.title, criteria(jobTurns(job))), images: [], auto: true,
         requestedModel: '', createdAt: new Date().toISOString(), resumeId: '', status: 'starting', answer: '', tools: [], blocks: [], role: 'review',
       };
       store.createTurn(turn, reviewer.path);
@@ -363,9 +365,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     catch (error) { throw new HttpError(409, message(error)); }
     // Re-read after the await: the check and the save below run without yielding.
     const turns = turnsOf(conversation.id);
-    // A job's turns run in its worktree, without asking for each tool; once it is closed the worktree is gone.
-    const job = jobs.get(conversation.id);
-    if (job && !jobOpen(job)) throw new HttpError(409, '这件事已经' + (job.state === 'accepted' ? '收下' : '丢弃') + '了，接着做请开一个新对话');
+    // A job's turns run in its worktree, without asking for each tool. Once it is closed the
+    // worktree is gone and the conversation goes on in the project's directory: the first turn
+    // after that tells the agent so.
+    const last = jobs.get(conversation.id);
+    const job = last && jobOpen(last) ? last : undefined;
+    const moved = last && !job && !turns.some(turn => turn.createdAt > (last.closedAt ?? '')) ? closedNote(last) : '';
     if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
     if (turns.some(turn => turn.status === 'queued')) throw new HttpError(409, '这个对话还有原服务排队中的任务');
     // Later turns resume the conversation's agent session (Python: native_session_id).
@@ -394,7 +399,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       // The user speaking starts the count of rounds again.
       jobs.patch(conversation.id, ['working', 'waiting', 'review'], { state: 'working', phase: undefined, reason: undefined, error: undefined, mergeError: undefined, ...(by.role === 'accept' ? { accepting: true } : {}), ...(system ? {} : { round: 0, review: undefined }) });
     }
-    await runner.launch(turn, job ? { cwd: job.directory, preamble: by.jobStart ? preamble(job, turns.length > 0) : '' } : {});
+    await runner.launch(turn, job ? { cwd: job.directory, preamble: by.jobStart ? preamble(job, turns.length > 0) : '' } : moved ? { preamble: moved } : {});
     return turn;
   };
 
@@ -773,7 +778,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (turnsOf(conversation.id).some(turn => active(turn) || turn.status === 'queued')) throw new HttpError(409, '这个对话还在运行，先停止再删除');
       const job = jobs.get(conversation.id);
       if (job && jobOpen(job)) throw new HttpError(409, '这个对话里的事还没有收下或丢弃，先处理它');
-      if (job) jobs.forget(conversation.id);
+      jobs.forgetAll(conversation.id);
       for (const item of followUps.list(conversation.id)) followUps.remove(conversation.id, item.id);
       store.deleteConversation(conversation.id);
       return { deleted: true };
@@ -857,8 +862,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const message_ = { text: prompt, images, auto: input.auto === true, model };
       const running = turnsOf(conversation.id).find(active);
       // { job: true }: 做完为止. This message opens a worktree and branch for the conversation,
-      // new or already going (its agent session is resumed there).
-      if (input.job === true && !jobs.get(conversation.id)) {
+      // new or already going (its agent session is resumed there), also after an earlier job of
+      // it was closed. While a job is open the message just goes to it.
+      const last = jobs.get(conversation.id);
+      if (input.job === true && !(last && jobOpen(last))) {
         if (running) throw new HttpError(409, '等这一轮结束，再开「做完为止」');
         return { delivered: 'turn', turn: publicTurn(await startJob(conversation, message_)) };
       }
@@ -879,7 +886,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     ['GET', /^projects\/([\w.-]+)\/job-support$/, async (_request, [name]) => jobs.support(project(name as string))],
     ['GET', /^conversations\/([\w-]+)\/job$/, async (_request, [id]) => {
       const job = jobs.get(identifier(id));
-      return { job: job ? { ...job, criteria: criteria(turnsOf(job.conversationId)) } : null };
+      return { job: job ? { ...job, criteria: criteria(jobTurns(job)) } : null, earlier: jobs.earlier(identifier(id)) };
     }],
     ['GET', /^conversations\/([\w-]+)\/job\/changes$/, async (_request, [id]) => {
       const { job, target } = jobOf(id as string);

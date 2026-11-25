@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
@@ -59,7 +59,7 @@ process.stdin.on('end', () => {
     else if (prompt.includes('还没有做到') || verb === 'stall') criteria = block('- [x] 开了头 —— 有文件了', '- [ ] 没做到');
     else if (verb === 'ask') criteria = block('- [?] 用哪个端口 —— 8080 还是 8765？');
     else if (verb === 'write') { writeFileSync(join(cwd, file), rest.join(' ') + '\\n'); criteria = block('- [x] 写好了 —— ' + file + ' 里是 ' + rest.join(' ')); }
-    text = JSON.stringify({ cwd, sandbox, resumed, preamble: prompt.includes('独立的工作目录'), continued: prompt.includes('从现在起') }) + '\\n' + criteria;
+    text = JSON.stringify({ cwd, sandbox, resumed, preamble: prompt.includes('独立的工作目录'), continued: prompt.includes('从现在起'), ...(prompt.includes('已经删除') ? { moved: true } : {}) }) + '\\n' + criteria;
   }
   send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text } });
   send({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
@@ -191,13 +191,52 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.equal(git(env.project, 'branch', '--list', 'cf/*'), '');
     assert.equal(git(env.project, 'status', '--porcelain'), '');
     assert.match(await cli('job', 'show', conversation, ...config), /合并进了 main/);
-    // What was merged stays readable; the conversation takes no more messages.
+    // What was merged stays readable, and the closed job cannot be ended again.
     assert.equal((await env.get('conversations/' + conversation + '/job/changes')).body.files.length, 2);
-    response = await env.post('conversations/' + conversation + '/turns', { prompt: 'more' });
-    assert.equal(response.status, 409);
-    assert.match(response.body.error, /新对话/);
     assert.equal((await env.post('conversations/' + conversation + '/job/discard')).status, 409);
     assert.equal((await env.post('conversations/' + conversation + '/job/accept')).status, 409);
+    // The conversation goes on: the same session, back in the project's directory, asking for
+    // each tool again; the first of these turns is told that the worktree is gone.
+    let count = (await turnsOf(env, conversation)).length;
+    response = await env.post('conversations/' + conversation + '/turns', { prompt: 'more' });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    turns = await ended(env, conversation, count + 1);
+    assert.deepEqual(started(turns.at(-1)), { cwd: env.project, sandbox: started(turns.at(-1)).sandbox, resumed: 'author-thread', preamble: false, continued: false, moved: true });
+    assert.notEqual(started(turns.at(-1)).sandbox, 'danger-full-access');
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'and more' });
+    turns = await ended(env, conversation, count + 2);
+    assert.equal(started(turns.at(-1)).moved, undefined);
+    job = await jobOf(env, conversation);
+    assert.deepEqual([job.state, job.criteria.length], ['accepted', 1]);
+    // And it can start another job: its own worktree, its own criteria; the first one is kept.
+    const firstJob = job.id;
+    response = await env.post('conversations/' + conversation + '/turns', { prompt: 'write c.txt z', job: true });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    job = await settled(env, conversation, 'review');
+    assert.notEqual(job.id, firstJob);
+    assert.deepEqual(job.criteria.map(item => item.note), ['c.txt 里是 z']);
+    turns = await turnsOf(env, conversation);
+    assert.deepEqual(started(turns[count + 2]), { cwd: join(env.project, '.coderfleet-work', job.id), sandbox: 'danger-full-access', resumed: 'author-thread', preamble: true, continued: true });
+    assert.equal(turns[count + 3].role, 'review');
+    assert.equal(turns.length, count + 4);
+    let found = (await env.get('conversations/' + conversation + '/job')).body;
+    assert.deepEqual(found.earlier.map(item => [item.id, item.state, item.mergedInto]), [[firstJob, 'accepted', 'main']]);
+    assert.match(await cli('job', 'show', conversation, ...config), /已收下[\s\S]*待验收/);
+    // The list has one line per conversation: its current job.
+    assert.equal((await env.get('jobs')).body.filter(item => item.conversationId === conversation).length, 1);
+    // Discarding the second leaves the first's record alone, and the conversation still goes on.
+    assert.equal((await env.post('conversations/' + conversation + '/job/discard')).status, 200);
+    assert.equal(existsSync(join(env.project, '.coderfleet-work', job.id)), false);
+    assert.equal(existsSync(join(env.project, 'c.txt')), false);
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'again' });
+    turns = await ended(env, conversation, count + 5);
+    assert.deepEqual([started(turns.at(-1)).cwd, started(turns.at(-1)).moved], [env.project, true]);
+    found = (await env.get('conversations/' + conversation + '/job')).body;
+    assert.deepEqual([found.job.state, found.earlier.length], ['discarded', 1]);
+    // Deleting the conversation takes all of its job records with it.
+    assert.equal((await env.delete('conversations/' + conversation)).status, 200);
+    found = (await env.get('conversations/' + conversation + '/job')).body;
+    assert.deepEqual([found.job, found.earlier], [null, []]);
 
     // A conversation already going can become a job: from that message on its session
     // continues in the worktree, and only that message is the task the reviewer is given.
@@ -255,8 +294,12 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.match(listed, /已收下/);
     // Deleting the conversation is refused while its job is open.
     assert.equal((await env.delete('conversations/' + conversation)).status, 409);
+    // A worktree someone made elsewhere, whose path cannot be seen from here, keeps its registration.
+    git(env.project, 'worktree', 'add', '-q', '-b', 'outside', join(env.root, 'outside'));
+    rmSync(join(env.root, 'outside'), { recursive: true });
     const shown = await cli('job', 'discard', conversation, ...config);
     assert.match(shown, /已丢弃/);
+    assert.match(git(env.project, 'worktree', 'list'), /outside/);
     assert.equal(existsSync(join(env.project, '.coderfleet-work', job.id)), false);
     assert.equal(git(env.project, 'branch', '--list', 'cf/*'), '');
     assert.equal((await env.get('conversations/' + conversation + '/turns')).body.length, 1);

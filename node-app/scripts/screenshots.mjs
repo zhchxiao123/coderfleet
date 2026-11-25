@@ -113,6 +113,14 @@ try {
   await page.keyboard.press('Enter');
   await page.waitForSelector('.job-divider:has-text("已收下")');
   await shot('job-accepted');
+  // The job is closed, the conversation is not: the next message is an ordinary one, and
+  // 做完为止 can be switched on again for the next job.
+  await page.waitForSelector('.composer .job-toggle:not([hidden])');
+  await page.fill('.composer textarea', '顺便看一下 README 要不要更新');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('.job-divider:has-text("已收下") ~ .turn, .job-divider:has-text("已收下") ~ *:has-text("README")');
+  await page.waitForTimeout(1500);
+  await shot('job-continued');
   // A criterion only the user can decide: the job waits, the question is in the card.
   await page.click('.conv-item:has-text("给启动流程补上集成测试")');
   await page.waitForSelector('.job-button:has-text("等你")');

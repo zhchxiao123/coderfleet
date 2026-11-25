@@ -2,6 +2,8 @@
 // user accepts (the agent merges it where it belongs) or discards it.
 // A job is a record attached to one conversation, kept in the backend's own
 // state directory; every git operation runs inside the project's container.
+// A conversation has one job at a time: once it is closed the conversation goes on
+// in the project's directory, and a later message can start the next job.
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -202,6 +204,16 @@ export function acceptPrompt(job: Job): string {
   ].join('\n');
 }
 
+/** What the first turn after a closed job is told: its directory is gone, the work goes on in the project's. */
+export function closedNote(job: Job): string {
+  return [
+    (job.state === 'accepted' ? '前面那件事我已经收下' + (job.mergedInto ? '，改动合并进了 ' + job.mergedInto + ' 分支' : '（没有要合并的改动）') : '前面那件事的改动我丢弃了')
+      + '：工作目录 ' + job.directory + ' 和分支 ' + job.branch + ' 已经删除。',
+    '接下来回到 ' + ROOT + ' 里做；前面「只改那个工作目录」「不要合并或推送」的要求不再适用，其余照旧。',
+    '', '',
+  ].join('\n');
+}
+
 export class JobError extends Error {}
 
 export class Jobs {
@@ -229,9 +241,23 @@ export class Jobs {
     return result;
   }
 
-  public list(): Job[] { return Object.values(this.read()).sort((left, right) => right.createdAt.localeCompare(left.createdAt)); }
+  // A conversation's current job is stored under the conversation's ID, its earlier (closed)
+  // ones under `<conversation>:<job>`.
 
+  /** The current job of every conversation, newest first. */
+  public list(): Job[] {
+    return Object.entries(this.read()).filter(([key, job]) => key === job.conversationId).map(([, job]) => job)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  /** The conversation's current job: the one being done, or the last one closed. */
   public get(conversationId: string): Job | undefined { return this.read()[conversationId]; }
+
+  /** The closed jobs the conversation had before its current one, oldest first. */
+  public earlier(conversationId: string): Job[] {
+    return Object.entries(this.read()).filter(([key, job]) => key !== conversationId && job.conversationId === conversationId).map(([, job]) => job)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
 
   /** Changes the job if it is still in one of `from` states; returns the saved job, or undefined when it was not. */
   public patch(conversationId: string, from: readonly JobState[], change: Partial<Job>): Job | undefined {
@@ -246,7 +272,21 @@ export class Jobs {
     });
   }
 
-  public forget(conversationId: string): void { this.update(all => { delete all[conversationId]; }); }
+  /** Drops the current job's record (it never got going): the one before it is the conversation's job again. */
+  public forget(conversationId: string): void {
+    this.update(all => {
+      delete all[conversationId];
+      const before = Object.entries(all).filter(([, job]) => job.conversationId === conversationId).sort(([, left], [, right]) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (!before) return;
+      delete all[before[0]];
+      all[conversationId] = before[1];
+    });
+  }
+
+  /** Drops every job record of a conversation that is being deleted. */
+  public forgetAll(conversationId: string): void {
+    this.update(all => { for (const [key, job] of Object.entries(all)) if (job.conversationId === conversationId) delete all[key]; });
+  }
 
   // ── Git, inside the project container ────────────────
 
@@ -294,7 +334,9 @@ export class Jobs {
       base: '', baseBranch: '', dirtyAtStart: false, state: 'working', createdAt: now, updatedAt: now,
     };
     this.update(all => {
-      if (all[conversationId]) throw new JobError('这个对话已经有一件在做的事');
+      const last = all[conversationId];
+      if (last && open(last)) throw new JobError('这个对话已经有一件在做的事');
+      if (last) all[conversationId + ':' + last.id] = last;
       all[conversationId] = draft;
     });
     try {
@@ -339,7 +381,10 @@ export class Jobs {
   private async remove(project: WorkspaceProject, job: Job): Promise<void> {
     await this.git(project, ROOT, 'worktree', 'remove', '--force', job.directory).catch(() => undefined);
     await this.exec(project, ['rm', '-rf', job.directory]).catch(() => undefined);
-    await this.git(project, ROOT, 'worktree', 'prune').catch(() => undefined);
+    // Only this worktree's own registration: `git worktree prune` would also drop every worktree
+    // made outside the container, whose path does not exist in here.
+    await this.exec(project, ['bash', '-c', 'cd ' + quote(ROOT) + ' && d=$(git -c safe.directory=\'*\' rev-parse --git-common-dir) && for f in "$d"/worktrees/*/gitdir; do '
+      + 'if [ "$(cat "$f" 2>/dev/null)" = ' + quote(job.directory + '/.git') + ' ]; then rm -rf "$(dirname "$f")"; fi; done']).catch(() => undefined);
     await this.git(project, ROOT, 'branch', '-D', job.branch).catch(() => undefined);
   }
 

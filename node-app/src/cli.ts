@@ -50,8 +50,10 @@ async function jobCommand(verb: string | undefined, args: string[]): Promise<voi
     const list = await call<JobView[]>('GET', 'jobs');
     console.log(list.length ? list.map(jobLine).join('\n') : '没有「做完为止」的事');
   } else if (verb === 'show' && args[0]) {
-    const { job } = await call<{ job: JobView | null }>('GET', 'conversations/' + args[0] + '/job');
+    const { job, earlier } = await call<{ job: JobView | null; earlier?: JobView[] }>('GET', 'conversations/' + args[0] + '/job');
     if (!job) throw new Error('这个对话没有在做的事');
+    // The conversation's earlier jobs first, then the current one in full.
+    for (const past of earlier ?? []) console.log(jobLine(past));
     console.log(jobLine(job));
     if (job.error) console.log('出错：' + job.error);
     if (job.criteria?.length) {

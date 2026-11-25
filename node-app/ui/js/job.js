@@ -66,8 +66,8 @@
         return h('div.job-divider', h('span', h('b', '已开工'), '在独立分支 ' + job.branch + ' 上做，不动 ' + target(job)
           + (job.dirtyAtStart ? '；主目录里没提交的改动没有带进去' : '')));
       }
-      if (job.state === 'accepted') return h('div.job-divider', h('span', h('b', '已收下'), (job.mergedInto ? '合并进了 ' + job.mergedInto : '没有要合并的改动') + '，分支和工作目录已删除'));
-      if (job.state === 'discarded') return h('div.job-divider', h('span', h('b', '已丢弃'), '分支和工作目录已删除，对话保留'));
+      if (job.state === 'accepted') return h('div.job-divider', h('span', h('b', '已收下'), (job.mergedInto ? '合并进了 ' + job.mergedInto : '没有要合并的改动') + '，分支和工作目录已删除；对话可以接着聊'));
+      if (job.state === 'discarded') return h('div.job-divider', h('span', h('b', '已丢弃'), '分支和工作目录已删除；对话可以接着聊'));
       return null;
     },
 
@@ -80,6 +80,7 @@
       const node = h('aside.job-card', { hidden: true, 'aria-label': '这件事的进度' });
       host.append(node);
       let job = null;
+      let earlier = [];
       let changes = null;
       let changesAt = 0;
       let showFiles = false;
@@ -174,6 +175,8 @@
 
       const controller = {
         get job() { return job; },
+        /** The closed jobs this conversation had before the current one, oldest first. */
+        get earlier() { return earlier; },
         toggle(show = !shown()) {
           if (fits()) {
             hidden = !show;
@@ -184,17 +187,24 @@
         async refresh() {
           if (!alive || busy) return;
           let next;
-          try { next = (await CF.get('conversations/' + conversationId + '/job')).job; } catch { return; }
+          try {
+            const found = await CF.get('conversations/' + conversationId + '/job');
+            next = found.job;
+            earlier = found.earlier || [];
+          } catch { return; }
           if (!alive) return;
-          const before = job?.state;
+          // A closed job can be followed by a new one in the same conversation.
+          const before = job && job.id + ' ' + job.state;
+          const now = next && next.id + ' ' + next.state;
+          if (job && next && job.id !== next.id) { changes = null; showFiles = false; }
           job = next;
-          if (job && (!changes || before !== job.state || (job.state === 'working' && Date.now() - changesAt > 3000))) {
+          if (job && (!changes || before !== now || (job.state === 'working' && Date.now() - changesAt > 3000))) {
             changesAt = Date.now();
             try { changes = await CF.get('conversations/' + conversationId + '/job/changes'); } catch { /* the container may be stopped: keep the last */ }
             if (!alive) return;
           }
           render();
-          if (before !== job?.state) hooks.changed(job);
+          if (before !== now) hooks.changed(job);
         },
         destroy() { alive = false; node.remove(); },
       };

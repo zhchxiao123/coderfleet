@@ -501,18 +501,19 @@
       setAuto(Boolean(savedAuto));
       // 做完为止: a message can start a job, in a new conversation or one already going. From
       // then on the work happens in its own branch and directory until its changes are accepted
-      // or discarded (see job.js).
+      // or discarded (see job.js); after that the conversation goes on, and can start another.
       let jobWanted = false;
+      const jobIsOpen = () => Boolean(current.job) && !CF.job.closed(current.job);
       const setJobWanted = on => {
         jobWanted = on;
         jobToggle.setAttribute('aria-pressed', String(on));
         jobToggle.classList.toggle('on', on);
       };
       const jobToggle = h('button.auto-toggle.job-toggle', {
-        disabled: true, hidden: Boolean(conversation?.job), title: '做完为止',
+        disabled: true, hidden: ['working', 'waiting', 'review'].includes(conversation?.job), title: '做完为止',
         on: { click: () => {
           setJobWanted(!jobWanted);
-          autoButton.hidden = jobWanted;
+          autoButton.hidden = jobWanted || jobIsOpen();
           if (jobWanted) CF.toast('做完为止已开：它先列出做完的标准，在独立分支上做到为止，再由你收下或丢弃');
         } },
       }, CF.icon('check', 13), h('span', '做完为止'));
@@ -549,12 +550,11 @@
         const stopping = Boolean(running) && !content;
         sendButton.classList.toggle('stop', stopping);
         sendButton.replaceChildren(stopping ? h('span.stop-mark') : CF.icon('send', 16));
-        sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || current.jobClosed || !content || uploading || !containerReady;
+        sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || !content || uploading || !containerReady;
         sendButton.title = stopping ? (running.stopping ? '正在停止…' : '中断（Esc）') : running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
         sendButton.setAttribute('aria-label', sendButton.title);
         hint.textContent = running?.stopping ? '正在停止…' : running && !content ? '正在回答 · Esc 停止，也可以继续输入'
           : running ? (canInject(running) ? '发送会插入这一轮回答' : '发送会排在这轮回答之后')
-          : current.jobClosed ? '这件事已经结束，接着做请开一个新对话'
           : current.job?.state === 'review' && !running ? '发消息就是让它再改 · Enter 发送'
           : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
@@ -570,12 +570,12 @@
           info && info.state !== 'running' ? h('span.container-warn', h('span.dot.waiting'), '容器' + CF.stateText(info.state)) : null,
           info ? CF.accounts.usagePill(info.account) : null,
         );
-        textarea.placeholder = current.jobClosed ? '这件事已经结束' : info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
+        textarea.placeholder = info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
         const record = CF.findConversation(current.conversationId);
         current.readOnly = Boolean(record?.type && info && record.type !== info.type);
-        textarea.disabled = current.readOnly || Boolean(current.jobClosed);
+        textarea.disabled = current.readOnly;
         if (current.readOnly) {
           notice.replaceChildren(h('div.banner', h('span.banner-icon', CF.icon('chat', 16)),
             h('div.text', h('strong', '这是 ' + record.type + ' 账号的历史对话'), h('span', '项目现在绑定的是 ' + info.typeLabel + '，这段对话只能查看。'))));
@@ -678,22 +678,32 @@
       };
       transcript.addEventListener('scroll', () => requestAnimationFrame(trackCurrent), { passive: true });
 
-      // A job's conversation says where the work happens (top) and how it ended (bottom).
-      let jobStartLine = null;
-      let jobEndLine = null;
+      // Each job of the conversation says where its work happens (above the turn that started
+      // it: the conversation may have been going before) and how it ended (below its last turn:
+      // the conversation may go on after).
+      const jobLines = new Map();
       const renderJobLines = () => {
-        const job = current.job;
-        if (!job || !current.turns.length) return;
-        if (!jobStartLine) {
-          // Above the turn that started it: the conversation may have been going before.
-          const first = current.turns.find(turn => turn.createdAt >= job.createdAt);
-          const node = first && nodes.get(first.id)?.node;
-          if (first && !node) return;
-          jobStartLine = CF.job.line(job, false);
-          if (node) node.before(jobStartLine); else inner.prepend(jobStartLine);
+        if (!current.job || !current.turns.length) return;
+        for (const job of [...(current.jobCard?.earlier || []), current.job]) {
+          let lines = jobLines.get(job.id);
+          if (!lines) jobLines.set(job.id, lines = { start: null, end: null, after: undefined });
+          if (!lines.start) {
+            const first = current.turns.find(turn => turn.createdAt >= job.createdAt);
+            const node = first && nodes.get(first.id)?.node;
+            if (first && !node) continue;
+            lines.start = CF.job.line(job, false);
+            if (node) node.before(lines.start); else inner.prepend(lines.start);
+          }
+          if (!CF.job.closed(job)) continue;
+          if (!lines.end) lines.end = CF.job.line(job, true);
+          const next = current.turns.find(turn => turn.createdAt > (job.closedAt || job.updatedAt));
+          const node = next ? nodes.get(next.id)?.node : null;
+          if (next && !node) continue;
+          if (node) {
+            // Placed once per following turn: the next job's start line goes between the two.
+            if (lines.after !== next.id) { lines.after = next.id; node.before(lines.end); }
+          } else if (inner.lastChild !== lines.end) inner.append(lines.end);
         }
-        if (!jobEndLine && CF.job.closed(job)) jobEndLine = CF.job.line(job, true);
-        if (jobEndLine && inner.lastChild !== jobEndLine) inner.append(jobEndLine);
       };
       const renderTurns = () => {
         if (!current.turns.length) { if (!welcome.isConnected) transcript.replaceWith(welcome); return; }
@@ -891,9 +901,10 @@
           changed: job => {
             const first = !current.job && job;
             current.job = job;
-            current.jobClosed = Boolean(job) && CF.job.closed(job);
             jobButton.hidden = !job;
-            if (job) { autoButton.hidden = true; jobToggle.hidden = true; }
+            // While a job is open its messages go to it; once closed, the next can start here.
+            jobToggle.hidden = jobIsOpen();
+            autoButton.hidden = jobIsOpen() || jobWanted;
             renderHeader();
             renderJobLines();
             if (!first) void CF.app.refreshConversations();
