@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -75,7 +75,7 @@ test('machine_info tells what the task may do', async t => {
   const info = await h.call(h.token(), 'machine_info');
   assert.equal(info.access, 'command');
   assert.equal(info.system, 'Linux');
-  assert.deepEqual(info.programs, { allow: ['say'], confirm: ['esptool [write-flash]'] });
+  assert.deepEqual(info.programs, { allow: ['say'], confirm: ['esptool [write-flash]'], deny: [], anything_else: 'deny' });
   assert.equal(info.gui.available, false);
 });
 
@@ -182,15 +182,50 @@ test('a rules file that cannot be read allows nothing, and says so', async t => 
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['say', 'x'] })).rule, 'policy-invalid');
 });
 
-test('the default rules: Mac and Linux lists, esptool reads allowed, writes confirmed', () => {
+test('the default rules: everything runs, flash writes are confirmed', () => {
   const mac = defaultPolicy('darwin');
-  assert.deepEqual(mac.path, ['/usr/bin', '/bin', '/opt/homebrew/bin']);
-  assert.deepEqual(mac.rules.filter(rule => !rule.args_any).map(rule => rule.program), ['xcodebuild', 'xcrun']);
+  assert.deepEqual(mac.path, ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin']);
+  assert.equal(mac.unlisted, 'allow');
   assert.deepEqual(mac.gui_tools, ['get_window_state', 'get_desktop_state', 'zoom']);
   const linux = defaultPolicy('linux');
-  assert.deepEqual(linux.path, ['/usr/bin', '/bin', '/usr/local/bin']);
-  assert.deepEqual(linux.rules.map(rule => [rule.program, rule.action]), [['esptool', 'allow'], ['esptool', 'confirm']]);
-  assert.ok(linux.rules[1].args_any.includes('write-flash'));
+  assert.deepEqual(linux.path, ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/usr/local/bin']);
+  assert.equal(linux.unlisted, 'allow');
+  assert.deepEqual(linux.rules.map(rule => [rule.program, rule.action]), [['esptool', 'confirm']]);
+  assert.ok(linux.rules[0].args_any.includes('write-flash'));
+});
+
+test('with nothing switched off every installed command runs; the owner switches one off, or makes the rest ask', async t => {
+  const h = await boot(t, { unlisted: 'allow', rules: [{ program: 'say', args_any: ['secret'], action: 'deny' }], options: { confirmSeconds: 0.2 } });
+  const ran = await h.call(h.token(), 'run_command', { argv: ['say', 'hello'] });
+  assert.deepEqual({ ran: ran.ran, verdict: ran.verdict, rule: ran.rule, stdout: ran.stdout }, { ran: true, verdict: 'allow', rule: 'unlisted', stdout: 'hello\n' });
+  const off = await h.call(h.token(), 'run_command', { argv: ['say', 'secret'] });
+  assert.deepEqual({ ran: off.ran, verdict: off.verdict, rule: off.rule }, { ran: false, verdict: 'deny', rule: 'say [secret]' });
+  assert.match(off.message, /switched this command off/);
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['sudo', 'say', 'x'] })).rule, 'builtin:sudo', 'what is always refused stays refused');
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['nowhere'] })).rule, 'not-installed');
+  assert.deepEqual((await h.call(h.token(), 'machine_info')).programs, { allow: [], confirm: [], deny: ['say [secret]'], anything_else: 'allow' });
+
+  // A rules file from before the setting existed means the same as today's default.
+  h.writePolicy({ path: [h.bin], rules: [], gui_tools: [] });
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['say', 'old'] })).rule, 'unlisted');
+
+  const strict = await h.control('POST', 'policy', { unlisted: 'confirm' });
+  assert.equal(strict.policy.unlisted, 'confirm');
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['say', 'x'] })).verdict, 'deny-unconfirmed', 'nobody answered, so it did not run');
+  assert.equal((await h.control('POST', 'policy', { unlisted: 'sometimes' })).status, 400);
+});
+
+test('the owner sets where programs are looked up', async t => {
+  const h = await boot(t, { unlisted: 'allow' });
+  const other = join(h.base, 'other');
+  mkdirSync(other);
+  writeFileSync(join(other, 'elsewhere'), '#!/bin/sh\necho found\n'); chmodSync(join(other, 'elsewhere'), 0o755);
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['elsewhere'] })).rule, 'not-installed');
+  const changed = await h.control('POST', 'policy', { path: [h.bin, other, other] });
+  assert.deepEqual(changed.policy.path, [h.bin, other]);
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['elsewhere'] })).stdout, 'found\n');
+  assert.equal((await h.control('POST', 'policy', { path: ['bin'] })).status, 400, 'a relative directory is refused');
+  assert.equal((await h.control('POST', 'policy', { path: [] })).status, 400);
 });
 
 test('the working directory cannot leave the project directory, by .. or by symlink', async t => {
@@ -464,7 +499,7 @@ test('serial: reset runs esptool under the rules before reading', async t => {
   const board = spawn('python3', ['-c', 'import os, pty, time\nm, s = pty.openpty()\nprint(os.ttyname(s), flush=True)\nwhile True:\n    os.write(m, b"up\\n"); time.sleep(0.05)'], { stdio: ['ignore', 'pipe', 'inherit'] });
   t.after(() => { board.kill('SIGKILL'); rmSync(devices, { recursive: true, force: true }); });
   symlinkSync(await new Promise(resolve => board.stdout.once('data', chunk => resolve(String(chunk).trim()))), join(devices, 'ttyACM0'));
-  const h = await boot(t, { rules: defaultPolicy('linux').rules, options: { serialDirectory: devices } });
+  const h = await boot(t, { rules: defaultPolicy('linux').rules, unlisted: 'allow', options: { serialDirectory: devices } });
   h.program('esptool', 'echo "$*" > ' + join(h.base, 'esptool-args'));
   const read = await h.call(h.token(), 'read_serial', { port: join(devices, 'ttyACM0'), seconds: 1, reset: true });
   assert.match(read.text, /up\n/);
@@ -472,14 +507,14 @@ test('serial: reset runs esptool under the rules before reading', async t => {
 });
 
 test('the firmware rules: reads run, writes ask, efuse and forced writes never', async t => {
-  const h = await boot(t, { rules: defaultPolicy('linux').rules, marks: ['esptool', 'espefuse'], options: { confirmSeconds: 0.2 } });
+  const h = await boot(t, { rules: defaultPolicy('linux').rules, unlisted: 'allow', marks: ['esptool', 'espefuse'], options: { confirmSeconds: 0.2 } });
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', '--port', '/dev/ttyUSB0', 'flash-id'] })).verdict, 'allow');
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', '--port', '/dev/ttyUSB0', 'write-flash', '0x0', 'build/merged.bin'] })).verdict, 'deny-unconfirmed');
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', 'write_flash', '0x0', 'a.bin'] })).verdict, 'deny-unconfirmed', 'the old spelling asks too');
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', '--force', 'write-flash', '0x0', 'a.bin'] })).rule, 'builtin:force-write');
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', 'write-flash', '--do-not-confirm'] })).rule, 'builtin:do-not-confirm');
   assert.equal((await h.call(h.token(), 'run_command', { argv: ['espefuse', 'burn-efuse', 'X'] })).rule, 'builtin:efuse');
-  assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', 'run'] })).rule, 'not-listed');
+  assert.equal((await h.call(h.token(), 'run_command', { argv: ['esptool', 'run'] })).rule, 'unlisted');
 });
 
 test('command line: serve, token, policy, audit, status, stop', async t => {
@@ -512,6 +547,9 @@ test('command line: serve, token, policy, audit, status, stop', async t => {
   const audit = cli('audit', '-n', '5').stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(audit.map(line => [line.tool, line.label, line.exit_code]), [['run_command', 'by hand', 0]]);
   assert.equal(cli('policy', 'remove', 'true').status, 0);
+  assert.equal(JSON.parse(cli('policy', 'unlisted', 'deny').stdout).unlisted, 'deny');
+  assert.equal(cli('policy', 'unlisted', 'maybe').status, 1);
+  assert.deepEqual(JSON.parse(cli('policy', 'path', '/usr/bin', '/bin').stdout).path, ['/usr/bin', '/bin']);
   assert.equal(cli('token').status, 1);
 
   const exited = new Promise(resolve => service.once('exit', code => resolve(code)));

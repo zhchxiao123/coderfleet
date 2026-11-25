@@ -33,8 +33,11 @@ export async function until(check, what, milliseconds = 5000) {
   }
 }
 
-/** rules: the policy's rules; programs named in `marks` are copies of `mark`. */
-export async function boot(t, { rules = [], marks = [], options = {}, guiTools = [] } = {}) {
+/**
+ * rules: the policy's rules; programs named in `marks` are copies of `mark`.
+ * unlisted: what a command no rule matches gets; the tests are strict unless they say otherwise.
+ */
+export async function boot(t, { rules = [], marks = [], options = {}, guiTools = [], unlisted = 'deny' } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'cfh-')));
   const home = join(base, 'home');
   const root = join(base, 'project');
@@ -45,7 +48,7 @@ export async function boot(t, { rules = [], marks = [], options = {}, guiTools =
   for (const name of marks) program(name, PROGRAMS.mark);
   symlinkSync('/usr/bin/env', join(bin, 'env'));
   const writePolicy = value => writeFileSync(join(home, 'policy.json'), typeof value === 'string' ? value : JSON.stringify(value));
-  writePolicy({ path: [bin], rules, gui_tools: guiTools });
+  writePolicy({ path: [bin], rules, unlisted, gui_tools: guiTools });
   const helper = await startHelper({ home, port: 0, keepaliveMs: 50, ...options });
   t.after(async () => { await helper.close(); rmSync(base, { recursive: true, force: true }); });
   const secret = Buffer.from(readFileSync(join(home, 'secret'), 'utf8').trim(), 'hex');

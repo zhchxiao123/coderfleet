@@ -13,7 +13,7 @@ import { childEnvironment, run } from './exec.ts';
 import type { Outcome, Running } from './exec.ts';
 import { ensureHome, readRun, readSecret, writeAtomic } from './home.ts';
 import type { RunRecord } from './home.ts';
-import { BUILT_IN, findProgram, judge, listedPrograms, loadPolicy, programInHome, removeRule, setRule } from './policy.ts';
+import { BUILT_IN, findProgram, judge, listedPrograms, loadPolicy, programInHome, removeRule, setPath, setRule, setUnlisted } from './policy.ts';
 import type { Policy } from './policy.ts';
 import { listSerialPorts, MAX_SERIAL_SECONDS, readSerial } from './serial.ts';
 import { readToken, signToken } from './token.ts';
@@ -218,7 +218,7 @@ export async function startHelper(options: HelperOptions): Promise<Helper> {
       payload: {
         system: systemType(), version: release(), arch: arch(), hostname: hostname(),
         access: grant.access,
-        programs: current.policy ? listedPrograms(current.policy) : { allow: [], confirm: [], error: 'The rules file is not valid, so nothing may run: ' + current.error },
+        programs: current.policy ? listedPrograms(current.policy) : { allow: [], confirm: [], deny: [], anything_else: 'deny', error: 'The rules file is not valid, so nothing may run: ' + current.error },
         gui: { available: false, reason: 'Screen tools are not part of this version of the helper' },
         cwd: 'run_command\'s cwd is relative to the project directory',
       },
@@ -250,6 +250,7 @@ export async function startHelper(options: HelperOptions): Promise<Helper> {
     const verdict = judge(current.policy, home, argv as string[], cwd);
     if (verdict.verdict === 'deny') {
       const why = verdict.rule === 'not-listed' ? 'The rules of this machine do not list this command. Its owner can add it; you cannot.'
+        : !verdict.rule.includes(':') && verdict.rule !== 'policy-invalid' && verdict.rule !== 'program-not-a-bare-name' ? 'The owner of this machine has switched this command off. Only they can change that.'
         : verdict.rule === 'policy-invalid' ? 'The rules file of this machine is not valid, so nothing may run: ' + current.error
           : verdict.rule === 'program-not-a-bare-name' ? 'Give the program as a bare name (for example "xcodebuild"), not a path.'
             : 'This is refused on this machine and no rule can allow it.';
@@ -467,8 +468,10 @@ export async function startHelper(options: HelperOptions): Promise<Helper> {
       try {
         if (input.set !== undefined) return send(response, 200, { policy: setRule(home, input.set) });
         if (input.remove !== undefined) return send(response, 200, { policy: removeRule(home, input.remove) });
+        if (input.unlisted !== undefined) return send(response, 200, { policy: setUnlisted(home, input.unlisted) });
+        if (input.path !== undefined) return send(response, 200, { policy: setPath(home, input.path) });
       } catch (error) { throw new Refusal(400, (error as Error).message); }
-      throw new Refusal(400, 'Send {"set": rule} or {"remove": rule}');
+      throw new Refusal(400, 'Send {"set": rule}, {"remove": rule}, {"unlisted": action} or {"path": directories}');
     }
     if (route === 'GET audit') {
       const count = Math.min(Math.max(Number(url.searchParams.get('n') ?? 50) || 50, 1), 1000);

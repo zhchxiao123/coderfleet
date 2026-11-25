@@ -9,7 +9,7 @@
 //   schedule list | show <id> | add <project> <rule> <prompt> [--job] | edit <id> … | on|off|run|remove <id>
 //                    定时: things the service starts by itself (rule: daily HH:MM | weekly 1,3 HH:MM | every <hours>)
 //   helper status | install | start | stop | upgrade | restart-relay | access <project> off|command
-//          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | audit [n]
+//          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | policy unlisted <allow|confirm|deny> | policy path <directory> … | audit [n]
 //                    机器助手: the separate program that runs listed commands on this machine for tasks
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -149,7 +149,7 @@ async function scheduleCommand(verb: string | undefined, args: string[]): Promis
 }
 
 const HELPER_USAGE = 'Usage: coderfleet-backend helper status | install | start | stop | upgrade | restart-relay | access <project> off|command'
-  + ' | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | audit [n] [--config config.json]';
+  + ' | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | policy unlisted <allow|confirm|deny> | policy path <directory> … | audit [n] [--config config.json]';
 interface HelperView { bundled: string; installed: string; running: boolean; version: string; compatible: boolean; upgrade: boolean; host: string; port: number; url: string;
   relay: string; home: string; tasks: number; pending: number; policyError: string; machine: string }
 
@@ -178,11 +178,12 @@ async function helperCommand(verb: string | undefined, args: string[]): Promise<
     console.log('relay 已重启');
   } else if (verb === 'access' && args[0] && args[1]) {
     console.log(args[0] + '  ' + (await call<{ helper: string }>('PUT', 'projects/' + args[0] + '/helper', { access: args[1] })).helper);
-  } else if (verb === 'policy' && (args[0] === 'show' || (args[0] === 'set' && args[1] && args[2]) || (args[0] === 'remove' && args[1]))) {
+  } else if (verb === 'policy' && (args[0] === 'show' || (args[0] === 'set' && args[1] && args[2]) || (args[0] === 'remove' && args[1]) || ((args[0] === 'unlisted' || args[0] === 'path') && args[1]))) {
     const words = args.slice(args[0] === 'set' ? 3 : 2);
     const rule = { program: args[1], ...(args[0] === 'set' ? { action: args[2] } : {}), ...(words.length ? { args_any: words } : {}) };
+    const change = args[0] === 'unlisted' ? { unlisted: args[1] } : args[0] === 'path' ? { path: args.slice(1) } : { [args[0] as string]: rule };
     const answer = args[0] === 'show' ? await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('GET', 'helper/policy')
-      : await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('POST', 'helper/policy', { [args[0] as string]: rule });
+      : await call<{ policy?: unknown; error?: string; file?: string; built_in?: string[] }>('POST', 'helper/policy', change);
     console.log(answer.policy ? JSON.stringify(answer.policy, null, 2) : '规则文件有错：' + answer.error);
     if (answer.file) console.log('文件  ' + answer.file);
     if (answer.built_in) console.log('不管规则怎么写都拒绝：\n' + answer.built_in.map(line => '  - ' + line).join('\n'));

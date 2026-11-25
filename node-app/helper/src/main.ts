@@ -5,7 +5,7 @@ import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readAudit } from './audit.ts';
 import { ensureHome, helperHome, readRun, readSecret } from './home.ts';
-import { BUILT_IN, loadPolicy, removeRule, setRule } from './policy.ts';
+import { BUILT_IN, loadPolicy, removeRule, setPath, setRule, setUnlisted } from './policy.ts';
 import { DEFAULT_PORT, startHelper, TOKEN_SECONDS } from './server.ts';
 import { signToken } from './token.ts';
 import { PROTOCOL, VERSION } from './version.ts';
@@ -20,6 +20,8 @@ const USAGE = `coderfleet-helper ${VERSION}
   policy show
   policy set <program> <allow|confirm|deny> [word …]
   policy remove <program> [word …]         rules; words narrow a rule to commands carrying one of them
+  policy unlisted <allow|confirm|deny>     what happens to a command no rule matches
+  policy path <directory> …                where programs are looked up
   audit [-n 50]                            the newest lines of the operation log
   version
 
@@ -98,7 +100,9 @@ async function main(args: string[]): Promise<void> {
       const [verdict, ...words] = rest;
       setRule(home, { program, action: verdict, ...(words.length ? { args_any: words } : {}) });
     } else if (action === 'remove') removeRule(home, { program, ...(rest.length ? { args_any: rest } : {}) });
-    else if (action !== 'show') throw new Error('policy show | set <program> <allow|confirm|deny> [word …] | remove <program> [word …]');
+    else if (action === 'unlisted') setUnlisted(home, program);
+    else if (action === 'path') setPath(home, args.slice(2));
+    else if (action !== 'show') throw new Error('policy show | set <program> <allow|confirm|deny> [word …] | remove <program> [word …] | unlisted <allow|confirm|deny> | path <directory> …');
     console.log(JSON.stringify(loadPolicy(home), null, 2));
     if (action === 'show') console.log('\nAlways refused, whatever the rules say:\n' + BUILT_IN.map(line => '  - ' + line).join('\n'));
     return;

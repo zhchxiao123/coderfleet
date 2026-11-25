@@ -1,6 +1,7 @@
 // Which commands may run. The order is fixed: built-in deny → the file's deny →
-// confirm → allow → anything else is denied. The built-in part cannot be relaxed
-// by the rules file, and an unreadable rules file allows nothing.
+// confirm → allow → anything else gets the file's `unlisted` action (allow unless
+// the owner chose otherwise). The built-in part cannot be relaxed by the rules
+// file, and an unreadable rules file allows nothing.
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writeAtomic } from './home.ts';
@@ -17,32 +18,33 @@ export interface Policy {
   /** The only directories programs are looked up in; also the PATH of what runs. */
   readonly path: readonly string[];
   readonly rules: readonly Rule[];
+  /** What happens to a command no rule matches. */
+  readonly unlisted: Action;
   /** Screen tools passed through to the model (not used until screen support exists). */
   readonly gui_tools: readonly string[];
 }
 export interface Verdict { readonly verdict: Action; readonly rule: string }
 
+/** Everything runs except what the owner switches off; writing or erasing a board's flash asks first. */
 export function defaultPolicy(platform: NodeJS.Platform): Policy {
-  const esptool: Rule[] = [
-    { program: 'esptool', args_any: ['flash-id', 'read-mac', 'chip-id', 'image-info', 'get-security-info'], action: 'allow' },
-    { program: 'esptool', args_any: ['write-flash', 'erase-flash', 'erase-region'], action: 'confirm' },
-  ];
+  const rules: Rule[] = [{ program: 'esptool', args_any: ['write-flash', 'erase-flash', 'erase-region'], action: 'confirm' }];
   if (platform === 'darwin') return {
-    path: ['/usr/bin', '/bin', '/opt/homebrew/bin'],
-    rules: [{ program: 'xcodebuild', action: 'allow' }, { program: 'xcrun', action: 'allow' }, ...esptool],
-    gui_tools: ['get_window_state', 'get_desktop_state', 'zoom'],
+    path: ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin'],
+    rules, unlisted: 'allow', gui_tools: ['get_window_state', 'get_desktop_state', 'zoom'],
   };
-  return { path: ['/usr/bin', '/bin', '/usr/local/bin'], rules: esptool, gui_tools: [] };
+  return { path: ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/usr/local/bin'], rules, unlisted: 'allow', gui_tools: [] };
 }
 
 const BARE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$/;
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string' && item.length > 0);
 
+const isAction = (value: unknown): value is Action => value === 'allow' || value === 'confirm' || value === 'deny';
+
 export function checkRule(value: unknown): Rule {
   const rule = value as Record<string, unknown> | null;
   if (!rule || typeof rule !== 'object') throw new Error('A rule must be an object');
   if (typeof rule.program !== 'string' || !BARE.test(rule.program)) throw new Error('A rule\'s program must be a bare program name, got ' + JSON.stringify(rule.program));
-  if (rule.action !== 'allow' && rule.action !== 'confirm' && rule.action !== 'deny') throw new Error('A rule\'s action must be allow, confirm or deny');
+  if (!isAction(rule.action)) throw new Error('A rule\'s action must be allow, confirm or deny');
   if (rule.args_any === undefined) return { program: rule.program, action: rule.action };
   if (!strings(rule.args_any) || !rule.args_any.length) throw new Error('args_any must be a non-empty list of words');
   return { program: rule.program, args_any: [...rule.args_any], action: rule.action };
@@ -53,8 +55,11 @@ export function checkPolicy(value: unknown): Policy {
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) throw new Error('The rules file must hold an object');
   if (!strings(policy.path) || !policy.path.every(isAbsolute)) throw new Error('path must be a list of absolute directories');
   if (!Array.isArray(policy.rules)) throw new Error('rules must be a list');
+  // A file written before `unlisted` existed gets today's default.
+  const unlisted = policy.unlisted ?? 'allow';
+  if (!isAction(unlisted)) throw new Error('unlisted must be allow, confirm or deny');
   if (!strings(policy.gui_tools ?? [])) throw new Error('gui_tools must be a list of tool names');
-  return { path: [...policy.path], rules: policy.rules.map(checkRule), gui_tools: [...(policy.gui_tools as string[] | undefined ?? [])] };
+  return { path: [...policy.path], rules: policy.rules.map(checkRule), unlisted, gui_tools: [...(policy.gui_tools as string[] | undefined ?? [])] };
 }
 
 const policyFile = (home: string): string => join(home, 'policy.json');
@@ -67,12 +72,26 @@ export function loadPolicy(home: string): Policy {
 const sameRule = (left: Rule, right: { program: string; args_any?: readonly string[] }): boolean =>
   left.program === right.program && JSON.stringify(left.args_any ?? null) === JSON.stringify(right.args_any ?? null);
 
-/** One synchronous read → change → atomic write; the only way the rules are edited. */
-function editRules(home: string, change: (rules: Rule[]) => Rule[]): Policy {
-  const current = loadPolicy(home);
-  const next: Policy = { ...current, rules: change([...current.rules]) };
+/** One synchronous read → change → atomic write; the only way the rules file is edited. */
+function editPolicy(home: string, change: (policy: Policy) => Policy): Policy {
+  const next = checkPolicy(change(loadPolicy(home)));
   writeAtomic(policyFile(home), JSON.stringify(next, null, 2) + '\n');
   return next;
+}
+
+const editRules = (home: string, change: (rules: Rule[]) => Rule[]): Policy =>
+  editPolicy(home, policy => ({ ...policy, rules: change([...policy.rules]) }));
+
+/** What happens to a command no rule matches. */
+export function setUnlisted(home: string, value: unknown): Policy {
+  if (!isAction(value)) throw new Error('unlisted must be allow, confirm or deny');
+  return editPolicy(home, policy => ({ ...policy, unlisted: value }));
+}
+
+/** The directories programs are looked up in. */
+export function setPath(home: string, value: unknown): Policy {
+  if (!strings(value) || !value.length || !value.every(isAbsolute)) throw new Error('path must be a non-empty list of absolute directories');
+  return editPolicy(home, policy => ({ ...policy, path: [...new Set(value)] }));
 }
 
 /** Adds a rule, or changes the action of the rule with the same program and words. */
@@ -166,7 +185,7 @@ export function judge(policy: Policy | undefined, home: string, argv: readonly s
     const rule = policy.rules.find(item => item.action === action && matches(item, program, args));
     if (rule) return { verdict: action, rule: ruleName(rule) };
   }
-  return { verdict: 'deny', rule: 'not-listed' };
+  return { verdict: policy.unlisted, rule: policy.unlisted === 'deny' ? 'not-listed' : 'unlisted' };
 }
 
 /** The program's file among the policy's directories, or undefined when it is not installed there. */
@@ -188,7 +207,7 @@ export function programInHome(home: string, file: string): boolean {
 }
 
 /** The program names a task may ask for, for `machine_info`. */
-export function listedPrograms(policy: Policy): { allow: string[]; confirm: string[] } {
+export function listedPrograms(policy: Policy): { allow: string[]; confirm: string[]; deny: string[]; anything_else: Action } {
   const names = (action: Action): string[] => [...new Set(policy.rules.filter(rule => rule.action === action).map(ruleName))];
-  return { allow: names('allow'), confirm: names('confirm') };
+  return { allow: names('allow'), confirm: names('confirm'), deny: names('deny'), anything_else: policy.unlisted };
 }

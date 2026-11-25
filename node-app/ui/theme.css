@@ -349,6 +349,13 @@ dialog.sheet[open] { animation: sheet-in 0.2s cubic-bezier(0.2, 0.9, 0.3, 1); di
 .sheet-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 22px 20px; }
 .sheet-error { color: var(--red); font-size: 13px; padding: 0 22px 6px; }
 .sheet-error:empty { display: none; }
+.rule-list { display: grid; gap: 6px; }
+.rule { display: grid; grid-template-columns: 1fr 120px 28px; gap: 8px; align-items: center; }
+.rule-name { min-width: 0; overflow-wrap: anywhere; font-size: 13.5px; }
+.rule select, .rule-add select { height: 32px; }
+.rule-add { display: grid; grid-template-columns: 1fr 1.4fr 120px auto; gap: 8px; align-items: center; margin-top: 4px; }
+.rule-more { margin-bottom: 14px; font-size: 13px; }
+.rule-more summary { cursor: pointer; color: var(--text-2); margin-bottom: 10px; }
 
 .toasts { position: fixed; right: 20px; bottom: 20px; z-index: 60; display: grid; gap: 8px; }
 .toast {

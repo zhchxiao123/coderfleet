@@ -60,7 +60,7 @@ test('a project with machine access runs commands through the helper', { timeout
     say: 'echo "$@"', here: 'pwd', careful: 'echo careful "$@"', linger: '/bin/sleep 300 & echo $! > "$1"; wait',
   })) { writeFileSync(join(programs, name), '#!/bin/sh\n' + script + '\n'); chmodSync(join(programs, name), 0o755); }
   // Where programs are looked for is the one thing only the file's owner sets.
-  writeFileSync(join(home, 'policy.json'), JSON.stringify({ path: [programs], rules: [], gui_tools: [] }));
+  writeFileSync(join(home, 'policy.json'), JSON.stringify({ path: [programs], rules: [], unlisted: 'deny', gui_tools: [] }));
   process.env.CODERFLEET_HELPER_HOME = home;
   const env = await environment({
     accounts: 'NAME=claude-a TYPE=claude\nNAME=claude-direct TYPE=claude PROXY=off\n',
@@ -105,6 +105,11 @@ test('a project with machine access runs commands through the helper', { timeout
     assert.equal((await env.post('helper/policy', { set: { program: 'here', action: 'allow' } })).status, 200);
     assert.equal((await env.post('helper/policy', { set: { program: 'linger', action: 'allow' } })).status, 200);
     assert.deepEqual((await env.get('helper/policy')).body.policy.rules.map(rule => rule.program + ':' + rule.action), ['say:allow', 'careful:confirm', 'here:allow', 'linger:allow']);
+    // The rest of the rules file is set the same way: what unlisted commands get, and where programs are looked up.
+    assert.equal((await env.post('helper/policy', { unlisted: 'confirm' })).body.policy.unlisted, 'confirm');
+    assert.equal((await env.post('helper/policy', { unlisted: 'deny' })).body.policy.unlisted, 'deny');
+    assert.equal((await env.post('helper/policy', { path: ['relative'] })).status, 400);
+    assert.deepEqual((await env.post('helper/policy', { path: [programs] })).body.policy.path, [programs]);
 
     // Off by default: the task gets no connection.
     const conversation = (await env.post('conversations', { projectId: 'app' })).body.id;
