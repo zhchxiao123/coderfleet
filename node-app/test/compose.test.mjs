@@ -1,29 +1,15 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { generateCompose } from '../dist/compose.js';
 
-const repository = fileURLToPath(new URL('../../', import.meta.url));
+const fixture = fileURLToPath(new URL('./fixtures/compose.expected.json', import.meta.url));
 
-function python(workspace) {
-  const script = `
-import json, sys
-from pathlib import Path
-from coderfleet.compose import generate_compose, _gost_config_with_bypass
-data = generate_compose(Path(sys.argv[1]))
-print('@@' + json.dumps(data))
-`;
-  const output = execFileSync('uv', ['run', '--quiet', 'python', '-c', script, workspace], { cwd: repository, encoding: 'utf8', timeout: 240_000 });
-  return JSON.parse(output.slice(output.lastIndexOf('@@') + 2));
-}
-
-test('docker-compose generation matches the Python generator', { timeout: 300_000 }, async t => {
-  try { execFileSync('uv', ['--version'], { stdio: 'ignore' }); }
-  catch { t.skip('uv is not installed'); return; }
+// The expected file is the generated compose data with the temporary root written as <root>.
+test('docker-compose generation matches the recorded output', async () => {
   const root = await mkdtemp(join(tmpdir(), 'coderfleet-compose-test-'));
   try {
     const workspace = join(root, 'ws');
@@ -45,7 +31,7 @@ test('docker-compose generation matches the Python generator', { timeout: 300_00
       `NAME=off  ACCOUNT=claude-a  PATH=${projectB}  ACTIVE=off`,
     ].join('\n') + '\n');
     await writeFile(join(workspace, 'projects', 'alpha', 'env'), 'FOO=bar\n# comment\nBAZ = qux\n');
-    const expected = python(workspace);
+    const expected = JSON.parse((await readFile(fixture, 'utf8')).replaceAll('<root>', root));
     const actual = (await generateCompose(workspace, 'docker')).data;
     assert.deepEqual(Object.keys(expected.services).sort(),
       ['claude-project-alpha', 'codex-project-beta', 'ide-project-alpha', 'opencode-project-gamma', 'proxy-relay']);

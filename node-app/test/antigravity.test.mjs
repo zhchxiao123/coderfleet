@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { ControlMailbox } from '../dist/control.js';
 import { environment, lastTurn, until } from './helpers.mjs';
 import { fakeAgy } from './fakes.mjs';
@@ -107,28 +105,23 @@ test('a relay account refuses a container attached to a non-internal network', a
   } finally { await env.close(); }
 });
 
-test('the control mailbox is interchangeable with the Python implementation', async () => {
+test('the control mailbox carries a command to the worker and its reply back', async () => {
   const root = await mkdtemp(join(tmpdir(), 'coderfleet-control-test-'));
   try {
     const token = 'a'.repeat(64);
     const directory = join(root, 'task.control');
-    const node = new ControlMailbox(directory, 'task-1', token);
-    node.publish('accepting');
-    const script = resolve(fileURLToPath(new URL('../../coderfleet/data/scripts/coderfleet_sdk_control.py', import.meta.url)));
-    const python = `
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location('control', sys.argv[1]); module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-box = module.ControlMailbox(__import__('pathlib').Path(sys.argv[2]), 'task-1', sys.argv[3])
-box.submit('from-python', 'approval', {'tool_call_id': 'x', 'decision': 'allow'})
-print(json.dumps(box.reply('from-node')))
-`;
-    node.acknowledge('from-node', { ok: true });
-    const output = execFileSync('python3', ['-I', '-c', python, script, directory, token], { encoding: 'utf8' });
-    assert.equal(JSON.parse(output).status, 'accepted');
-    const [command] = node.pending();
-    assert.equal(command.id, 'from-python');
+    const worker = new ControlMailbox(directory, 'task-1', token);
+    const service = new ControlMailbox(directory, 'task-1', token);
+    worker.publish('accepting');
+    service.submit('from-service', 'approval', { tool_call_id: 'x', decision: 'allow' });
+    const [command] = worker.pending();
+    assert.equal(command.id, 'from-service');
     assert.deepEqual(command.payload, { tool_call_id: 'x', decision: 'allow' });
-    assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).generation, node.generation);
+    worker.acknowledge(command.id, { ok: true });
+    assert.deepEqual([service.reply('from-service').status, worker.pending().length], ['accepted', 0]);
+    assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).generation, worker.generation);
+    // Another run's capability cannot read this run's channel.
+    assert.throws(() => new ControlMailbox(directory, 'task-1', 'b'.repeat(64)).state(), /another Task run/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { fakeClaude } from './fakes.mjs';
 import { environment, lastTurn, until } from './helpers.mjs';
 
-const repository = fileURLToPath(new URL('../../', import.meta.url));
 const lines = values => values.map(value => typeof value === 'string' ? value : JSON.stringify(value)).join('\n') + '\n';
 
 /** Writes a Python-service conversation and its tasks into the workspace. */
@@ -127,22 +124,14 @@ test('Python history appears in every account format and new turns continue it',
     const again = await lastTurn(env, 'c9');
     assert.deepEqual([again.answer, again.status, again.sessionId], ['echo:again::resumed=claude-old', 'done', 'claude-old']);
 
-    // A new conversation started here is readable by the Python models.
+    // A new conversation started here is stored in the Python service's record format.
     const created = (await env.post('conversations', { projectId: 'app' })).body.id;
     await env.post('conversations/' + created + '/turns', { prompt: 'fresh' });
     const fresh = await until(() => lastTurn(env, created), value => value.status === 'done', 'fresh turn');
-    try { execFileSync('uv', ['--version'], { stdio: 'ignore' }); } catch { return; }
-    const script = `
-import sys
-from pathlib import Path
-from coderfleet.server.models import Conversation, Task
-ws = Path(sys.argv[1])
-c = Conversation.load(ws / 'conversations' / (sys.argv[2] + '.json'))
-t = Task.load(ws / 'tasks' / (sys.argv[3] + '.json'))
-print(c.name, c.type.value, c.native_session_id, t.status.value, t.conversation_id == c.id, t.native_session_id)
-`;
-    const output = execFileSync('uv', ['run', '--quiet', 'python', '-c', script, env.workspace, created, fresh.id], { cwd: repository, encoding: 'utf8' });
-    assert.equal(output.trim(), 'fresh claude claude-session-1 done True claude-session-1');
+    const record = JSON.parse(readFileSync(join(env.workspace, 'conversations', created + '.json'), 'utf8'));
+    const stored = JSON.parse(readFileSync(join(env.workspace, 'tasks', fresh.id + '.json'), 'utf8'));
+    assert.deepEqual([record.name, record.type, record.native_session_id], ['fresh', 'claude', 'claude-session-1']);
+    assert.deepEqual([stored.status, stored.conversation_id, stored.native_session_id], ['done', created, 'claude-session-1']);
   } finally { await env.close(); }
 });
 

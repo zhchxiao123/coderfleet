@@ -1,0 +1,204 @@
+{
+  "networks": {
+    "extnet": {
+      "driver": "bridge"
+    },
+    "intnet": {
+      "driver": "bridge",
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "172.21.0.0/16"
+          }
+        ]
+      }
+    }
+  },
+  "services": {
+    "claude-project-alpha": {
+      "image": "coderfleet:latest",
+      "platform": "linux/amd64",
+      "pull_policy": "never",
+      "container_name": "claude-alpha",
+      "restart": "unless-stopped",
+      "networks": {
+        "intnet": {}
+      },
+      "environment": {
+        "TZ": "UTC",
+        "CODEX_HOME": "/home/byclaw/.codex",
+        "CLAUDE_CONFIG_DIR": "/home/byclaw/.claude",
+        "CODERFLEET_ACCOUNT_NAME": "claude-a",
+        "CODERFLEET_ACCOUNT_TYPE": "claude",
+        "CODERFLEET_ACCOUNT_AUTH": "login",
+        "CODERFLEET_ACCOUNT_PROXY": "relay",
+        "HTTP_PROXY": "http://172.21.0.2:7890",
+        "HTTPS_PROXY": "http://172.21.0.2:7890",
+        "http_proxy": "http://172.21.0.2:7890",
+        "https_proxy": "http://172.21.0.2:7890",
+        "ALL_PROXY": "http://172.21.0.2:7890",
+        "all_proxy": "http://172.21.0.2:7890",
+        "NO_PROXY": "localhost,127.0.0.1,172.21.0.0/16",
+        "no_proxy": "localhost,127.0.0.1,172.21.0.0/16",
+        "CODERFLEET_RELAY_IP": "172.21.0.2",
+        "CODERFLEET_RELAY_PORT": "7890",
+        "CODERFLEET_MCP_BRIDGE_PORT": "8766",
+        "DOCKER_HOST": "unix:///var/run/docker.sock",
+        "CODERFLEET_HOST_WORKSPACE": "<root>/a",
+        "CODERFLEET_DOCKER_SOCKET": "/var/run/docker.sock",
+        "CODERFLEET_IDE": "on",
+        "CODERFLEET_IDE_PORT": "8080",
+        "CODERFLEET_IDE_AUTH": "none",
+        "CODERFLEET_IDE_BIND": "127.0.0.1",
+        "FOO": "bar",
+        "BAZ": "qux"
+      },
+      "volumes": [
+        "./accounts/claude-a:/home/byclaw/.claude",
+        "<root>/a:/workspace",
+        "./accounts/kimi-s:/home/byclaw/.kimi-code",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "<root>/extra:/data:ro",
+        "./ide-data/alpha:/home/byclaw/.local/share/code-server"
+      ],
+      "working_dir": "/workspace",
+      "dns": [
+        "172.21.0.2"
+      ],
+      "depends_on": {
+        "proxy-relay": {
+          "condition": "service_healthy"
+        }
+      }
+    },
+    "ide-project-alpha": {
+      "image": "alpine/socat:latest",
+      "container_name": "coderfleet-ide-alpha",
+      "restart": "unless-stopped",
+      "networks": {
+        "extnet": {},
+        "intnet": {}
+      },
+      "ports": [
+        "127.0.0.1:23456:8080"
+      ],
+      "entrypoint": [
+        "socat"
+      ],
+      "command": [
+        "TCP-LISTEN:8080,fork,reuseaddr",
+        "TCP:claude-project-alpha:8080"
+      ],
+      "depends_on": {
+        "claude-project-alpha": {
+          "condition": "service_started"
+        }
+      }
+    },
+    "codex-project-beta": {
+      "image": "custom:1",
+      "platform": "linux/amd64",
+      "pull_policy": "never",
+      "container_name": "codex-beta",
+      "restart": "unless-stopped",
+      "networks": {
+        "extnet": {}
+      },
+      "environment": {
+        "TZ": "UTC",
+        "CODEX_HOME": "/home/byclaw/.codex",
+        "CLAUDE_CONFIG_DIR": "/home/byclaw/.claude",
+        "CODERFLEET_ACCOUNT_NAME": "codex-b",
+        "CODERFLEET_ACCOUNT_TYPE": "codex",
+        "CODERFLEET_ACCOUNT_AUTH": "login",
+        "CODERFLEET_ACCOUNT_PROXY": "off"
+      },
+      "volumes": [
+        "./accounts/codex-b:/home/byclaw/.codex",
+        "<root>/b:/workspace"
+      ],
+      "working_dir": "/workspace"
+    },
+    "opencode-project-gamma": {
+      "image": "coderfleet:latest",
+      "platform": "linux/amd64",
+      "pull_policy": "never",
+      "container_name": "opencode-gamma",
+      "restart": "unless-stopped",
+      "networks": {
+        "intnet": {}
+      },
+      "environment": {
+        "TZ": "UTC",
+        "CODEX_HOME": "/home/byclaw/.codex",
+        "CLAUDE_CONFIG_DIR": "/home/byclaw/.claude",
+        "CODERFLEET_ACCOUNT_NAME": "open-env",
+        "CODERFLEET_ACCOUNT_TYPE": "opencode",
+        "CODERFLEET_ACCOUNT_AUTH": "env",
+        "CODERFLEET_ACCOUNT_PROXY": "relay",
+        "XDG_DATA_HOME": "/home/byclaw/.opencode/data",
+        "XDG_CONFIG_HOME": "/home/byclaw/.opencode/config",
+        "XDG_STATE_HOME": "/home/byclaw/.opencode/state",
+        "XDG_CACHE_HOME": "/home/byclaw/.opencode/cache",
+        "HTTP_PROXY": "http://172.21.0.2:7890",
+        "HTTPS_PROXY": "http://172.21.0.2:7890",
+        "http_proxy": "http://172.21.0.2:7890",
+        "https_proxy": "http://172.21.0.2:7890",
+        "ALL_PROXY": "http://172.21.0.2:7890",
+        "all_proxy": "http://172.21.0.2:7890",
+        "NO_PROXY": "localhost,127.0.0.1,172.21.0.0/16",
+        "no_proxy": "localhost,127.0.0.1,172.21.0.0/16",
+        "CODERFLEET_RELAY_IP": "172.21.0.2",
+        "CODERFLEET_RELAY_PORT": "7890",
+        "CODERFLEET_MCP_BRIDGE_PORT": "8766"
+      },
+      "volumes": [
+        "./accounts/open-env:/home/byclaw/.opencode",
+        "<root>/b:/workspace"
+      ],
+      "working_dir": "/workspace",
+      "dns": [
+        "172.21.0.2"
+      ],
+      "env_file": [
+        "./accounts/open-env/env"
+      ],
+      "depends_on": {
+        "proxy-relay": {
+          "condition": "service_healthy"
+        }
+      }
+    },
+    "proxy-relay": {
+      "image": "gogost/gost:3",
+      "container_name": "coderfleet-proxy-relay",
+      "restart": "unless-stopped",
+      "networks": {
+        "intnet": {
+          "ipv4_address": "172.21.0.2"
+        },
+        "extnet": {}
+      },
+      "extra_hosts": [
+        "host.docker.internal:host-gateway"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "sh",
+          "-c",
+          "nc -z localhost 7890"
+        ],
+        "interval": "8s",
+        "timeout": "4s",
+        "retries": 5,
+        "start_period": "5s"
+      },
+      "command": "-C /etc/gost/config.yaml",
+      "volumes": [
+        "./proxy-relay-config.yaml:/etc/gost/config.yaml:ro"
+      ]
+    }
+  }
+}

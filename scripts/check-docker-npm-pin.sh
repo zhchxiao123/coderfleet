@@ -11,13 +11,13 @@
 # regression window with no Dockerfile diff to blame.
 #
 # Env:
-#   MAP_DOCKERFILE   path to the Dockerfile to check (default: coderfleet/data/Dockerfile)
+#   MAP_DOCKERFILE   path to the Dockerfile to check (default: node-app/template/Dockerfile)
 
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-DOCKERFILE="${MAP_DOCKERFILE:-coderfleet/data/Dockerfile}"
+DOCKERFILE="${MAP_DOCKERFILE:-node-app/template/Dockerfile}"
 [ -f "$DOCKERFILE" ] || { echo "OK: no Dockerfile at $DOCKERFILE"; exit 0; }
 
 fail=0

@@ -20,7 +20,8 @@ This repo is single-context:
 ├── docs/adr/
 │   ├── 0001-....md
 │   └── 0002-....md
-└── coderfleet/
+├── node-app/
+└── mobile/
 ```
 
 ## Use the glossary's vocabulary
