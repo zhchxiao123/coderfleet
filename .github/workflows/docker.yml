@@ -19,6 +19,8 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.platform }}
+    # App 的发布（app-v*）不重建镜像。
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'app-v')
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

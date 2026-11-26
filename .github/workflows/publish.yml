@@ -15,6 +15,8 @@ permissions:
 jobs:
   publish:
     name: Build and publish
+    # App 的发布（app-v*）由 app.yml 负责，不发 PyPI。
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'app-v')
     runs-on: ubuntu-latest
     environment:
       name: pypi

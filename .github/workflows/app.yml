@@ -1,0 +1,209 @@
+name: Build apps
+
+# 桌面 App（Electron，node-app/）和手机 App（Flutter，mobile/）。
+#   push 到 main / PR  → 测试并构建，产物在本次运行的 Artifacts 里
+#   推送 app-v<版本> 标签 → 另外创建 GitHub Release 并附上全部安装包
+on:
+  push:
+    branches: [main]
+    tags: ['app-v*']
+    paths:
+      - 'node-app/**'
+      - 'mobile/**'
+      - '.github/workflows/app.yml'
+  pull_request:
+    paths:
+      - 'node-app/**'
+      - 'mobile/**'
+      - '.github/workflows/app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  FLUTTER_VERSION: '3.50.1'
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      label: ${{ steps.v.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+      # 标签必须与 node-app/package.json 的版本一致；非标签构建在文件名里带上提交号。
+      - id: v
+        run: |
+          version=$(node -p "require('./node-app/package.json').version")
+          if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
+            if [[ "$GITHUB_REF_NAME" != "app-v$version" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match node-app/package.json version $version"
+              exit 1
+            fi
+            label=$version
+          else
+            label=$version-${GITHUB_SHA::7}
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+            platform: darwin
+          # Windows 包不含原生模块，在 Linux 上交叉打包即可。
+          - name: Linux + Windows
+            runner: ubuntu-latest
+            platform: linux,win32
+    defaults:
+      run:
+        working-directory: node-app
+    env:
+      LABEL: ${{ needs.version.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node-app/package-lock.json
+
+      - name: Cache Node.js runtimes for the backend bundle
+        uses: actions/cache@v4
+        with:
+          path: node-app/.cache
+          key: backend-node-${{ hashFiles('node-app/scripts/package-backend.mjs') }}
+
+      - run: npm ci
+
+      - name: Test
+        if: runner.os == 'Linux'
+        run: npm test
+
+      - name: Package
+        run: npm run package -- --platform=${{ matrix.platform }} --arch=x64,arm64
+
+      - name: Archive (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p release
+          for arch in arm64 x64; do
+            app=out/CoderFleet-darwin-$arch/CoderFleet.app
+            # 没有开发者证书：做本机签名，否则 Apple 芯片上无法启动。
+            codesign --force --deep --sign - "$app"
+            ditto -c -k --sequesterRsrc --keepParent "$app" "release/CoderFleet-$LABEL-mac-$arch.zip"
+          done
+
+      - name: Archive (Linux, Windows, backend)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p release
+          for arch in x64 arm64; do
+            tar -czf "release/CoderFleet-$LABEL-linux-$arch.tar.gz" -C out "CoderFleet-linux-$arch"
+            (cd out && zip -qry "../release/CoderFleet-$LABEL-windows-$arch.zip" "CoderFleet-win32-$arch")
+          done
+          cp bundles/coderfleet-backend-*.tar.gz release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform == 'darwin' && 'mac' || 'linux-windows' }}
+          path: node-app/release/*
+          if-no-files-found: error
+          compression-level: 0
+
+  android:
+    name: Mobile (Android)
+    needs: version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+      - name: Build APK
+        run: |
+          flutter build apk --release \
+            --build-name=${{ needs.version.outputs.version }} \
+            --build-number=${{ github.run_number }}
+          mkdir -p release
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "release/CoderFleet-${{ needs.version.outputs.label }}-android.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-android
+          path: mobile/release/*
+          if-no-files-found: error
+          compression-level: 0
+
+  # 没有签名证书，出不了可安装的 ipa；这里只保证 iOS 工程能编译。
+  ios:
+    name: Mobile (iOS, compile only)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    needs: [version, desktop, android, ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --title "CoderFleet App ${{ needs.version.outputs.version }}" \
+            --generate-notes \
+            --latest

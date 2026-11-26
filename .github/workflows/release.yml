@@ -79,7 +79,7 @@ jobs:
           gh release create ${{ steps.ver.outputs.tag }} \
             --title "v${{ steps.ver.outputs.release }}" \
             --generate-notes \
-            --latest
+            --latest=false
 
       - name: Bump to next dev version
         run: |
