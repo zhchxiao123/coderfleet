@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "dev.coderfleet.coderfleet_mobile"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_local_notifications and androidx.core require API 37 to compile.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

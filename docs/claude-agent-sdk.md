@@ -215,7 +215,7 @@ CLI 使用 `coderfleet task run '要求' --project <项目> --model sonnet --sdk
 
 `GET /api/sdk/capabilities` 返回同源配置及操作 schema。支持 tools/allow/deny、system_prompt、fallback_model、轮数/费用/token 预算、thinking/effort、JSON Schema、Skills、插件、AgentDefinition、MCP、sandbox、settings/setting_sources、Hook 事件和增量输出。预算与模型支持仍由固定 SDK/CLI/模型决定；费用统计不是绝对费用承诺。身份、cwd、凭据、原生 session 归属和代理由 CoderFleet 管理，不能通过任意 SDK extra_args 覆盖。
 
-Python 回调通过 `"extension":{"path":"extension.py"}` 显式加载。文件相对配置项目根目录，必须解析在该根内；工厂默认 `create(context)`，可同步或异步，返回 `hooks`、`mcp_servers`、`session_store`。仅账号 worker 执行它，主服务不会 import 项目模块。示例见 [claude_sdk_extension.py](../examples/claude_sdk_extension.py)，包含 Hook 和 SDK 进程内 echo 工具。凭据使用账号/项目环境，避免写入可见的 Task JSON。
+Python 回调通过 `"extension":{"path":"extension.py"}` 显式加载。文件相对配置项目根目录，必须解析在该根内；工厂默认 `create(context)`，可同步或异步，返回 `hooks`、`mcp_servers`、`session_store`。仅账号 worker 执行它，主服务不会 import 项目模块。示例见 [claude_sdk_extension.py](https://github.com/zhchxiao123/coderfleet/blob/main/examples/claude_sdk_extension.py)，包含 Hook 和 SDK 进程内 echo 工具。凭据使用账号/项目环境，避免写入可见的 Task JSON。
 
 `"session_store":{"type":"sqlite"}` 启用账号目录下独立的 SQLite 镜像，保留未知 JSON 字段，跨进程事务追加，按 UUID 幂等；本地原生记录仍保留。也可由工厂提供远程 SessionStore，其管理操作沿用账号运行位置和 relay/代理。支持 `session_store_flush` 与 `load_timeout_ms`。镜像写入失败会显示提示；不能把 Task 成功等同于远程备份始终成功。
 

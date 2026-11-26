@@ -37,6 +37,12 @@ theme:
         icon: material/weather-sunny
         name: 切换到浅色模式
 
+# 内部调研、事故复盘和计划文档引用仓库里的源码，不进文档站。
+exclude_docs: |
+  research/
+  incidents/
+  plans/
+
 nav:
   - 首页: index.md
   - 快速开始: quickstart.md
