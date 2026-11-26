@@ -22,9 +22,9 @@
   }
 
   function link(href, children) {
-    // Only web links are clickable; file and other schemes stay plain text.
+    // Only web links are clickable; file and other schemes stay plain text. The desktop shell opens them in the system browser.
     if (!/^https?:\/\//i.test(href)) return h('span', children);
-    return h('a', { href, title: href, rel: 'noreferrer', on: { click: event => event.preventDefault() } }, children);
+    return h('a', { href, title: href, target: '_blank', rel: 'noopener noreferrer' }, children);
   }
 
   function table(lines) {

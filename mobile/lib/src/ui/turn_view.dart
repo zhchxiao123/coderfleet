@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../backend.dart';
 import '../models.dart';
@@ -294,6 +295,11 @@ class Answer extends StatelessWidget {
           tableBorder: TableBorder.all(color: palette.line), tableHead: base.copyWith(fontWeight: FontWeight.w600),
           tableBody: base.copyWith(fontSize: 14), tableCellsPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         ),
+        // Links open in the phone's browser; anything that is not a web address stays inert.
+        onTapLink: (_, href, _) {
+          final uri = Uri.tryParse(href ?? '');
+          if (uri != null && (uri.isScheme('http') || uri.isScheme('https'))) launchUrl(uri, mode: LaunchMode.externalApplication).ignore();
+        },
         builders: {'pre': _CodeBlock(palette)},
       ),
     );

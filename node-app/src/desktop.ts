@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, safeStorage, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, safeStorage, shell, type IpcMainInvokeEvent } from 'electron';
 import { findBundle, freePort, install, probe, Tunnel, validateTarget, type SshTarget } from './remote.js';
 import { atomicJSON, LOCAL_HOSTS, localUrl, message, readConfig, record, text } from './state.js';
 import { BUILD_ID } from './version.js';
@@ -438,8 +438,12 @@ async function createWindow(): Promise<void> {
       preload: fileURLToPath(new URL('../ui/preload.cjs', import.meta.url)),
     },
   });
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', event => event.preventDefault());
+  // The window never leaves the app page: a web link opens in the system browser instead.
+  const openInBrowser = (url: string): void => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url).catch(() => undefined);
+  };
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => { openInBrowser(url); return { action: 'deny' }; });
+  mainWindow.webContents.on('will-navigate', (event, url) => { event.preventDefault(); openInBrowser(url); });
   mainWindow.once('closed', () => { mainWindow = undefined; });
   await mainWindow.loadFile(uiPath);
 }
