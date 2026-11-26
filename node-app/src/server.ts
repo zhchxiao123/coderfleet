@@ -722,6 +722,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (action === 'stop') return lifecycle.stopProject(name as string);
       return lifecycle.restartProject(name as string);
     }],
+    // Every container at once. Main token only (not in DEVICE_ROUTES).
+    ['POST', /^containers\/(start|stop|restart)$/, async (_request, [action]) => {
+      if (action === 'start') return lifecycle.startAll();
+      if (action === 'stop') return lifecycle.stopAll();
+      return lifecycle.restartAll();
+    }],
     ['POST', /^projects\/([\w-]+)\/(enable|disable)$/, async (_request, [name, action]) => {
       project(name as string);
       setProjectActive(workspace, name as string, action === 'enable');

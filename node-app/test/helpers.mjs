@@ -38,7 +38,8 @@ if (command === 'rm') { for (const name of args.filter(value => !value.startsWit
 if (command === 'compose') {
   const services = args.slice(3).filter(value => !value.startsWith('-'));
   const action = args[2];
-  for (const service of services) {
+  // Without services, compose acts on every container of the file.
+  for (const service of services.length || action !== 'stop' ? services : Object.keys(containers)) {
     const name = service.replace('-project-', '-');
     if (action === 'up') containers[name] = 'running';
     if (action === 'stop' && containers[name]) containers[name] = 'exited';

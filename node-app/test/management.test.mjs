@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 import { environment, until } from './helpers.mjs';
 
 const operation = (env, id) => until(() => env.get('operations/' + id), value => value.body.status !== 'running', 'operation ' + id);
@@ -143,5 +145,55 @@ test('login runs in the running project container', async () => {
     }, chunk => chunk.exited, 'login exit');
     assert.match(output, /login args: login --device-auth/);
     assert.match(output, /got ABC-123/);
+  } finally { await env.close(); }
+});
+
+test('all containers start, stop and restart at once, from the App and the command line', async () => {
+  const env = await environment({
+    accounts: 'NAME=claude-a TYPE=claude\nNAME=codex-a TYPE=codex\n',
+    projects: project => `NAME=web ACCOUNT=claude-a PATH=${project}\nNAME=api ACCOUNT=codex-a PATH=${project}\nNAME=old ACCOUNT=codex-a PATH=${project} ACTIVE=off\n`,
+    containers: { 'codex-old': 'running' },
+  });
+  const states = async () => Object.fromEntries((await env.get('projects')).body.map(item => [item.name, item.state]));
+  const calls = () => readFileSync(join(env.root, 'docker.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(call => call[0] === 'compose').map(call => call.slice(3));
+  const cli = async (...args) => (await promisify(execFile)(process.execPath, ['dist/cli.js', ...args, '--config', join(env.root, 'config.json')], { encoding: 'utf8' })).stdout;
+  try {
+    // Nothing was ever started: there is no docker-compose.yml to stop.
+    assert.equal((await env.post('containers/stop')).status, 400);
+
+    // Start: the enabled projects only; a disabled one is left as it is.
+    const started = (await env.post('containers/start')).body;
+    assert.deepEqual([started.kind, started.target], ['start', '全部容器']);
+    assert.equal((await operation(env, started.id)).body.status, 'succeeded');
+    assert.deepEqual(await states(), { web: 'running', api: 'running', old: 'running' });
+    assert.deepEqual(calls().at(-1), ['up', '-d', 'claude-project-web', 'codex-project-api']);
+
+    // Stop: everything in the file, the disabled project's container too.
+    assert.equal((await operation(env, (await env.post('containers/stop')).body.id)).body.status, 'succeeded');
+    assert.deepEqual(await states(), { web: 'exited', api: 'exited', old: 'exited' });
+    assert.deepEqual(calls().at(-1), ['stop']);
+
+    // Restart, and one project's operation cannot run into it.
+    const restarted = (await env.post('containers/restart')).body;
+    assert.equal((await env.post('containers/restart')).body.id, restarted.id);
+    const refused = await env.post('projects/web/stop');
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error, /正在重启 全部容器/);
+    assert.equal((await operation(env, restarted.id)).body.status, 'succeeded');
+    assert.deepEqual(await states(), { web: 'running', api: 'running', old: 'exited' });
+    assert.deepEqual(calls().slice(-2), [['stop'], ['up', '-d', 'claude-project-web', 'codex-project-api']]);
+
+    // The same from the command line, for all and for one project.
+    assert.match(await cli('containers', 'list'), /^web {2}运行中 {2}claude-a .*\napi {2}运行中 {2}codex-a .*\nold {2}已停止 {2}codex-a {2}.*已停用/);
+    assert.equal(await cli('containers', 'stop'), '全部容器 已停止\n');
+    assert.deepEqual(await states(), { web: 'exited', api: 'exited', old: 'exited' });
+    assert.equal(await cli('containers', 'start', 'api'), 'api 已启动\n');
+    assert.deepEqual(await states(), { web: 'exited', api: 'running', old: 'exited' });
+    await assert.rejects(cli('containers', 'start', 'nope'), /项目不存在/);
+    await assert.rejects(cli('containers', 'down'), /Usage/);
+
+    // With no enabled project there is nothing to start.
+    for (const name of ['web', 'api']) await env.post('projects/' + name + '/disable');
+    assert.equal((await env.post('containers/start')).status, 400);
   } finally { await env.close(); }
 });

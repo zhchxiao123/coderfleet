@@ -13,6 +13,29 @@
     await CF.app.refreshProjects();
   };
 
+  /** Start, stop or restart every container; rows show it as their own operation while it runs. */
+  const ALL = {
+    start: { label: '启动', title: '启动全部容器？', text: () => '会启动所有已启用项目的容器和 relay，已经在运行的不受影响。' },
+    stop: { label: '停止', title: '停止全部容器？', danger: true,
+      text: active => (active ? '有 ' + active + ' 个对话正在进行，会被中断。' : '') + '所有项目容器和 relay 都会停下，容器保留，里面装过的软件还在。' },
+    restart: { label: '重启', title: '重启全部容器？', danger: true,
+      text: active => (active ? '有 ' + active + ' 个对话正在进行，会被中断。' : '') + '所有容器先停下再启动，环境变量和挂载目录的修改随之生效。' },
+  };
+  const all = async (action, button) => {
+    const { label, title, text, danger = false } = ALL[action];
+    const active = CF.state.conversations.filter(item => ['starting', 'running'].includes(item.status)).length;
+    if (!await CF.confirm(title, text(active), { danger, label: '全部' + label })) return;
+    const operation = await CF.busy(button, () => CF.api('POST', 'containers/' + action));
+    if (!operation) return;
+    const affected = { start: item => item.active && item.state !== 'running', stop: item => item.state === 'running', restart: item => item.active || item.state === 'running' }[action];
+    const ids = CF.state.projects.filter(item => item.runtime === 'container' && affected(item)).map(item => item.id);
+    for (const id of ids) pending.set(id, label);
+    CF.app.renderCurrent();
+    await CF.trackOperation(operation, '全部容器 · ' + label, () => void CF.app.refreshProjects());
+    for (const id of ids) pending.delete(id);
+    await CF.app.refreshProjects();
+  };
+
   CF.projects = {
     async start(id, button) {
       const operation = await CF.busy(button, () => CF.api('POST', 'projects/' + id + '/start'));
@@ -234,6 +257,13 @@
       };
 
       const running = projects.filter(item => item.state === 'running').length;
+      const containers = projects.filter(item => item.runtime === 'container');
+      const startable = containers.some(item => item.active && item.state !== 'running');
+      const allButton = containers.length ? h('button.btn.small', { disabled: pending.size > 0 || (!startable && !running), on: { click: () => CF.menu(allButton, [
+        startable ? { label: '全部启动', icon: 'play', run: () => all('start', allButton) } : null,
+        running ? { label: '全部重启', icon: 'restart', run: () => all('restart', allButton) } : null,
+        running ? { label: '全部停止', icon: 'stop', danger: true, run: () => all('stop', allButton) } : null,
+      ]) } }, CF.icon('box', 13), '全部容器') : null;
       const active = CF.state.conversations.filter(item => ['starting', 'running'].includes(item.status)).length;
       const waiting = CF.state.conversations.filter(item => item.attention).length;
       const stat = (icon, tone, label, value, total, sub) => h('div.stat',
@@ -250,7 +280,7 @@
           stat('chat', 'neutral', '进行中', active, undefined, '个对话'),
           stat('shield', 'amber', '等你确认', waiting, undefined, waiting ? '去对话里处理' : '没有待办')),
         projects.length
-          ? h('div.card', h('div.card-head', h('div', h('h2', '全部项目'), h('p', '每个项目在自己账号的容器里运行，网络只经 relay 出去。'))), h('ul.list', CF.pins.sort(projects).map(row)))
+          ? h('div.card', h('div.card-head', h('div', h('h2', '全部项目'), h('p', '每个项目在自己账号的容器里运行，网络只经 relay 出去。')), allButton), h('ul.list', CF.pins.sort(projects).map(row)))
           : h('div.card', h('div.empty', h('div.glyph', CF.icon('folder', 22)), h('h3', '还没有项目'),
             h('p', '选一个本地目录作为项目，用某个账号在容器里打开它。'),
             h('button.btn.primary', { on: { click: () => CF.projects.create() } }, CF.icon('plus', 14), '新建项目'))),

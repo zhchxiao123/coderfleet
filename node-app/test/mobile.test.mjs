@@ -30,7 +30,7 @@ test('a paired phone gets a chat-only token that can be revoked', { timeout: 120
     assert.equal((await env.as(phone, 'POST', 'conversations/' + conversation + '/turns', { prompt: 'hello' })).status, 200);
     await until(async () => (await env.as(phone, 'GET', 'conversations/' + conversation + '/turns')).body.at(-1), turn => turn?.status === 'done', 'phone turn');
     // ...but not manage the computer.
-    for (const [method, path] of [['GET', 'accounts'], ['GET', 'settings'], ['POST', 'projects/app/terminal'], ['GET', 'mobile'], ['POST', 'devices'], ['DELETE', 'projects/app']]) {
+    for (const [method, path] of [['GET', 'accounts'], ['GET', 'settings'], ['POST', 'projects/app/terminal'], ['GET', 'mobile'], ['POST', 'devices'], ['DELETE', 'projects/app'], ['POST', 'containers/stop']]) {
       assert.equal((await env.as(phone, method, path, {})).status, 403, method + ' ' + path);
     }
     // The desktop sees when and from where it was used, and revokes it.

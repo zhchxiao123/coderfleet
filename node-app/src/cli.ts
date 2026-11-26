@@ -8,6 +8,8 @@
 //                    做完为止 jobs of the running service (config: --config <path>)
 //   schedule list | show <id> | add <project> <rule> <prompt> [--job] | edit <id> … | on|off|run|remove <id>
 //                    定时: things the service starts by itself (rule: daily HH:MM | weekly 1,3 HH:MM | every <hours>)
+//   containers list | start|stop|restart [project]
+//                    容器: all containers at once, or one project's (stop keeps them; the relay stops with all)
 //   helper status | install | start | stop | upgrade | restart-relay | access <project> off|command
 //          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | policy unlisted <allow|confirm|deny> | policy path <directory> … | audit [n]
 //                    机器助手: the separate program that runs listed commands on this machine for tasks
@@ -25,7 +27,7 @@ const argv = process.argv.slice(2);
 const flag = argv.indexOf('--config');
 const flagged = flag >= 0 ? argv.splice(flag, 2)[1] : undefined;
 const [mode, rawPath] = argv;
-const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' || mode === 'helper' ? '' : rawPath) || join(home, 'config.json'));
+const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' || mode === 'helper' || mode === 'containers' ? '' : rawPath) || join(home, 'config.json'));
 
 const JOB_STATES: Readonly<Record<string, string>> = { working: '在做', waiting: '等你', review: '待验收', accepted: '已收下', discarded: '已丢弃' };
 interface JobView { conversationId: string; projectId: string; title: string; branch: string; state: string; error?: string; mergeError?: string; mergedInto?: string; createdAt: string;
@@ -42,6 +44,18 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   const result = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(result.error || 'HTTP ' + response.status);
   return result;
+}
+
+interface OperationView { id: string; status: string; error?: string }
+
+/** Waits for a background operation of the service; throws with its error when it fails. */
+async function finished(operation: OperationView, failure: string): Promise<void> {
+  let current = operation;
+  while (current.status === 'running') {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    current = await call<OperationView>('GET', 'operations/' + current.id);
+  }
+  if (current.status !== 'succeeded') throw new Error(current.error || failure);
 }
 
 function jobLine(job: JobView): string {
@@ -169,12 +183,7 @@ async function helperCommand(verb: string | undefined, args: string[]): Promise<
   if (verb === 'status') console.log(helperLines(await call<HelperView>('GET', 'helper')));
   else if (verb === 'install' || verb === 'start' || verb === 'stop' || verb === 'upgrade') console.log(helperLines(await call<HelperView>('POST', 'helper/' + verb, {})));
   else if (verb === 'restart-relay') {
-    let operation = await call<{ id: string; status: string; error?: string }>('POST', 'helper/restart-relay', {});
-    while (operation.status === 'running') {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      operation = await call('GET', 'operations/' + operation.id);
-    }
-    if (operation.status !== 'succeeded') throw new Error(operation.error || 'relay 没有重启成功');
+    await finished(await call<OperationView>('POST', 'helper/restart-relay', {}), 'relay 没有重启成功');
     console.log('relay 已重启');
   } else if (verb === 'access' && args[0] && args[1]) {
     console.log(args[0] + '  ' + (await call<{ helper: string }>('PUT', 'projects/' + args[0] + '/helper', { access: args[1] })).helper);
@@ -191,6 +200,21 @@ async function helperCommand(verb: string | undefined, args: string[]): Promise<
     const { records } = await call<{ records: unknown[] }>('GET', 'helper/audit?n=' + (Number(args[0]) || 50));
     console.log(records.length ? records.map(item => JSON.stringify(item)).join('\n') : '还没有操作记录');
   } else throw new Error(HELPER_USAGE);
+}
+
+const CONTAINER_VERBS: Readonly<Record<string, string>> = { start: '启动', stop: '停止', restart: '重启' };
+const CONTAINER_STATES: Readonly<Record<string, string>> = { running: '运行中', exited: '已停止', created: '未启动', missing: '未创建' };
+interface ProjectView { name: string; account: string; typeLabel: string; active: boolean; runtime: string; state: string; path: string }
+
+async function containersCommand(verb: string | undefined, args: string[]): Promise<void> {
+  if (verb === 'list') {
+    const projects = (await call<ProjectView[]>('GET', 'projects')).filter(item => item.runtime === 'container');
+    console.log(projects.length ? projects.map(item => [item.name, CONTAINER_STATES[item.state] ?? item.state, item.account, item.typeLabel + (item.active ? '' : ' · 已停用'), item.path].join('  ')).join('\n') : '还没有容器项目');
+  } else if (verb && CONTAINER_VERBS[verb] && args.length <= 1) {
+    const label = CONTAINER_VERBS[verb] as string;
+    await finished(await call<OperationView>('POST', (args[0] ? 'projects/' + args[0] : 'containers') + '/' + verb, {}), '没有' + label + '成功');
+    console.log((args[0] ?? '全部容器') + ' 已' + label);
+  } else throw new Error('Usage: coderfleet-backend containers list | start|stop|restart [project] [--config config.json]');
 }
 
 try {
@@ -229,11 +253,13 @@ try {
     await jobCommand(argv[1], argv.slice(2));
   } else if (mode === 'schedule') {
     await scheduleCommand(argv[1], argv.slice(2));
+  } else if (mode === 'containers') {
+    await containersCommand(argv[1], argv.slice(2));
   } else if (mode === 'helper') {
     await helperCommand(argv[1], argv.slice(2));
   } else if (mode === 'version') {
     console.log(VERSION);
-  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | helper … | version');
+  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | containers … | helper … | version');
 } catch (error) {
   console.error(message(error));
   process.exitCode = 1;

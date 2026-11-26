@@ -26,6 +26,9 @@ export interface Operation {
   error?: string;
 }
 
+/** Target of the operations on every container at once; never a project name (those are ASCII). */
+export const ALL_CONTAINERS = '全部容器';
+
 const LABELS: Readonly<Record<OperationKind, string>> = { build: '构建镜像', start: '启动', stop: '停止', restart: '重启', remove: '删除' };
 
 /** What the App shows for a background operation without its full log. */
@@ -96,11 +99,19 @@ export class Lifecycle {
     return truthy(project.record.IDE ?? 'off') ? [project.service, 'ide-project-' + project.name] : [project.service];
   }
 
+  private activeServices(): string[] {
+    const services = readWorkspace(this.workspace).projects.filter(item => item.active && item.account.runtime === 'container').flatMap(item => this.services(item));
+    if (!services.length) throw new WorkspaceError('没有已启用的容器项目');
+    return services;
+  }
+
   private compose(): string[] { return ['compose', '-f', join(this.workspace, 'docker-compose.yml')]; }
 
   private start(kind: OperationKind, target: string, steps: (log: (text: string) => void, exec: (args: string[]) => Promise<void>) => Promise<void>): Operation {
-    const key = kind === 'build' ? 'image' : 'project:' + target;
-    const current = this.operations.get(this.busy.get(key) ?? '');
+    const key = kind === 'build' ? 'image' : target === ALL_CONTAINERS ? 'all' : 'project:' + target;
+    // One project's operation and one on all containers would run `docker compose` on the same services.
+    const clash = key === 'all' ? [...this.busy.keys()].find(item => item.startsWith('project:')) : key === 'image' ? undefined : 'all';
+    const current = this.operations.get(this.busy.get(key) ?? '') ?? this.operations.get(this.busy.get(clash ?? '') ?? '');
     if (current) {
       // Asking again for what is already running returns it, so the App can show its progress.
       if (current.kind === kind && current.target === target) return current;
@@ -169,6 +180,33 @@ export class Lifecycle {
       await this.writeCompose();
       await exec([...this.compose(), 'stop', ...this.services(project)]);
       await exec([...this.compose(), 'up', '-d', ...this.services(project)]);
+    });
+  }
+
+  /** Starts the containers of every enabled project (and, through them, the relay). */
+  public startAll(): Operation {
+    const services = this.activeServices();
+    return this.start('start', ALL_CONTAINERS, async (_log, exec) => {
+      await this.writeCompose();
+      await exec([...this.compose(), 'up', '-d', ...services]);
+    });
+  }
+
+  /** Stops every container in docker-compose.yml, the relay included. Containers are kept, so what was installed in them stays. */
+  public stopAll(): Operation {
+    if (!existsSync(join(this.workspace, 'docker-compose.yml'))) throw new WorkspaceError('还没有启动过容器');
+    return this.start('stop', ALL_CONTAINERS, async (_log, exec) => {
+      await exec([...this.compose(), 'stop']);
+    });
+  }
+
+  /** Stops everything, then starts the enabled projects from a freshly written docker-compose.yml. */
+  public restartAll(): Operation {
+    const services = this.activeServices();
+    return this.start('restart', ALL_CONTAINERS, async (_log, exec) => {
+      await this.writeCompose();
+      await exec([...this.compose(), 'stop']);
+      await exec([...this.compose(), 'up', '-d', ...services]);
     });
   }
 
