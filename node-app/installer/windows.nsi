@@ -1,5 +1,5 @@
 ; Windows installer for the packaged App. Built on Linux by scripts/installers.sh:
-;   makensis -DVERSION=0.1.0 -DSOURCE=out/CoderFleet-win32-x64 -DOUTFILE=CoderFleet-Setup.exe installer/windows.nsi
+;   makensis -DVERSION=0.2.0 -DNUMERIC=0.2.0 -DSOURCE=out/CoderFleet-win32-x64 -DOUTFILE=CoderFleet-Setup.exe installer/windows.nsi
 ; Installs for the current user (no administrator rights), with Start menu and
 ; desktop shortcuts and an entry under "Installed apps".
 Unicode true
@@ -15,10 +15,10 @@ Name "${APP}"
 OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\Programs\${APP}"
 InstallDirRegKey HKCU "Software\${APP}" "InstallDir"
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${NUMERIC}.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "FileDescription" "${APP} Setup"
-VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${NUMERIC}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "CoderFleet"
 

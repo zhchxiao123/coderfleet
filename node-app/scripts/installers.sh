@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 label=${1:?usage: installers.sh <label> [mac|windows|linux]...}
 shift
 version=$(node -p "require('./package.json').version")
+# Windows version resources take numbers only: 0.2.0+36a1781 → 0.2.0.
+numeric=${version%%[+-]*}
 mkdir -p release
 
 mac() {
@@ -32,7 +34,7 @@ windows() {
   local arch
   for arch in x64 arm64; do
     [ -d "out/CoderFleet-win32-$arch" ] || continue
-    makensis -V2 -DVERSION="$version" -DSOURCE="$PWD/out/CoderFleet-win32-$arch" -DICON="$PWD/icons/coderfleet.ico" \
+    makensis -V2 -DVERSION="$version" -DNUMERIC="$numeric" -DSOURCE="$PWD/out/CoderFleet-win32-$arch" -DICON="$PWD/icons/coderfleet.ico" \
       -DOUTFILE="$PWD/release/CoderFleet-$label-windows-$arch-setup.exe" installer/windows.nsi
   done
 }

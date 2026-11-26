@@ -37,18 +37,30 @@ jobs:
       label: ${{ steps.v.outputs.label }}
     steps:
       - uses: actions/checkout@v4
-      # 标签必须与 node-app/package.json 的版本一致；非标签构建在文件名里带上提交号。
+        with:
+          fetch-depth: 0
+      # 规则见 RELEASING.md。正式版：标签 app-v<版本>，必须与两个 App 的版本号一致，且提交在 main 上。
+      # 其他构建：版本号后面带提交号（<版本>+<提交号>），文件名和 App 里显示的都是它。
       - id: v
         run: |
           version=$(node -p "require('./node-app/package.json').version")
+          mobile=$(sed -n 's/^version: *\([^+]*\).*/\1/p' mobile/pubspec.yaml)
+          if [[ "$mobile" != "$version" ]]; then
+            echo "::error::mobile/pubspec.yaml is $mobile but node-app/package.json is $version"
+            exit 1
+          fi
           if [[ "$GITHUB_REF" == refs/tags/app-v* ]]; then
             if [[ "$GITHUB_REF_NAME" != "app-v$version" ]]; then
               echo "::error::Tag $GITHUB_REF_NAME does not match node-app/package.json version $version"
               exit 1
             fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::Tag $GITHUB_REF_NAME is not on main"
+              exit 1
+            fi
             label=$version
           else
-            label=$version-${GITHUB_SHA::7}
+            label=$version+${GITHUB_SHA::7}
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "label=$label" >> "$GITHUB_OUTPUT"
@@ -94,8 +106,13 @@ jobs:
         if: runner.os == 'Linux'
         run: npm test
 
+      # 非正式构建把带提交号的版本写进 package.json：App 和后端显示、比较的都是它。
+      # 系统层面的版本字段（Info.plist、exe 资源）只能是数字，仍用基础版本号。
+      - name: Stamp the build version
+        run: npm pkg set version="$LABEL"
+
       - name: Package
-        run: npm run package -- --platform=${{ matrix.platform }} --arch=x64,arm64
+        run: npm run package -- --platform=${{ matrix.platform }} --arch=x64,arm64 --app-version=${{ needs.version.outputs.version }}
 
       # 安装包：macOS .dmg；Windows 安装程序和 Linux .deb / .tar.gz 都在 Linux 上做。
       - name: Installers (macOS)
@@ -144,7 +161,7 @@ jobs:
       - name: Build APK
         run: |
           flutter build apk --release \
-            --build-name=${{ needs.version.outputs.version }} \
+            --build-name=${{ needs.version.outputs.label }} \
             --build-number=${{ github.run_number }}
           mkdir -p release
           cp build/app/outputs/flutter-apk/app-release.apk \

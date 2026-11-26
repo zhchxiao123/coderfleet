@@ -79,10 +79,8 @@ cd mobile && flutter pub get && flutter test && flutter run
 
 ### 发布新版本
 
-修改 `node-app/package.json` 的 `version`，合入 `main` 后推送同名标签：
-
 ```bash
-git tag app-v0.2.0 && git push origin app-v0.2.0
+scripts/release.sh 0.2.1
 ```
 
-[app.yml](.github/workflows/app.yml) 会测试并构建全部平台，然后创建带安装包的 GitHub Release。
+规则见 [RELEASING.md](RELEASING.md)。[app.yml](.github/workflows/app.yml) 会测试并构建全部平台，然后创建带安装包的 GitHub Release。

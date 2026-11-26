@@ -23,7 +23,7 @@ flutter analyze
 flutter test
 ```
 
-Releases: bump `version` in `node-app/package.json`, then push the tag `app-v<version>`; `.github/workflows/app.yml` builds every platform and creates the GitHub Release.
+Releases: `scripts/release.sh <version>` (sets the version in both Apps, commits, tags `app-v<version>`, pushes); `.github/workflows/app.yml` builds every platform and creates the GitHub Release. Never bump the version or tag by hand; the rules are in `RELEASING.md`.
 
 ## Architecture
 
