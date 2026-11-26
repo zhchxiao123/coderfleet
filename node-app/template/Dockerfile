@@ -163,12 +163,16 @@ RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/in
     && rtk --version
 
 # ── Rust 1.93.0 ───────────────────────────────────────────
+# 默认用国内镜像；在国外构建（例如 CI 发布的镜像）时换成官方源：
+#   --build-arg RUSTUP_MIRROR=https://static.rust-lang.org --build-arg RUSTUP_INIT=https://sh.rustup.rs
+ARG RUSTUP_MIRROR=https://rsproxy.cn
+ARG RUSTUP_INIT=https://rsproxy.cn/rustup-init.sh
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUSTUP_DIST_SERVER=https://rsproxy.cn \
-    RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-RUN curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y --no-modify-path --default-toolchain 1.93.0 \
+    RUSTUP_DIST_SERVER=$RUSTUP_MIRROR \
+    RUSTUP_UPDATE_ROOT=$RUSTUP_MIRROR/rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf $RUSTUP_INIT | sh -s -- -y --no-modify-path --default-toolchain 1.93.0 \
     && chmod -R a+w $RUSTUP_HOME $CARGO_HOME \
     && rustc --version
 

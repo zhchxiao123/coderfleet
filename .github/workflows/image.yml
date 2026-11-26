@@ -52,6 +52,10 @@ jobs:
         with:
           context: node-app/template
           platforms: linux/${{ matrix.arch }}
+          # The Dockerfile defaults to a mirror in China, which is unreliable from here.
+          build-args: |
+            RUSTUP_MIRROR=https://static.rust-lang.org
+            RUSTUP_INIT=https://sh.rustup.rs
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
