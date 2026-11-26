@@ -143,7 +143,7 @@ export class Terminals {
     const config = loadConfig(this.workspace);
     const image = imageName(config);
     try { await run(this.dockerPath, ['image', 'inspect', '--format', '{{.Id}}', image], { timeout: 10_000 }); }
-    catch { throw new WorkspaceError('镜像 ' + image + ' 不存在，请先在「设置」里构建镜像'); }
+    catch { throw new WorkspaceError('镜像 ' + image + ' 不存在，请先在「通用」里构建镜像'); }
     const proxyUrl = 'http://' + (config.PROXY_HOST || 'host.docker.internal') + ':' + (config.PROXY_HTTP_PORT || '7890');
     const authSource = join(this.workspace, 'accounts', account.name);
     ensureBindMountDir(authSource);

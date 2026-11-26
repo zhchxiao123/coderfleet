@@ -148,7 +148,7 @@
       try { await CF.api('PUT', 'projects/' + project.id + '/helper', { access: on ? 'off' : 'command' }); }
       catch (error) { CF.fail(error); return; }
       await CF.app.refreshProjects();
-      CF.toast(on ? '已关闭，正在运行的任务也用不了了' : '已允许。机器助手在「设置」里安装和启动');
+      CF.toast(on ? '已关闭，正在运行的任务也用不了了' : '已允许。机器助手在「通用」里安装和启动');
     },
 
     /**

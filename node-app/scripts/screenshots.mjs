@@ -19,11 +19,8 @@ try {
   const errors = globalThis.pageErrors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  // 项目 / 账号 / 通用 are tabs of the settings screen, opened from the rail.
-  const openTab = async tab => {
-    if (!(await page.$('.settings-tab'))) await page.click('.rail-btn[title^="设置"]');
-    await page.click('.settings-tab:has-text("' + tab + '")');
-  };
+  // 项目 / 账号 / 通用 are pages opened from the rail.
+  const openTab = tab => page.click('.rail-btn[title^="' + tab + '"]');
   const shot = async name => { await page.waitForTimeout(500); await page.screenshot({ path: join(out, scheme + '-' + name + '.png') }); };
   await page.goto(preview.url);
   await page.waitForSelector('.sidebar:not([hidden])');

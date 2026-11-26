@@ -194,8 +194,8 @@ async function connect(profile: Profile, restart = false): Promise<unknown> {
     if (record(health).service !== 'coderfleet-node' || record(health).version !== 1) throw new Error('这不是 CoderFleet 后端，或版本不兼容');
     return health;
   } catch (error) {
-    if (profile.kind === 'ssh' && error instanceof TypeError) throw new Error('SSH 隧道已连通，但远端后端没有响应。可以在设置里重新安装。');
-    if (message(error) === 'Invalid backend token') throw new Error('服务令牌不对。请在设置里移除这个连接后重新添加。');
+    if (profile.kind === 'ssh' && error instanceof TypeError) throw new Error('SSH 隧道已连通，但远端后端没有响应。可以在「通用」里重新安装。');
+    if (message(error) === 'Invalid backend token') throw new Error('服务令牌不对。请在「通用」里移除这个连接后重新添加。');
     if (error instanceof TypeError) throw new Error('连不上 ' + profile.url + '：服务没有运行，或网络不通。');
     throw error;
   }

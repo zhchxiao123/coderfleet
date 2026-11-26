@@ -60,11 +60,11 @@ CoderFleet 是面向 AI 编程重度用户的多账号开发工作台：在一�
 3. 添加账号并登录，添加项目并选择它使用的账号。
 4. 在项目里开始对话。
 
-Docker 在另一台机器上时，在「设置 → 后端连接 → 通过 SSH 添加」填 `user@host`。架构、远程主机和开发说明见 [node-app/README.md](node-app/README.md)。
+Docker 在另一台机器上时，在「通用 → 后端连接 → 通过 SSH 添加」填 `user@host`。架构、远程主机和开发说明见 [node-app/README.md](node-app/README.md)。
 
 ### 手机 App
 
-在桌面 App 的「设置 → 手机访问」里点「添加手机」，用手机 App 扫二维码。同一局域网、ZeroTier / WireGuard / Tailscale 组网或内网穿透地址都可以，详见 [mobile/README.md](mobile/README.md)。
+在桌面 App 的「通用 → 手机访问」里点「添加手机」，用手机 App 扫二维码。同一局域网、ZeroTier / WireGuard / Tailscale 组网或内网穿透地址都可以，详见 [mobile/README.md](mobile/README.md)。
 
 ### 从源码运行
 
