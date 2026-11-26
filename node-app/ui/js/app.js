@@ -414,7 +414,7 @@
       item('clock', '定时', view.name === 'schedules', () => CF.app.go({ name: 'schedules' })),
       item('folder', '项目', view.name === 'projects', () => CF.app.go({ name: 'projects' })),
       item('user', '账号', view.name === 'accounts', () => CF.app.go({ name: 'accounts' })),
-      item('gear', '通用（' + (CF.transport?.platform === 'darwin' ? '⌘,' : 'Ctrl+,') + '）', view.name === 'settings', () => CF.app.go({ name: 'settings' })),
+      item('sliders', '通用（' + (CF.transport?.platform === 'darwin' ? '⌘,' : 'Ctrl+,') + '）', view.name === 'settings', () => CF.app.go({ name: 'settings' })),
       h('span.rail-space'),
       backendButton,
     );
