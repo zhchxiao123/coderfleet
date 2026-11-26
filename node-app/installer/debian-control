@@ -1,0 +1,14 @@
+Package: coderfleet
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: CoderFleet <noreply@github.com>
+Installed-Size: @SIZE@
+Depends: libgtk-3-0 | libgtk-3-0t64, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0 | libatspi2.0-0t64, libsecret-1-0, libgbm1, libasound2 | libasound2t64
+Recommends: docker.io | docker-ce
+Section: devel
+Priority: optional
+Homepage: https://github.com/zhchxiao123/coderfleet
+Description: CoderFleet desktop App
+ Runs several AI coding accounts (Claude Code, Codex and others) in their
+ own Docker containers on one machine, with one place to chat, review and
+ manage them.

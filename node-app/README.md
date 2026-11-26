@@ -33,7 +33,7 @@ npm test
 npm run desktop
 ~~~
 
-`npm run package` builds the desktop App for the current platform under `out/`.
+`npm run package` builds the desktop App for the current platform under `out/`. `scripts/installers.sh <label> [mac|windows|linux]` turns what is under `out/` into installers under `release/`: `.dmg` (on macOS), a Windows setup program (needs `makensis`), `.deb` and `.tar.gz`. CI does both on every push to `main`.
 
 To review the interface in a browser with sample data (fake Docker and fake CLIs):
 

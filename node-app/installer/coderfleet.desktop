@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CoderFleet
+Comment=Run several AI coding accounts in isolated containers
+Exec=/opt/CoderFleet/CoderFleet %U
+Icon=coderfleet
+Terminal=false
+Categories=Development;
+StartupWMClass=CoderFleet

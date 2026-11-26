@@ -5,6 +5,8 @@
 [![Build apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml/badge.svg)](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml)
 [![Release](https://img.shields.io/github/v/release/zhchxiao123/coderfleet?label=下载)](https://github.com/zhchxiao123/coderfleet/releases/latest)
 
+**[使用文档](https://zhchxiao123.github.io/coderfleet/)** · [下载](https://github.com/zhchxiao123/coderfleet/releases/latest)
+
 CoderFleet 是面向 AI 编程重度用户的多账号开发工作台：在一台机器上同时运行多个 AI 编程账号，每个账号有独立的容器、认证文件和代理出口。
 
 **现在推荐使用桌面 App。** 账号登录、项目与容器、镜像、代理、终端和对话都在 App 里完成，不需要记命令；手机 App 可以随时接着聊、批准操作。
@@ -36,13 +38,14 @@ CoderFleet 是面向 AI 编程重度用户的多账号开发工作台：在一�
 
 在 [Releases](https://github.com/zhchxiao123/coderfleet/releases/latest) 下载对应平台的安装包：
 
-| 平台 | 文件 |
-| --- | --- |
-| macOS（Apple 芯片 / Intel） | `CoderFleet-<版本>-mac-arm64.zip` / `-mac-x64.zip` |
-| Windows | `CoderFleet-<版本>-windows-x64.zip` / `-windows-arm64.zip` |
-| Linux | `CoderFleet-<版本>-linux-x64.tar.gz` / `-linux-arm64.tar.gz` |
-| Android | `CoderFleet-<版本>-android.apk` |
-| iOS | 暂无安装包，需用 Xcode 自行编译（见 [mobile/README.md](mobile/README.md)） |
+| 平台 | 文件 | 安装 |
+| --- | --- | --- |
+| macOS（Apple 芯片 / Intel） | `CoderFleet-<版本>-mac-arm64.dmg` / `-mac-x64.dmg` | 打开后把 CoderFleet 拖进「应用程序」 |
+| Windows | `CoderFleet-<版本>-windows-x64-setup.exe` / `-windows-arm64-setup.exe` | 双击安装，不需要管理员权限 |
+| Linux（Debian / Ubuntu） | `CoderFleet-<版本>-linux-amd64.deb` / `-linux-arm64.deb` | `sudo apt install ./CoderFleet-*.deb` |
+| Linux（其他发行版） | `CoderFleet-<版本>-linux-x64.tar.gz` / `-linux-arm64.tar.gz` | 解压后运行里面的 `CoderFleet` |
+| Android | `CoderFleet-<版本>-android.apk` | 直接安装 |
+| iOS | 暂无安装包 | 用 Xcode 自行编译（见 [mobile/README.md](mobile/README.md)） |
 
 目前主要在 macOS 上验证；Windows 和 Linux 包是自动构建的产物，尚未充分测试。每次提交到 `main` 的最新构建在 [Actions → Build apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml) 的 Artifacts 里。
 

@@ -97,25 +97,16 @@ jobs:
       - name: Package
         run: npm run package -- --platform=${{ matrix.platform }} --arch=x64,arm64
 
-      - name: Archive (macOS)
+      # 安装包：macOS .dmg；Windows 安装程序和 Linux .deb / .tar.gz 都在 Linux 上做。
+      - name: Installers (macOS)
         if: runner.os == 'macOS'
-        run: |
-          mkdir -p release
-          for arch in arm64 x64; do
-            app=out/CoderFleet-darwin-$arch/CoderFleet.app
-            # 没有开发者证书：做本机签名，否则 Apple 芯片上无法启动。
-            codesign --force --deep --sign - "$app"
-            ditto -c -k --sequesterRsrc --keepParent "$app" "release/CoderFleet-$LABEL-mac-$arch.zip"
-          done
+        run: bash scripts/installers.sh "$LABEL" mac
 
-      - name: Archive (Linux, Windows, backend)
+      - name: Installers (Linux, Windows) and backend bundles
         if: runner.os == 'Linux'
         run: |
-          mkdir -p release
-          for arch in x64 arm64; do
-            tar -czf "release/CoderFleet-$LABEL-linux-$arch.tar.gz" -C out "CoderFleet-linux-$arch"
-            (cd out && zip -qry "../release/CoderFleet-$LABEL-windows-$arch.zip" "CoderFleet-win32-$arch")
-          done
+          sudo apt-get update -q && sudo apt-get install -y -q nsis
+          bash scripts/installers.sh "$LABEL" linux windows
           cp bundles/coderfleet-backend-*.tar.gz release/
 
       - uses: actions/upload-artifact@v4
