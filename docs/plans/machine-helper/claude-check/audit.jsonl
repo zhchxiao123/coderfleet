@@ -1,0 +1,3 @@
+{"time":"2026-11-25T12:28:54.847Z","call":"mww3oam7-14399f9","task":"claude-check","label":"claude-check","tool":"machine_info","args":{},"verdict":"allow"}
+{"time":"2026-11-25T12:29:01.150Z","call":"mww3ofha-29e443f","task":"claude-check","label":"claude-check","tool":"run_command","args":{"argv":["stamp"]},"verdict":"allow","rule":"stamp","exit_code":0,"seconds":0}
+{"time":"2026-11-25T12:29:05.552Z","call":"mww3oivk-37723d4","task":"claude-check","label":"claude-check","tool":"run_command","args":{"argv":["sudo","stamp"]},"verdict":"deny","rule":"builtin:sudo"}

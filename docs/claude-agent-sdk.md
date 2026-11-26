@@ -8,7 +8,7 @@ SDK worker 仍会启动 Claude Code 子进程。一个 Task 对应一次完整�
 
 SDK 必须安装在独立环境中。主服务固定的 MCP 版本与 SDK 所需版本不同，不要把 SDK 直接安装进 CoderFleet 的服务虚拟环境，也不需要因此升级 FastAPI、MCP 或 Starlette。
 
-首个固定 SDK 为 `0.2.180`，配套 wheel 内置 Claude CLI 为 `2.1.321`。worker 会核对实际版本；系统交互终端里的另一份 Claude CLI 不会自动成为已验收组合。
+当前固定 SDK 为 `0.2.186`，配套 wheel 内置 Claude CLI 为 `2.1.329`（由 `0.2.180` / `2.1.321` 升级）。worker 会核对实际版本；系统交互终端里的另一份 Claude CLI 不会自动成为已验收组合。
 
 ### 容器 Account
 
@@ -44,7 +44,7 @@ python3 -m coderfleet.data.scripts.install_claude_sdk \
   --venv /absolute/path/to/claude-sdk --python /absolute/path/to/python3
 ```
 
-使用自定义目录时，将 `CODERFLEET_CLAUDE_SDK_PYTHON` 设为该环境的 Python。此路径必须属于实际运行的环境：宿主机路径不能直接用于容器。
+使用自定义目录时，将 `CODERFLEET_CLAUDE_SDK_PYTHON` 设为该环境的 Python。此路径必须属于实际运行的环境：宿主机路径不能直接用于容器。账号的 `CODERFLEET_CLAUDE_SDK_PYTHON` 在新 Task 派发时读取，持久容器无需为此重建；它优先于项目中的同名变量，与临时执行和账号诊断保持一致。可以将独立版本环境放在该账号现有共享挂载中的代码目录，保留旧环境，再切换新任务的解释器。
 
 离线部署可先把目标平台所需的全部 wheels 放入独立目录，再传 `--wheelhouse /absolute/path/to/wheels`。安装器在此模式使用 `--no-index`，不会回退联网。安装失败后环境不会被标为 ready，修复下载源或 wheel 集后可以重跑安装器。
 
@@ -98,9 +98,53 @@ coderfleet task command-status <task-id> my-message-1
 
 补充消息默认只发文字；勾选原生附件插话后，新 worker 可接收本项目已上传附件，默认发送行为仍保留排队。“已接收”表示已交给当前 SDK 输入；模型可能在当前轮次内消费，也可能在后续轮次处理，不承诺立即抢占。每条投递带请求 ID；同 ID、同内容重试返回原回执，不重复发送。超时或连接丢失时保留草稿，用原 ID 查询或重试，不自动转成新 Task。
 
+新 worker 为初始输入及每条插话发送稳定且属于当前 Task 的原生 UUID：同一请求重试不变，新请求即使内容相同也使用新 UUID。CLI `task send` 打印消息 UUID，`task command-status` 的原回执保留该 UUID；`task logs` 保留 SDK 原始 `user_message_uuid` / `user_message_uuids` 供查询。旧任务仍显示实际启动版本，旧回执和日志无需迁移。
+
+插话在对话中显示为自己的用户消息，状态从“已投递”到“已纳入本轮”，再到“本轮完成／失败／中断”；有对应文字回复时点击状态即可定位。一个模型轮次可以纳入多条输入，后台事件触发的轮次也可能答复用户。SDK 往往只在本轮首条或归属变化的事件携带 UUID，因此界面在当前原生轮次内沿用关联，并在 result 后清空。仅 result 才出现的新输入也可定位本轮最终文字；下一轮没有文字时不会借用上一轮回复。仅有原生 UUID 关联才能确认归属；旧日志、缺字段或 SDK 的最多 64 条关联列表未包含该输入时，不按结果数量猜测。正常 Task 结束仍未确认的消息显示“任务结束 · 归属未确认”。这些状态说明处理进度，不等同于需求已实现或验收通过。
+
+执行详情默认收起为一条当前状态，点击可查看工具和可展示的思考内容；原生问题、授权和工具失败会自动展开，最终任务失败也保持可见。`thinking` 可设置 `{"type":"adaptive","display":"summarized"}` 请求模型提供的思考摘要，或用 `"display":"omitted"` 省略；`disabled` 不接受 `display`。界面只展示 SDK 实际返回的内容。
+
 interrupt 使用 SDK 原生控制请求，保留 session ID；完成后 Task 的取消状态带 `interrupted=true`，界面显示“已中断”，Conversation 可接着续聊。中断不会回滚已有文件修改。原来的强制终止仍保留。
 
 控制通道是项目 `.coderfleet-tasks/<task-id>.control` 中的原子命令与持久回执，不新增端口。每次 worker 有单独能力令牌，令牌不进入 Task HTTP 响应或业务日志。关闭后拒绝新输入；结果未确认时不重放。旧 worker 没有该能力时明确拒绝，只有新 Task 使用新协议。
+
+## 原生只读工作流
+
+普通项目问答仍为默认。需要多路审计或交叉研究时，在原项目聊天的“更多 → 下次任务的高级设置 → 本次执行方式”选择“只读项目审计”或“只读资料研究”，再输入具体问题。它仍是当前 Conversation 中的一个 Task，无需创建看板或 CoderFleet Workflow DAG。已有任务在运行时，这次请求会进入后续 Task，不能当成给普通任务的插话。
+
+预设只作用于本次任务。服务端保留原 Conversation 的高级设置，客户端只在提交成功后清除这次预设；失败、切换页面或提交期间的新编辑不会被误清空。未选择预设时，原有问答、开发、原生提问、插话和中断保持原行为。
+
+CLI 使用相同的参数 JSON，保存为 `audit.json`：
+
+```json
+{
+  "native_workflow": {
+    "preset": "audit",
+    "max_concurrent_agents": 2,
+    "timeout_seconds": 600
+  },
+  "max_turns": 24,
+  "max_budget_usd": 2
+}
+```
+
+```bash
+coderfleet task run '审计 src 下的鉴权路径，交叉核验发现并给出文件证据' \
+  --project <project-name> --conversation <conversation-id> --sdk-options audit.json
+coderfleet task status <task-id>
+coderfleet task logs <task-id> -f
+coderfleet task interrupt <task-id> --request-id stop-audit-1
+```
+
+`preset` 也可用 `research`，增加 WebSearch / WebFetch。默认最多 2 个原生并发 Agent、24 个 SDK 主轮次、$2 SDK 预算、600 秒执行时限；配置上限分别为 4、40、$10、1800 秒。Agent 总数“小于五个”属于给原生编排的规模指导，不是平台对总数的硬限制。执行时限由 worker 观察并清理运行，初始化和收尾另有运行时等待；SDK 费用口径不等同于实际账单。
+
+审计预设提供 Read / Glob / Grep / Workflow；研究预设增加网络检索工具。独立工具集、原生 PreToolUse 拦截和不可放宽的运行设置共同限制写入；运行时注入的 StructuredOutput 只返回数据，仍允许使用。不会加载项目扩展、插件、自定义 Agent、MCP 或执行 Hook。账号与项目的 `disableWorkflows` 和权限拒绝规则继续保留；原本需要授权的操作在该只读预设内拒绝，不自动批准。常规项目任务的配置不受这些限制影响。
+
+本批预设限定普通已配置项目；平台助手、真正的临时工作区和文件恢复任务明确拒绝。可以切换模型、查看上下文和停止原生后台任务；不能在运行中把此预设变成可写模式。超时、运行时不提供 Workflow，或只有工具尝试而没有真实原生运行完成事件时，任务明确失败，不把普通回答当作工作流验收成功。
+
+执行详情中可展开 Workflow 的编排源码、工具结果、原生后台 ID、工具调用数、token 和耗时。频繁进度更新同一张卡片，子过程收在所属工作流下面；中间模型 result 不结束 CoderFleet Task。此预设的原生中断会请求停止所属 Workflow，再中断主轮次并清理退出，不等待额外后台唤起的模型轮次；原生会话和编排的持久状态保留供之后明确续聊。原生 `command_lifecycle` 的 `queued / started / completed` 按 `command_uuid` 合并为一条中文状态，重复、迟到和历史重载不产生三张红色 JSON 卡；“指令处理已结束”不代替回复成功或 Task 完成。Task 结束但缺少原生命令终态时显示“指令终态未确认”，不会继续显示执行中，也不会编造取消或成功。
+
+官方原生编排的入口与运行边界见 [Workflow 指南](https://code.claude.com/docs/en/workflows) 和 [SDK cookbook](https://platform.claude.com/cookbook/claude-agent-sdk-08-dynamic-workflows)。本阶段验收与后续范围见 [第二阶段记录](research/coderfleet-sdk-workflow-stage2-20261120.md)。
 
 ## 验收记录要求
 
@@ -204,4 +248,4 @@ coderfleet task session <task-id> fork --json '{"title":"独立方案"}' --reque
 
 启用 `"enable_file_checkpointing":true` 后，保存重放 user 消息的检查点 UUID。“创建文件恢复任务”或 `coderfleet task rewind <source-task> <checkpoint> --request-id rewind-1` 创建独立 Task：复用来源工作区/账号/session，以空输入恢复，不重放原 prompt；相同请求只创建一次。项目有任务运行时拒绝恢复，恢复期间新任务不能并发修改文件。
 
-SDK **0.2.180 不允许 SessionStore 和文件检查点同时启用**。恢复覆盖 Write/Edit/NotebookEdit 跟踪的修改，不保证任意 Bash、子 Agent 或外部副作用，也不回退对话历史。SDK 的关闭过程需要有限的刷新/退出时间，恢复 Task 的清理单独保留该时限。
+SDK **0.2.186 仍不允许 SessionStore 和文件检查点同时启用**。恢复覆盖 Write/Edit/NotebookEdit 跟踪的修改，不保证任意 Bash、子 Agent 或外部副作用，也不回退对话历史。SDK 的关闭过程需要有限的刷新/退出时间，恢复 Task 的清理单独保留该时限。

@@ -118,8 +118,8 @@ def assert_success(scheduler: Scheduler, task: Task) -> None:
     log = scheduler.get_log_path(task.id).read_text(encoding="utf-8")
     assert task.status == TaskStatus.done, log[-3000:]
     assert task.execution_backend == "sdk"
-    assert task.sdk_version == "0.2.180"
-    assert task.cli_version == "2.1.321"
+    assert task.sdk_version == "0.2.186"
+    assert task.cli_version == "2.1.329"
     assert task.native_session_id == "11111111-1111-4111-8111-111111111111"
     assert task.tokens_input == 7
     assert task.tokens_output == 9
@@ -141,6 +141,14 @@ def assert_success(scheduler: Scheduler, task: Task) -> None:
 
 def test_persistent_sdk_task_runs_with_real_docker_and_sdk(harness: Harness) -> None:
     harness.start_persistent()
+    # Change the account runtime after container creation. New Tasks must use
+    # it without recreating the container or borrowing other account variables.
+    launcher = harness.auth_dir / 'sdk-account-python'
+    launcher.write_text('#!/bin/sh\nprintf account-runtime > /workspace/account-runtime-used\nexec /opt/coderfleet-claude-sdk-venv/bin/python "$@"\n')
+    launcher.chmod(0o755)
+    harness.scheduler.set_account_env(harness.project.account, {
+        'CODERFLEET_CLAUDE_SDK_PYTHON':'/home/byclaw/.claude/sdk-account-python',
+    })
 
     async def run() -> Task:
         task = await harness.scheduler.submit("offline fixture", project_name=harness.project.name, model="fixture-model")
@@ -148,6 +156,7 @@ def test_persistent_sdk_task_runs_with_real_docker_and_sdk(harness: Harness) -> 
 
     task = asyncio.run(run())
     assert_success(harness.scheduler, task)
+    assert (Path(harness.project.path) / 'account-runtime-used').read_text() == 'account-runtime'
     capture = json.loads((Path(harness.project.path) / "capture.json").read_text())
     assert capture["prompt"] == "offline fixture"
     assert capture["cwd"] == "/workspace"
@@ -187,7 +196,7 @@ def test_sdk_error_result_is_a_failed_task_in_real_container(harness: Harness, e
     task = asyncio.run(run())
     assert task.status == TaskStatus.failed
     assert task.execution_backend == "sdk"
-    assert task.sdk_version == "0.2.180"
+    assert task.sdk_version == "0.2.186"
     assert task.native_session_id == "11111111-1111-4111-8111-111111111111"
     log = harness.scheduler.get_log_path(task.id).read_text()
     assert '"is_error": true' in log

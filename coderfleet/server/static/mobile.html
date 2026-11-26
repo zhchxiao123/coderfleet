@@ -1773,8 +1773,10 @@ async function send() {
       };
     } else { return; }
 
-    body.sdk_options = SDKTaskControls.readOptions();
+    const sdkOptionsAttempt = SDKTaskControls.captureOptions();
+    body.sdk_options = sdkOptionsAttempt.options;
     const task = await api('/api/tasks', { method:'POST', body });
+    SDKTaskControls.taskSubmitted(sdkOptionsAttempt);
     forgetSentMobileDraft(draftKey, draftText);
     tasks.unshift(task);
     pendingImages = [];
@@ -2035,7 +2037,7 @@ function _mobileSDKEditor() {
   const conversationId = activeConv?.id;
   const draftKey = mobileDraftKey();
   return {
-    read: () => ({ text:input?.value || '', hasAttachments:pendingImages.length > 0, uploading:uploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked }),
+    read: () => ({ text:input?.value || '', hasAttachments:pendingImages.length > 0, uploading:uploadingImages > 0, images:pendingImages.map(i=>i.container_path), nativeAttachments:!!document.getElementById('sdk-native-attachments')?.checked, nativeWorkflow:SDKTaskControls.workflowSelected() }),
     clear: (text,images=[]) => {
       forgetSentMobileDraft(draftKey, text);
       if (activeConv?.id === conversationId && images.length) { pendingImages=pendingImages.filter(i=>!images.includes(i.container_path)); renderImagePreviews(); }
@@ -2057,7 +2059,7 @@ function updateSendState() {
   const ta = document.getElementById('ta');
   const btn = document.getElementById('btn-send');
   if (!btn || !ta) return;
-  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConv?.id || pendingProj?.name || 'new', _mobileComposerTasks());
+  SDKTaskControls.mountOptions(document.getElementById('sdk-options'), activeConv?.id || pendingProj?.name || 'new', _mobileComposerTasks(),updateSendState);
   const task = _mobileComposerTask();
   SDKTaskControls.mount(document.getElementById('sdk-task-controls'), task, _mobileSDKEditor());
   const queue = document.getElementById('mobile-queue-wrap');

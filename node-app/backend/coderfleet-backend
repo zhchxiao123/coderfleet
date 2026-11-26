@@ -1,0 +1,4 @@
+#!/bin/sh
+# Launcher: runs the bundled Node.js runtime with the backend.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$here/node/node" "$here/dist/cli.js" "$@"

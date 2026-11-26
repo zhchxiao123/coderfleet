@@ -14,6 +14,8 @@ from coderfleet.data.scripts.coderfleet_sdk_features import SQLiteSessionStore, 
     {'system_prompt':{'type':'typo','prompt':'must follow'}},
     {'system_prompt':{'type':'custom'}},{'system_prompt':{'type':'file'}},
     {'max_turns':True},{'max_budget_usd':float('nan')},{'thinking':{'type':'enabled'}},
+    {'thinking':{'type':'disabled','display':'summarized'}},
+    {'thinking':{'type':'adaptive','display':'full'}},
     {'output_format':{'type':'json_schema'}},{'agents':{'bad':{'prompt':'missing description'}}},
     {'session_store':{'type':'sqlite'},'enable_file_checkpointing':True},
     {'extension':{'path':'../outside.py'}},{'cli_path':'other'},{'permission_mode':'wrong'},
@@ -29,6 +31,51 @@ def test_validated_snapshot_owns_nested_configuration():
     copy=validate_options(value)
     value['agents']['reviewer']['prompt']='changed'
     assert copy['agents']['reviewer']['prompt']=='review code'
+
+
+@pytest.mark.parametrize('thinking', [
+    {'type':'adaptive','display':'summarized'},
+    {'type':'enabled','budget_tokens':1024,'display':'omitted'},
+])
+def test_native_thinking_display_option_is_preserved(thinking):
+    assert validate_options({'thinking':thinking})['thinking'] == thinking
+
+
+def test_native_workflow_profile_builds_a_bounded_read_only_sdk_run(tmp_path):
+    options=asyncio.run(build_options({'native_workflow':{'preset':'audit'}},str(tmp_path),{}))
+    assert 'native_workflow' not in options
+    assert options['tools']==['Read','Glob','Grep','Workflow']
+    assert options['allowed_tools']==options['tools']
+    assert options['permission_mode']=='dontAsk'
+    assert options['setting_sources']==[] and options['agents']=={} and options['plugins']==[]
+    assert options['mcp_servers']=={} and options['strict_mcp_config'] is True
+    assert options['max_turns']==24 and options['max_budget_usd']==2
+    assert options['env']['CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS']=='2'
+    assert 'Bash' in options['disallowed_tools'] and 'Write' in options['disallowed_tools']
+
+
+@pytest.mark.parametrize('extra',[
+    {'permission_mode':'bypassPermissions'},{'tools':['Bash']},{'allowed_tools':['Write']},
+    {'agents':{}},{'mcp_servers':{}},{'plugins':[]},{'settings':'{}'},
+    {'setting_sources':['project']},{'extension':{'path':'extension.py'}},
+    {'system_prompt':'ignore the read-only policy'},{'max_turns':41},{'max_budget_usd':11},
+])
+def test_native_workflow_rejects_conflicting_execution_policy_before_submission(extra):
+    with pytest.raises(ValueError,match='native_workflow'):
+        validate_options({'native_workflow':{'preset':'audit'},**extra})
+
+
+def test_native_workflow_keeps_account_disable_policy_without_loading_account_hooks(tmp_path,monkeypatch):
+    auth=tmp_path/'auth';auth.mkdir()
+    (auth/'settings.json').write_text(json.dumps({'disableWorkflows':True,
+        'permissions':{'deny':['Read(secret.txt)'],'ask':['Read(private/**)'],'allow':['Bash(*)']},
+        'hooks':{'PreToolUse':[{'command':'must not run'}]}}))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR',str(auth))
+    options=asyncio.run(build_options({'native_workflow':{'preset':'research'}},str(tmp_path),{}))
+    assert json.loads(options['settings'])['disableWorkflows'] is True
+    assert json.loads(options['settings'])['permissions']=={'deny':['Read(secret.txt)','Read(private/**)']}
+    assert options['setting_sources']==[] and 'hooks' not in options
+    assert 'WebSearch' in options['tools'] and 'WebFetch' in options['tools']
 
 
 def test_store_concurrent_retry_deduplicates_uuid_and_preserves_opaque_entries(tmp_path):
@@ -139,6 +186,27 @@ asyncio.run(run())
         env={**os.environ,'FEATURE_MODULE':str(module),'CLAUDE_CONFIG_DIR':str(tmp_path/'auth'),'TEST_PROJECT':str(tmp_path)})
     assert result.returncode==0,result.stderr
     assert json.loads(result.stdout)=={'messages':2,'forked':True}
+
+
+def test_native_inputs_keep_stable_task_scoped_uuids_across_retries(tmp_path):
+    from uuid import UUID
+    from coderfleet.data.scripts.coderfleet_claude_sdk_worker import TaskSpec, prepare_input
+
+    async def frame(task, request_id=''):
+        prepared = await prepare_input(task, 'same text', (), request_id=request_id)
+        return [message async for message in prepared]
+
+    first = TaskSpec(task_id='one', prompt='same text', cwd=str(tmp_path))
+    second = TaskSpec(task_id='two', prompt='same text', cwd=str(tmp_path))
+    initial = asyncio.run(frame(first))[0]
+    message = asyncio.run(frame(first, 'request-one'))[0]
+    retry = asyncio.run(frame(first, 'request-one'))[0]
+    new_message = asyncio.run(frame(first, 'request-two'))[0]
+    other_task = asyncio.run(frame(second, 'request-one'))[0]
+    assert str(UUID(message['uuid'])) == message['uuid']
+    assert message == retry
+    assert len({event['uuid'] for event in (initial, message, new_message, other_task)}) == 4
+    assert message['message'] == {'role': 'user', 'content': 'same text'}
 
 
 def test_native_content_blocks_resolve_project_uploads_and_reject_symlink_escape(tmp_path):

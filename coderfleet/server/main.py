@@ -2264,7 +2264,8 @@ async def message_sdk_task(task_id: str, body: SDKMessageRequest):
 async def sdk_capabilities():
     from coderfleet.data.scripts.coderfleet_sdk_control import CONTROL_SCHEMAS
     from coderfleet.data.scripts.coderfleet_sdk_features import OPTIONS_SCHEMA, SESSION_SCHEMAS
-    return {'sdk_version':'0.2.180','cli_version':'2.1.321','controls':CONTROL_SCHEMAS,'options':OPTIONS_SCHEMA,'sessions':SESSION_SCHEMAS}
+    from coderfleet.data.scripts.install_claude_sdk import SDK_VERSION, CLI_VERSION
+    return {'sdk_version':SDK_VERSION,'cli_version':CLI_VERSION,'controls':CONTROL_SCHEMAS,'options':OPTIONS_SCHEMA,'sessions':SESSION_SCHEMAS}
 
 
 class SDKControlRequest(SDKCommandRequest):

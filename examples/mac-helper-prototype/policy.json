@@ -1,0 +1,21 @@
+{
+  "deny": [
+    "\\bsudo\\b",
+    "\\bespefuse(\\.py)?\\b.*\\b(burn|write-protect|read-protect)",
+    "--do-not-confirm",
+    "\\b(write|erase)[-_]flash\\b.*--force|--force.*\\b(write|erase)[-_]flash\\b"
+  ],
+  "confirm": [
+    "\\berase[-_](flash|region)\\b",
+    "\\bwrite[-_]flash\\b",
+    "^osascript\\b",
+    "^open\\b"
+  ],
+  "allow": [
+    "^(uname|sw_vers|hostname|date|echo|ls|system_profiler SPUSBDataType)\\b",
+    "^esptool(\\.py)?\\b.*\\b(flash-id|read-mac|chip-id|image-info|get-security-info)\\b",
+    "^espefuse(\\.py)?\\b.*\\bsummary\\b",
+    "^xcodebuild\\b",
+    "^xcrun\\b"
+  ]
+}

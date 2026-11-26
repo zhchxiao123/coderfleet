@@ -2179,6 +2179,8 @@ class Scheduler:
             options = validate_options(conversation.sdk_options)
         if "permission_mode" in options:
             auto = options["permission_mode"] == "bypassPermissions"
+        if options.get('native_workflow'):
+            auto = False
 
         selected_project: Optional[Project] = None
         if project_name:
@@ -2225,6 +2227,9 @@ class Scheduler:
 
         if options and (acc.type.value != 'claude' or acc.claude_backend != 'sdk'):
             raise ValueError('sdk_options requires a Claude SDK account')
+        if options.get('native_workflow') and (platform_run_id or sdk_action or ephemeral or mode == 'ephemeral' or
+                selected_project is None or selected_project.ephemeral):
+            raise ValueError('native_workflow requires an ordinary configured project Task')
         if platform_run_id and (acc.type != AccountType.claude or acc.claude_backend != 'sdk' or acc.runtime != AccountRuntime.container):
             raise ValueError('平台助手需要容器模式的Claude SDK账号')
         if options.get('permission_mode') in {'auto','bypassPermissions'}:
@@ -2704,7 +2709,7 @@ class Scheduler:
             project          = task.project,
             project_name     = project.name,
             native_session_id = task.native_session_id,
-            sdk_options = task.sdk_options,
+            sdk_options = {} if task.sdk_options.get('native_workflow') else task.sdk_options,
             last_task_id     = task_id,
         )
         conversation.save(self.conversations_dir)
@@ -3939,7 +3944,7 @@ class Scheduler:
 
     def _touch_submitted_conversation(self, conversation_id: str, task: Task) -> None:
         def change(current: Conversation) -> None:
-            if not task.sdk_action:
+            if not task.sdk_action and not task.sdk_options.get('native_workflow'):
                 current.sdk_options = task.sdk_options
             current.last_task_id = task.id
             current.updated = now_iso()
@@ -4188,6 +4193,12 @@ class Scheduler:
                     pass
 
             if task.execution_backend == "sdk":
+                # Existing containers retain their creation-time environment.
+                # Match ephemeral/doctor launches for the account SDK runtime
+                # without injecting unrelated account credentials or restarting.
+                sdk_python = self.get_account_env(acc.name).get('CODERFLEET_CLAUDE_SDK_PYTHON')
+                if sdk_python:
+                    project_env['CODERFLEET_CLAUDE_SDK_PYTHON'] = sdk_python
                 self._sdk_launching.add(task.id)
                 launch_attempted = True
             try:

@@ -15,6 +15,12 @@ class Element {
     this.classList = {
       add: (...names) => { this.className += ' ' + names.join(' '); },
       remove: (...names) => { this.className = this.className.split(/\s+/).filter(name=>!names.includes(name)).join(' '); },
+      contains: name => this.className.split(/\s+/).includes(name),
+      toggle: (name, force) => {
+        const add = force ?? !this.classList.contains(name);
+        if (add) this.classList.add(name); else this.classList.remove(name);
+        return add;
+      },
     };
   }
   set innerHTML(value) { this._html = value; this.children = []; }
@@ -24,6 +30,8 @@ class Element {
     child.parentNode=this; this.children.push(child); return child;
   }
   addEventListener(type, handler) { this.listeners[type] = handler; }
+  contains(target) { return this.children.some(child=>child===target || child.contains(target)); }
+  setAttribute(name, value) { (this.attributes ||= {})[name] = String(value); }
   focus() {}
   querySelectorAll() { return []; }
   querySelector(selector) {
@@ -85,6 +93,292 @@ test('legacy CLI results still render their completion footer', () => {
   const { result, container } = renderer();
   result.push(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }));
   assert.equal(container.log.children.filter(child => child.className.includes('chat-footer')).length, 1);
+});
+
+const inputOne = '11111111-1111-4111-8111-111111111111';
+const inputTwo = '22222222-2222-4222-8222-222222222222';
+const inputThree = '33333333-3333-4333-8333-333333333333';
+test('native command lifecycle updates one status without raw errors or ending the Task', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  for (const [state,label] of [['queued','指令排队中'],['started','指令执行中'],['completed','指令处理已结束']]) {
+    result.push(JSON.stringify({type:'command_lifecycle',command_uuid:inputOne,state,
+      uuid:`frame-${state}`,session_id:'native-session'}));
+    const rows=container.log.children.filter(node=>node.classList.contains('native-command-status'));
+    assert.equal(rows.length,1);
+    assert.equal(rows[0].dataset.commandState,state);
+    assert.equal(rows[0].querySelector('.chat-sys-pill').textContent,label);
+    assert.equal(rows[0].classList.contains('is-error'),false);
+    assert.doesNotMatch(container.log.innerHTML,/command_lifecycle|frame-queued/);
+    assert.equal(container.log.children.filter(node=>node.classList.contains('chat-footer')).length,0);
+  }
+  result.push('finished: 2026-11-20 11:00:00 [done]');
+  assert.equal(container.log.children.filter(node=>node.classList.contains('chat-footer')).length,1);
+});
+
+test('replayed command events do not regress a terminal or another session command', () => {
+  const {result,container}=renderer();
+  const push=(state,session_id='first')=>result.push(JSON.stringify({
+    type:'command_lifecycle',command_uuid:inputOne,state,session_id,
+  }));
+  push('started'); push('queued');
+  let rows=container.log.children.filter(node=>node.classList.contains('native-command-status'));
+  assert.equal(rows[0].dataset.commandState,'started');
+  push('completed'); push('completed'); push('started'); push('queued');
+  push('queued','second');
+  rows=container.log.children.filter(node=>node.classList.contains('native-command-status'));
+  assert.equal(rows.length,2);
+  assert.deepEqual(rows.map(node=>node.dataset.commandState),['completed','queued']);
+});
+
+test('system command lifecycle is folded and cancellation never becomes a successful reply', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  result.foldProcess=true;
+  for (const state of ['queued','cancelled','completed']) {
+    result.push(JSON.stringify({type:'system',subtype:'command_lifecycle',command_uuid:inputOne,state}));
+  }
+  const rows=result.processBody?.children.filter(node=>node.classList.contains('native-command-status')) || [];
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].querySelector('.chat-sys-pill').textContent,'指令已取消');
+  assert.equal(result.processBody.classList.contains('collapsed'),true);
+  assert.equal(container.log.children.some(node=>node.classList.contains('chat-footer')),false);
+  assert.equal(container.log.children.some(node=>node.classList.contains('is-error')),false);
+});
+
+test('Task termination labels an unfinished native command as unconfirmed instead of still running',()=>{
+  for(const [status,label] of [['killed','任务已中断'],['failed','任务失败'],['done','任务已结束']]) {
+    const {result,container}=renderer();
+    result.push(JSON.stringify({type:'command_lifecycle',command_uuid:inputOne,state:'started'}));
+    result.push(`finished: 2026-11-20 11:00:00 [${status}]`);
+    const row=container.log.children.find(node=>node.classList.contains('native-command-status'));
+    assert.match(row.querySelector('.chat-sys-pill').textContent,new RegExp(label));
+    assert.match(row.querySelector('.chat-sys-pill').textContent,/指令终态未确认/);
+    assert.equal(row.dataset.commandState,'started','Task completion must not invent a native terminal state');
+  }
+});
+
+test('native workflow progress updates its owning card without adding timeline records',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'workflow',name:'Workflow',
+    input:{description:'交叉核验项目',script:"return await agent('Read fixture.md')"}}]}});
+  push({type:'system',subtype:'task_started',task_id:'workflow-run',task_type:'workflow',tool_use_id:'workflow'});
+  const count=container.log.children.length;
+  for(let i=1;i<=300;i++)push({type:'system',subtype:'task_progress',task_id:'workflow-run',
+    description:'交叉核验',usage:{tool_uses:i,total_tokens:i*10,duration_ms:i*1000}});
+  assert.equal(container.log.children.length,count);
+  const entry=result.toolMap.workflow;
+  assert.equal(entry.wrap.dataset.nativeTaskType,'workflow');
+  assert.match(entry.exitEl.textContent,/工作流运行中/);
+  assert.match(entry.exitEl.textContent,/300 次工具调用/);
+  assert.match(entry.exitEl.textContent,/3000 tokens/);
+  assert.match(entry.exitEl.textContent,/交叉核验/);
+  push({type:'system',subtype:'task_notification',task_id:'workflow-run',status:'completed',summary:'已核验'});
+  push({type:'system',subtype:'task_progress',task_id:'workflow-run',usage:{tool_uses:1}});
+  assert.equal(entry.statusEl.textContent,'✓');
+  assert.match(entry.exitEl.textContent,/工作流已完成/);
+  assert.match(entry.exitEl.textContent,/300 次工具调用/);
+});
+
+test('a late workflow owner binds the settled status and keeps delegated output inside details',()=>{
+  const {result,container}=renderer();
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'system',subtype:'task_notification',task_id:'late-workflow',status:'completed',summary:'核验完成'});
+  push({type:'system',subtype:'task_started',task_id:'late-workflow',task_type:'workflow',tool_use_id:'late-owner'});
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'late-owner',name:'Workflow',
+    input:{description:'核验三个文件',script:"return await agent('Read fixture.md')"}}]}});
+  const entry=result.toolMap['late-owner'];
+  assert.equal(entry.statusEl.textContent,'✓');
+  assert.match(entry.wrap.innerHTML,/title="核验三个文件"/);
+  const count=container.log.children.length;
+  push({type:'assistant',parent_tool_use_id:'late-owner',message:{content:[{type:'text',text:'内部审计结果'}]}});
+  assert.equal(container.log.children.length,count,'Delegated text stays under its workflow, not in the root conversation');
+});
+
+function acceptInput(result, identity, request = identity) {
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_message_accepted',
+    task_id:'task-one',request_id:request,user_message_uuid:identity,text:'同时覆盖 iOS 和 macOS'}));
+}
+function sdkReply(result, identities, text='已覆盖两个平台', extra={}) {
+  result.push(JSON.stringify({type:'assistant',user_message_uuids:identities,
+    message:{id:text,content:[{type:'text',text}]},...extra}));
+}
+
+test('supplement receipts follow only their own native UUIDs and locate the shared reply', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  acceptInput(result,inputOne); acceptInput(result,inputTwo); acceptInput(result,inputThree);
+  const receipt = identity => container.log.children.find(node=>node.dataset.inputUuid===identity);
+  const status = identity => receipt(identity).querySelector('.sdk-input-status');
+  assert.equal(status(inputOne).textContent,'已投递');
+  assert.equal(status(inputOne).disabled,true);
+  sdkReply(result,[inputOne,inputTwo]);
+  assert.equal(status(inputOne).textContent,'已纳入本轮');
+  assert.equal(status(inputThree).textContent,'已投递');
+  let located=0;
+  result.lastBubbleEl.scrollIntoView=()=>{located++;};
+  status(inputOne).listeners.click(); status(inputTwo).listeners.click();
+  assert.equal(located,2);
+  result.push(JSON.stringify({type:'result',subtype:'success',user_message_uuids:[inputOne,inputTwo]}));
+  assert.equal(status(inputOne).textContent,'本轮完成');
+  assert.equal(status(inputTwo).textContent,'本轮完成');
+  assert.equal(status(inputThree).textContent,'已投递');
+  acceptInput(result,inputOne);
+  assert.equal(container.log.children.filter(node=>node.dataset.inputUuid===inputOne).length,1);
+  assert.equal(status(inputOne).textContent,'本轮完成','Duplicate receipt must not regress completion');
+});
+
+test('native output before the delivery event retains exact attribution on replay', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  sdkReply(result,[inputOne]);
+  result.push(JSON.stringify({type:'result',subtype:'success',user_message_uuid:inputOne}));
+  acceptInput(result,inputOne);
+  const receipt=container.log.children.find(node=>node.dataset.inputUuid===inputOne);
+  assert.equal(receipt.querySelector('.sdk-input-status').textContent,'本轮完成');
+  assert.equal(receipt.querySelector('.sdk-input-status').disabled,false);
+});
+
+test('sparse native attribution follows the final text after a tool-only first message', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  acceptInput(result,inputOne);
+  result.push(JSON.stringify({type:'assistant',user_message_uuids:[inputOne],message:{content:[
+    {type:'tool_use',id:'first-tool',name:'Read',input:{file_path:'README.md'}}]}}));
+  sdkReply(result,undefined,'真实最终回复');
+  const final=result.lastBubbleEl;
+  result.push(JSON.stringify({type:'result',subtype:'success',result:'真实最终回复',user_message_uuids:[inputOne,inputTwo]}));
+  acceptInput(result,inputTwo);
+  let located=0; final.scrollIntoView=()=>{located++;};
+  for (const identity of [inputOne,inputTwo]) {
+    const button=container.log.children.find(node=>node.dataset.inputUuid===identity).querySelector('.sdk-input-status');
+    assert.equal(button.disabled,false);
+    button.listeners.click();
+  }
+  assert.equal(located,2,'An input attributed only on result also points at this turn final text');
+  sdkReply(result,undefined,'另一轮无归属的回复');
+  result.push(JSON.stringify({type:'result',subtype:'success',result:'另一轮无归属的回复'}));
+  container.log.children.find(node=>node.dataset.inputUuid===inputOne).querySelector('.sdk-input-status').listeners.click();
+  assert.equal(located,3,'A later uncorrelated turn cannot replace the earlier reply target');
+});
+
+test('only message_start needs attribution for subsequent streamed deltas', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  acceptInput(result,inputOne);
+  result.push(JSON.stringify({type:'stream_event',user_message_uuid:inputOne,event:{type:'message_start',message:{id:'sparse-stream'}}}));
+  result.push(JSON.stringify({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text'}}}));
+  result.push(JSON.stringify({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'流式回复'}}}));
+  const button=container.log.children.find(node=>node.dataset.inputUuid===inputOne).querySelector('.sdk-input-status');
+  assert.equal(button.disabled,false,'A delta without repeated UUID still belongs to the active native turn');
+});
+
+test('a new turn result without text cannot link to a previous turn reply', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  sdkReply(result,[inputOne],'上一轮回复');
+  result.push(JSON.stringify({type:'result',subtype:'success',user_message_uuid:inputOne}));
+  acceptInput(result,inputTwo);
+  result.push(JSON.stringify({type:'result',subtype:'success',user_message_uuid:inputTwo}));
+  const button=container.log.children.find(node=>node.dataset.inputUuid===inputTwo).querySelector('.sdk-input-status');
+  assert.equal(button.textContent,'本轮完成');
+  assert.equal(button.disabled,true,'Completion without this turn text offers no wrong reply target');
+});
+
+test('missing or delegated attribution never completes a supplement and Task end stays honest', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  acceptInput(result,inputOne);
+  result.push(JSON.stringify({type:'result',subtype:'success'}));
+  sdkReply(result,[inputOne],'子任务输出',{parent_tool_use_id:'unknown-agent'});
+  const status=container.log.children.find(node=>node.dataset.inputUuid===inputOne).querySelector('.sdk-input-status');
+  assert.equal(status.textContent,'已投递');
+  result.push('finished: 2026-11-20 10:00:00 [done]');
+  assert.equal(status.textContent,'任务结束 · 归属未确认');
+  assert.equal(status.disabled,true);
+});
+
+test('aborted or error results with UUIDs cannot show a completed supplement', () => {
+  const {result,container}=renderer();
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  acceptInput(result,inputOne); acceptInput(result,inputTwo);
+  result.push(JSON.stringify({type:'result',subtype:'success',terminal_reason:'aborted_streaming',user_message_uuid:inputOne}));
+  result.push(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,user_message_uuid:inputTwo}));
+  const status=id=>container.log.children.find(node=>node.dataset.inputUuid===id).querySelector('.sdk-input-status').textContent;
+  assert.equal(status(inputOne),'本轮已中断');
+  assert.equal(status(inputTwo),'本轮失败');
+});
+
+test('a Task failure or stop cannot claim an uncorrelated input had its own result', () => {
+  for (const [outcome,label] of [['failed','任务失败'],['killed','任务已中断']]) {
+    const {result,container}=renderer();
+    result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+    acceptInput(result,inputOne);
+    result.push(`finished: 2026-11-20 10:00:00 [${outcome}]`);
+    const status=container.log.children.find(node=>node.dataset.inputUuid===inputOne).querySelector('.sdk-input-status');
+    assert.equal(status.textContent,`${label} · 归属未确认`);
+  }
+});
+
+test('execution details start closed and remain closed across normal progress updates', () => {
+  const {result}=renderer(); result.foldProcess=true;
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  result.push(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',id:'read-one',name:'Read',input:{file_path:'README.md'}}]}}));
+  assert.ok(result.processBody.classList.contains('collapsed'));
+  assert.match(result.processWrapper.querySelector('.process-title-text').textContent,/Read/);
+  result.push(JSON.stringify({type:'system',subtype:'task_progress',task_id:'native-one'}));
+  assert.ok(result.processBody.classList.contains('collapsed'));
+  result.processWrapper.querySelector('.intermediate-process-header').listeners.click();
+  assert.equal(result.processBody.classList.contains('collapsed'),false);
+});
+
+test('live questions and tool failures reveal folded details while successful progress stays quiet', () => {
+  const {result}=renderer(); result.foldProcess=true;
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  result.push(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',id:'question-visible',name:'AskUserQuestion',input:{questions:[{question:'继续吗？'}]}}]}}));
+  assert.equal(result.processBody.classList.contains('collapsed'),false);
+  assert.match(result.processWrapper.querySelector('.process-title-text').textContent,/等待您的回答/);
+  result.processWrapper.querySelector('.intermediate-process-header').listeners.click();
+  result.push(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',id:'failed-read',name:'Read',input:{file_path:'missing'}}]}}));
+  assert.ok(result.processBody.classList.contains('collapsed'));
+  result.push(JSON.stringify({type:'user',message:{content:[{type:'tool_result',tool_use_id:'failed-read',content:'missing file',is_error:true}]}}));
+  assert.equal(result.processBody.classList.contains('collapsed'),false);
+  assert.match(result.processWrapper.querySelector('.process-title-text').textContent,/失败/);
+});
+
+test('replaying recovered tool errors stays folded and a manual receipt opens its own historical reply', () => {
+  const {result,container}=renderer(); result.isRunning=false; result.foldProcess=true;
+  result.push(JSON.stringify({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'}));
+  acceptInput(result,inputOne);
+  sdkReply(result,[inputOne],'早先的对应回复');
+  result.push(JSON.stringify({type:'result',subtype:'success',user_message_uuid:inputOne}));
+  result.push(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',id:'old-failure',name:'Read',input:{file_path:'missing'}}]}}));
+  result.push(JSON.stringify({type:'user',message:{content:[{type:'tool_result',tool_use_id:'old-failure',content:'missing file',is_error:true}]}}));
+  sdkReply(result,[inputTwo],'后来重试成功');
+  result.push('finished: 2026-11-20 10:00:00 [done]');
+  assert.ok(result.processBody.classList.contains('collapsed'));
+  const status=container.log.children.find(node=>node.dataset.inputUuid===inputOne).querySelector('.sdk-input-status');
+  status.listeners.click();
+  assert.equal(result.processBody.classList.contains('collapsed'),false);
+  assert.equal(result.processWrapper.querySelector('.process-title-text').textContent,'处理完成');
+});
+
+test('authoritative closes clear waiting stages only after all live interactions finish', () => {
+  const {result}=renderer(); result.foldProcess=true;
+  const push=event=>result.push(JSON.stringify(event));
+  push({type:'system',subtype:'coderfleet_backend',execution_backend:'sdk'});
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'waiting-question',name:'AskUserQuestion',input:{questions:[{question:'平台？'}]}}]}});
+  push({type:'system',subtype:'coderfleet_permission_pending',tool_call_id:'permission-wait',tool_name:'Bash'});
+  push({type:'system',subtype:'coderfleet_permission_closed',tool_call_id:'permission-wait',status:'approved'});
+  assert.match(result.processWrapper.querySelector('.process-title-text').textContent,/等待您的/);
+  push({type:'system',subtype:'coderfleet_question_closed',tool_call_id:'waiting-question',status:'answered'});
+  assert.equal(result.processWrapper.querySelector('.process-title-text').textContent,'继续处理中');
+  push({type:'assistant',message:{content:[{type:'tool_use',id:'waiting-agent',name:'Agent',input:{prompt:'ask'}}]}});
+  push({type:'assistant',parent_tool_use_id:'waiting-agent',message:{content:[{type:'tool_use',id:'nested-wait',name:'AskUserQuestion',input:{questions:[{question:'确认？'}]}}]}});
+  assert.match(result.processWrapper.querySelector('.process-title-text').textContent,/等待您的/);
+  push({type:'system',subtype:'coderfleet_question_closed',tool_call_id:'nested-wait',status:'answered'});
+  assert.equal(result.processWrapper.querySelector('.process-title-text').textContent,'继续处理中');
 });
 
 test('delegated native questions can be answered and cancelled from the owning Task', async () => {

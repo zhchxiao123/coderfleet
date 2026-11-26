@@ -12,7 +12,7 @@ if '--version' in sys.argv:
     if os.environ.get('FAKE_CLAUDE_SLOW_VERSION'):
         Path(os.environ['FAKE_CLAUDE_SLOW_VERSION']).write_text(json.dumps({'cli_pid':os.getpid()}))
         time.sleep(60)
-    print('2.1.321 (Claude Code)')
+    print('2.1.329 (Claude Code)')
     raise SystemExit(0)
 parser = argparse.ArgumentParser(add_help=False)
 for name in ('permission-mode', 'permission-prompt-tool', 'model', 'setting-sources', 'mcp-config', 'allowedTools', 'disallowedTools', 'resume', 'session-id', 'resume-session-at'):

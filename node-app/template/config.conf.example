@@ -1,0 +1,85 @@
+# ============================================================
+#  config.conf — CoderFleet 全局配置
+#  修改后执行 coderfleet apply 生效
+# ============================================================
+
+# ── Server 配置 ───────────────────────────────────────────
+# Web UI / API 监听端口（默认 8765）
+# 也可通过 coderfleet server --port <N>  或  CODERFLEET_PORT 环境变量覆盖
+#CODERFLEET_PORT=8765
+
+# ── 镜像配置 ──────────────────────────────────────────────
+IMAGE_NAME=coderfleet
+IMAGE_TAG=latest
+
+# 构建平台（Mac M 系列芯片固定用 linux/amd64，由 Docker Rosetta 模拟运行）
+BUILD_PLATFORM=linux/arm64
+
+# ── Docker socket（可选，高权限）──────────────────────────
+# off 关闭；auto 自动识别 Colima / Docker Desktop / Linux / rootless Docker；
+# 也可填写 unix:// 或绝对路径，例如 /var/run/docker.sock。
+# 开启后项目容器可控制宿主机 Docker，仅用于可信镜像。
+DOCKER_SOCKET=off
+DOCKER_SOCKET_TARGET=/var/run/docker.sock
+
+# ── 代理模式 ──────────────────────────────────────────────
+# host  → 转发至宿主机代理（Clash / V2Ray 等，默认）
+# xray  → 启动 Xray 容器，gost 转发给 Xray（适合无 GUI 服务器）
+PROXY_MODE=host
+
+# ── 宿主机代理配置（PROXY_MODE=host 时生效）────────────────
+# 宿主机代理地址（容器通过 host.docker.internal 访问宿主机）
+PROXY_HOST=host.docker.internal
+
+# 宿主机代理端口
+# 混合端口（同时支持 HTTP/SOCKS5，如 v2ray/sing-box 的混合入站）：两个填同一个值
+# 分开端口（如 Clash：HTTP=7890 SOCKS5=7891）：分别填写
+PROXY_HTTP_PORT=10808
+PROXY_SOCKS5_PORT=10808
+
+# ── Xray 容器配置（PROXY_MODE=xray 时生效）────────────────
+# Xray 容器在内网的固定 IP（需在 INTERNAL_SUBNET 范围内，且不与 RELAY_IP 重复）
+#XRAY_IP=172.21.0.3
+
+# Xray HTTP 入站端口（需与 xray/config.json 中 inbounds[0].port 一致）
+#XRAY_LISTEN_PORT=10809
+
+# Xray 容器镜像
+#XRAY_IMAGE=ghcr.io/xtls/xray-core:latest
+
+# Xray 配置文件路径（挂载到容器 /etc/xray/config.json）
+# 可运行 coderfleet init 自动生成模板
+#XRAY_CONFIG=~/.coderfleet/xray/config.json
+
+# ── 内部网络配置 ──────────────────────────────────────────
+INTERNAL_SUBNET=172.21.0.0/16
+RELAY_IP=172.21.0.2
+
+# 代理中继对内网监听的端口（容器内 HTTP_PROXY 指向此端口）
+RELAY_LISTEN_PORT=10808
+
+# 代理中继镜像
+RELAY_IMAGE=gogost/gost:3
+
+# ── DNS 转发（relay 内置 gost DNS 服务，解决 intnet 容器无法解析域名的问题）──
+# relay 监听的 DNS 端口，项目容器的 dns: 字段会指向 RELAY_IP:DNS_LISTEN_PORT
+#DNS_LISTEN_PORT=53
+# 上游解析器，走与 HTTP 代理相同的 chain 隧道过去（DoH，走 TCP/HTTPS，无需 UDP 中转）
+#DNS_UPSTREAM=https://1.1.1.1/dns-query
+
+# ── 系统级 LLM ────────────────────────────────────────────
+# CoderFleet 自身的系统功能（对话气泡翻译等）调用的模型。
+# 独立于池化任务账号——系统调用不消耗你的编码配额。
+# 密钥为明文，config.conf 已在 .gitignore 中；建议 chmod 600 config.conf。
+#
+# provider: anthropic | openai（openai 格式同时兼容 Ollama / vLLM / OpenRouter 等）
+#SYSTEM_LLM_PROVIDER=anthropic
+#SYSTEM_LLM_API_KEY=sk-xxxxxxxx
+#SYSTEM_LLM_MODEL=claude-haiku-4-5-20251001
+# 可选：覆盖默认端点（OpenAI 兼容口 / 私有网关）
+#SYSTEM_LLM_BASE_URL=
+# 可选：出站代理（与容器保持一致，如 http://127.0.0.1:10808）
+#SYSTEM_LLM_PROXY=
+
+# ── GitHub Continuation Webhook ───────────────────────────
+#GITHUB_WEBHOOK_SECRET=

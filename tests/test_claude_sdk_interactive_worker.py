@@ -44,6 +44,7 @@ def interactive_worker(tmp_path: Path, request):
                                    env={**os.environ, 'CODERFLEET_CLAUDE_CLI_PATH': str(cli),
                                         'FAKE_INTERACTIVE_ANSWER': str(tmp_path / 'answer.json'),
                                         'FAKE_INTERACTIVE_ARGV':str(tmp_path/'argv.json'),
+                                        'FAKE_INTERACTIVE_CONTROL_LOG':str(tmp_path/'native-controls.jsonl'),
                                         **getattr(request, 'param', {}).get('env', {}),
                                         'FAKE_CLAUDE_RELEASE_GATE': str(gate)})
         try:
@@ -54,6 +55,8 @@ def interactive_worker(tmp_path: Path, request):
                     break
                 if process.poll() == 0 and mailbox.state().get('status') == 'closed':
                     break  # Auto denial and short timeout can finish before the first poll.
+                if process.poll() is not None and getattr(request,'param',{}).get('allow_failed'):
+                    break
                 if process.poll() is not None:
                     raise AssertionError((tmp_path / 'events.jsonl').read_text())
                 time.sleep(0.03)
@@ -86,6 +89,101 @@ def test_worker_acknowledges_control_command_while_the_model_is_running(interact
     assert process.wait(timeout=10) == 0, (root / 'events.jsonl').read_text()
     assert mailbox.state()['status'] == 'closed'
     assert 'a' * 64 not in (root / 'events.jsonl').read_text()
+
+
+@pytest.mark.parametrize('interactive_worker',[{'env':{'FAKE_INTERACTIVE_WORKFLOW':'1'},
+    'spec':{'auto':True,'sdk_options':{'native_workflow':{'preset':'audit','max_concurrent_agents':1}}}},
+    {'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_CHILD_INIT':'1'},
+     'spec':{'sdk_options':{'native_workflow':{'preset':'audit','max_concurrent_agents':1},'forward_subagent_text':True}}}],indirect=True)
+def test_native_workflow_uses_only_read_tools_and_waits_for_background_completion(interactive_worker):
+    process,mailbox,gate,root=interactive_worker
+    args=json.loads((root/'argv.json').read_text())
+    assert args[args.index('--permission-mode')+1]=='dontAsk'
+    assert args[args.index('--tools')+1]=='Read,Glob,Grep,Workflow'
+    allowed=args[args.index('--allowedTools')+1]
+    assert 'mcp__' not in allowed
+    assert json.loads((root/'workflow-env.json').read_text())['concurrency']=='1'
+    deadline=time.monotonic()+3
+    while 'Workflow launched' not in (root/'events.jsonl').read_text() and time.monotonic()<deadline:
+        time.sleep(.03)
+    assert 'Workflow launched' in (root/'events.jsonl').read_text()
+    assert process.poll() is None,'An intermediate result must not finish a native workflow'
+    gate.write_text('complete')
+    assert process.wait(timeout=10)==0,(root/'events.jsonl').read_text()
+    events=[json.loads(line) for line in (root/'events.jsonl').read_text().splitlines()]
+    assert any(event.get('subtype')=='coderfleet_workflow_profile' for event in events)
+    assert 'Use a native Workflow' in [event['result'] for event in events if event.get('type')=='result'][-1]
+    assert mailbox.state()['status']=='closed'
+
+
+@pytest.mark.parametrize('interactive_worker',[{'env':{'FAKE_INTERACTIVE_WORKFLOW':'1'},
+    'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}}}],indirect=True)
+def test_native_workflow_cannot_relax_its_policy_with_runtime_controls(interactive_worker):
+    process,mailbox,gate,root=interactive_worker
+    mailbox.submit('change-mode','control',{'operation':'set_permission_mode','arguments':{'mode':'bypassPermissions'}})
+    deadline=time.monotonic()+3
+    while not mailbox.reply('change-mode') and time.monotonic()<deadline: time.sleep(.03)
+    reply=mailbox.reply('change-mode')
+    assert reply and reply['status']=='rejected' and 'read-only' in reply['error']
+    assert process.poll() is None
+    gate.write_text('finish');assert process.wait(timeout=10)==0
+
+
+@pytest.mark.parametrize('interactive_worker',[{'env':{'FAKE_INTERACTIVE_WORKFLOW':'1'},
+    'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}}},
+    {'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_STOP_RACE':'1'},
+    'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}}}],indirect=True)
+def test_native_workflow_interrupt_keeps_the_native_cancelled_lifecycle(interactive_worker):
+    process,mailbox,_gate,root=interactive_worker
+    deadline=time.monotonic()+3
+    while 'task_started' not in (root/'events.jsonl').read_text() and time.monotonic()<deadline:time.sleep(.03)
+    mailbox.submit('stop-workflow','interrupt',{})
+    assert process.wait(timeout=10)==143
+    assert mailbox.reply('stop-workflow')['status']=='accepted'
+    assert json.loads((root/'state.json').read_text())['status']=='cancelled'
+    assert mailbox.state()['status']=='closed'
+    controls=[json.loads(line) for line in (root/'native-controls.jsonl').read_text().splitlines()]
+    assert any(value.get('subtype')=='stop_task' and value.get('task_id')=='native-workflow' for value in controls)
+
+
+@pytest.mark.parametrize('interactive_worker',[{'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_WORKFLOW_HOOK':'1'},
+    'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}}}],indirect=True)
+def test_native_workflow_pretool_hook_denies_writes_before_auto_allow(interactive_worker):
+    process,_mailbox,gate,root=interactive_worker
+    deadline=time.monotonic()+3
+    while not (root/'answer.json').exists() and time.monotonic()<deadline: time.sleep(.03)
+    answer=json.loads((root/'answer.json').read_text())
+    assert answer.get('response',{}).get('hookSpecificOutput',{}).get('permissionDecision')=='deny'
+    gate.write_text('finish');assert process.wait(timeout=10)==0
+
+
+@pytest.mark.parametrize('interactive_worker',[{'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_WORKFLOW_HOOK':'StructuredOutput'},
+    'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}}}],indirect=True)
+def test_native_workflow_allows_injected_structured_agent_results(interactive_worker):
+    process,_mailbox,gate,root=interactive_worker
+    deadline=time.monotonic()+3
+    while not (root/'answer.json').exists() and time.monotonic()<deadline:time.sleep(.03)
+    answer=json.loads((root/'answer.json').read_text())
+    assert answer['response'].get('hookSpecificOutput',{}).get('permissionDecision')!='deny'
+    gate.write_text('finish');assert process.wait(timeout=10)==0
+
+
+@pytest.mark.parametrize('interactive_worker',[
+    {'env':{'FAKE_INTERACTIVE_WORKFLOW':'1'},'spec':{'sdk_options':{'native_workflow':{'preset':'audit','timeout_seconds':1}}},'allow_failed':True},
+    {'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_NO_WORKFLOW':'1'},'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}},'allow_failed':True},
+    {'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_SKIP_WORKFLOW':'1'},'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}},'allow_failed':True},
+    {'env':{'FAKE_INTERACTIVE_WORKFLOW':'1','FAKE_INTERACTIVE_WORKFLOW_LAUNCH_ERROR':'1'},'spec':{'sdk_options':{'native_workflow':{'preset':'audit'}}},'allow_failed':True},
+],indirect=True)
+def test_native_workflow_time_limit_or_missing_launch_fails_explicitly(interactive_worker):
+    process,mailbox,gate,root=interactive_worker
+    spec=json.loads((root/'task.sdk.json').read_text())
+    if spec['sdk_options']['native_workflow'].get('timeout_seconds')!=1: gate.write_text('finish')
+    assert process.wait(timeout=10)==1
+    events=[json.loads(line) for line in (root/'events.jsonl').read_text().splitlines()]
+    errors=[event for event in events if event.get('is_error')]
+    assert any('time limit' in event.get('result','') or 'unavailable' in event.get('result','') or 'did not launch' in event.get('result','') for event in errors)
+    assert json.loads((root/'state.json').read_text())['status']=='failed'
+    assert mailbox.state()['status']=='closed'
 
 
 @pytest.mark.parametrize('interactive_worker', [{'env': {'FAKE_INTERACTIVE_QUESTION': '1'}}], indirect=True)
@@ -129,7 +227,13 @@ def test_live_message_is_not_lost_at_first_result_and_retry_is_idempotent(intera
     events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]
     results = [event['result'] for event in events if event.get('type') == 'result']
     assert results == ['initial', 'supplemental instruction']
-    assert len([event for event in events if event.get('subtype') == 'coderfleet_message_accepted']) == 1
+    receipts = [event for event in events if event.get('subtype') == 'coderfleet_message_accepted']
+    assert len(receipts) == 1
+    identity = receipts[0]['user_message_uuid']
+    assert mailbox.reply('message-one')['result']['user_message_uuid'] == identity
+    native_results = [event for event in events if event.get('type') == 'result']
+    assert native_results[1]['user_message_uuids'] == [identity]
+    assert identity not in native_results[0]['user_message_uuids']
 
 
 @pytest.mark.parametrize('interactive_worker', [{'env':{'FAKE_INTERACTIVE_COALESCE':'1'}}], indirect=True)
@@ -141,7 +245,12 @@ def test_live_input_can_be_consumed_in_the_current_turn(interactive_worker) -> N
     assert mailbox.reply('coalesced')['status'] == 'accepted'
     gate.write_text('complete')
     assert process.wait(timeout=5) == 0
-    assert 'supplement merged into current turn' in (root / 'events.jsonl').read_text()
+    events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]
+    native_results = [event for event in events if event.get('type') == 'result']
+    assert len(native_results) == 1
+    assert 'supplement merged into current turn' in native_results[0]['result']
+    assert mailbox.reply('coalesced')['result']['user_message_uuid'] in native_results[0]['user_message_uuids']
+    assert len(native_results[0]['user_message_uuids']) == 2
 
 
 @pytest.mark.parametrize('interactive_worker', [{'env':{'FAKE_INTERACTIVE_QUESTION':'1'}, 'spec':{'question_timeout_seconds':.1}}], indirect=True)

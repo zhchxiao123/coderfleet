@@ -126,7 +126,7 @@ def test_worker_runs_real_sdk_and_preserves_raw_business_events(tmp_path: Path, 
     diagnostic = tmp_path / "diagnostic.log"
     assert result.returncode == 0, result.stdout + result.stderr + (diagnostic.read_text() if diagnostic.exists() else "")
     assert events[0]["subtype"] == "coderfleet_backend"
-    assert events[0]["sdk_version"] == "0.2.180"
+    assert events[0]["sdk_version"] == "0.2.186"
     assistant = next(event for event in events if event["type"] == "assistant")
     assert assistant["message"]["content"][0]["citations"] == [{"type": "fixture-citation"}]
     assert len(assistant["message"]["content"][0]["text"]) > 2 * 1024 * 1024

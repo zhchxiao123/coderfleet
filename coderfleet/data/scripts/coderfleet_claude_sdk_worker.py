@@ -28,10 +28,11 @@ import secrets
 import signal
 import subprocess
 import sys
+import uuid
 from typing import Any, TextIO, Callable
 
-SDK_VERSION = "0.2.180"
-CLI_VERSION = "2.1.321"
+SDK_VERSION = "0.2.186"
+CLI_VERSION = "2.1.329"
 OWNERSHIP_TOKEN = secrets.token_hex(16)
 
 
@@ -113,7 +114,22 @@ class TaskSpec:
         return cls(**{**data, "images": tuple(images)})
 
 
-async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str, ...], *, strict_uploads: bool = True) -> str | AsyncIterator[dict[str,Any]]:
+def input_message_uuid(task_id: str, request_id: str = '') -> str:
+    # A retried durable command keeps its identity; identical text in another
+    # command or Task is a new input. No prompt or credential enters the UUID.
+    identity = json.dumps([task_id, request_id], separators=(',', ':'))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'coderfleet:input:' + identity))
+
+
+async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str, ...], *, strict_uploads: bool = True, request_id: str = '') -> AsyncIterator[dict[str, Any]]:
+    content = await _input_content(spec, text, images, strict_uploads=strict_uploads)
+    async def messages() -> AsyncIterator[dict[str, Any]]:
+        yield {'type': 'user', 'uuid': input_message_uuid(spec.task_id, request_id),
+               'message': {'role': 'user', 'content': content}, 'parent_tool_use_id': None}
+    return messages()
+
+
+async def _input_content(spec: TaskSpec, text: str, images: list[str] | tuple[str, ...], *, strict_uploads: bool) -> str | list[dict[str, Any]]:
     if not images:
         return text
     configured_root = Path(spec.attachment_root or Path(spec.cwd)/'.coderfleet-uploads')
@@ -140,9 +156,7 @@ async def prepare_input(spec: TaskSpec, text: str, images: list[str] | tuple[str
                 'source':{'type':'base64','media_type':mime,'data':base64.b64encode(data).decode('ascii')}})
         else:
             blocks.append({'type':'text','text':'[Attached file: ' + str(path) + ']'})
-    async def messages() -> AsyncIterator[dict[str,Any]]:
-        yield {'type':'user','message':{'role':'user','content':blocks},'parent_tool_use_id':None}
-    return messages()
+    return blocks
 
 
 def emit(event: dict[str, Any]) -> None:
@@ -317,7 +331,7 @@ def signal_processes(pids: set[int], signum: int) -> None:
 
 async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, errors: ErrorPresentation) -> int:
     # All private SDK imports are isolated here and protected by doctor()'s pin.
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow, PermissionResultDeny, PermissionUpdate, ResultError, CLIConnectionError, ProcessError
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow, PermissionResultDeny, PermissionUpdate, ResultError, CLIConnectionError, ProcessError, HookMatcher
     from claude_agent_sdk._internal.transport import Transport
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
     from claude_agent_sdk.types import _configure_can_use_tool
@@ -330,9 +344,21 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
     interaction_kinds: dict[str, str] = {}
     interaction_lock = asyncio.Lock()
     permission_mode = spec.sdk_options.get("permission_mode","bypassPermissions" if spec.auto else "acceptEdits")
+    native_workflow = spec.sdk_options.get('native_workflow')
+    if native_workflow and (spec.platform_tools_module or spec.sdk_action):
+        raise ValueError('native_workflow cannot replace a platform or file-recovery profile')
+
+    def workflow_tool_allowed(name: str | None) -> bool:
+        # Schema-returning workflow agents get this runtime-injected output
+        # tool. It returns data to the orchestrator and does not edit files.
+        return name == 'StructuredOutput' or name in option_values['tools']
 
     async def handle_tool_permission(tool: str, tool_input: dict[str, Any], context: Any) -> Any:
         nonlocal permission_mode
+        if native_workflow:
+            if workflow_tool_allowed(tool):
+                return PermissionResultAllow(updated_input=tool_input)
+            return PermissionResultDeny(message='Tool is outside the native workflow read-only scope')
         if not spec.control_directory or permission_mode in {"bypassPermissions","dontAsk"}:
             return PermissionResultDeny(message="Interactive approval is unavailable for this Task")
         identifier = context.tool_use_id
@@ -426,11 +452,14 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         features = importlib.util.module_from_spec(feature_spec)
         feature_spec.loader.exec_module(features)
         extra = await features.build_options(spec.sdk_options,spec.cwd,{'task_id':spec.task_id,'emit':emit,'project_root':spec.project_root or spec.cwd})
-        for key in ('allowed_tools','disallowed_tools'):
-            extra[key] = list(dict.fromkeys([*option_values[key],*extra.get(key,[])]))
-        servers = extra.get('mcp_servers',{})
-        if set(servers) & set(option_values['mcp_servers']): raise ValueError('Custom MCP server conflicts with CoderFleet bridge')
-        extra['mcp_servers'] = {**option_values['mcp_servers'],**servers}
+        if native_workflow:
+            native_workflow = {**features.WORKFLOW_DEFAULTS,**native_workflow}
+        if not native_workflow:
+            for key in ('allowed_tools','disallowed_tools'):
+                extra[key] = list(dict.fromkeys([*option_values[key],*extra.get(key,[])]))
+            servers = extra.get('mcp_servers',{})
+            if set(servers) & set(option_values['mcp_servers']): raise ValueError('Custom MCP server conflicts with CoderFleet bridge')
+            extra['mcp_servers'] = {**option_values['mcp_servers'],**servers}
         if isinstance(extra.get('system_prompt'),dict) and extra['system_prompt'].get('type') == 'preset':
             extra['system_prompt']['append'] = extra['system_prompt'].get('append','') + '\n' + spec.append_system_prompt
         elif isinstance(extra.get('system_prompt'),dict) and extra['system_prompt'].get('type') == 'custom':
@@ -442,11 +471,30 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         elif isinstance(extra.get('system_prompt'),str):
             extra['system_prompt'] += '\n' + spec.append_system_prompt
         option_values.update(extra)
+    if native_workflow:
+        async def enforce_readonly(data: dict[str,Any], tool_id: str | None, context: Any) -> dict[str,Any]:
+            if workflow_tool_allowed(data.get('tool_name')):
+                return {}
+            emit({'type':'system','subtype':'coderfleet_workflow_tool_denied','task_id':spec.task_id,
+                  'tool_name':data.get('tool_name'),'tool_use_id':tool_id})
+            return {'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny',
+                'permissionDecisionReason':'Native workflow is read-only; this tool is outside its scope'}}
+        option_values['hooks'] = {'PreToolUse':[HookMatcher(hooks=[enforce_readonly])]}
     if option_values.get('enable_file_checkpointing'):
         option_values['extra_args'] = {'replay-user-messages':None}
     options = ClaudeAgentOptions(**option_values)
+    permission_mode = options.permission_mode
 
     prompt = "" if spec.sdk_action else spec.prompt
+    if native_workflow:
+        goal = 'audit project files and independently verify findings' if native_workflow['preset'] == 'audit' else 'research the question and cross-check source evidence'
+        prompt = ('Use a native Workflow to '+goal+'. Keep this run read-only. '
+            'Use fewer than five agents, return findings with source paths or links and unverified items, '
+            'and return the report in this conversation without writing project files. '
+            'Use the Workflow tool, not a simulated workflow or a single-agent substitute.\n\n'+prompt)
+        emit({'type':'system','subtype':'coderfleet_workflow_profile','task_id':spec.task_id,
+            'preset':native_workflow['preset'],'max_concurrent_agents':native_workflow['max_concurrent_agents'],
+            'max_budget_usd':options.max_budget_usd,'timeout_seconds':native_workflow['timeout_seconds']})
 
     class SDKTransportAdapter(CapturingTransport,Transport):
         """Nominal SDK interface; base wrapper remains importable without SDK."""
@@ -468,6 +516,34 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         platform_reader.on_progress = platform_progress
     elif spec.platform_tools_module:
         transport.on_event = module.RetrievalObserver(spec.state_path,spec.task_id).observe
+    workflow_available: bool | None = None
+    workflow_started = False
+    workflow_tools: set[str] = set()
+    workflow_runs: dict[str,str] = {}
+    if native_workflow:
+        def observe_workflow(event: dict[str, Any]) -> None:
+            nonlocal workflow_available,workflow_started
+            if (event.get('type') == 'system' and event.get('subtype') == 'init' and
+                    not event.get('parent_tool_use_id') and isinstance(event.get('tools'),list)):
+                workflow_available = 'Workflow' in event['tools']
+            if event.get('type') == 'assistant' and not event.get('parent_tool_use_id'):
+                content = event.get('message',{}).get('content',[])
+                if isinstance(content,list):
+                    for block in content:
+                        if isinstance(block,dict) and block.get('type') == 'tool_use' and block.get('name') == 'Workflow':
+                            workflow_started = True
+                            if isinstance(block.get('id'),str): workflow_tools.add(block['id'])
+            if event.get('type') == 'system':
+                identifier = event.get('task_id')
+                if (isinstance(identifier,str) and event.get('subtype') == 'task_started' and
+                        event.get('task_type') in {'workflow','local_workflow'} and event.get('tool_use_id') in workflow_tools):
+                    workflow_runs.setdefault(identifier,'running')
+                if isinstance(identifier,str) and identifier in workflow_runs:
+                    patch = event.get('patch')
+                    status = patch.get('status') if isinstance(patch,dict) else event.get('status')
+                    if event.get('subtype') in {'task_notification','task_updated'} and status in {'completed','failed','stopped','killed'}:
+                        workflow_runs[identifier] = status
+        transport.on_event = observe_workflow
     client = ClaudeSDKClient(options=options, transport=transport)
     mailbox: Any = None
     if spec.control_directory:
@@ -479,6 +555,7 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         mailbox = protocol.ControlMailbox(Path(spec.control_directory), spec.task_id, spec.control_token)
         mailbox.publish("starting")
     loop = asyncio.get_running_loop()
+    workflow_deadline = loop.time()+native_workflow['timeout_seconds'] if native_workflow else None
     task = asyncio.current_task()
     received_signal = 0
     succeeded = False
@@ -518,7 +595,7 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                             if engine is None:
                                 raise RuntimeError('SDK client disconnected')
                             try:
-                                prepared = await prepare_input(spec,text,images)
+                                prepared = await prepare_input(spec,text,images,request_id=command['id'])
                             except (OSError,ValueError) as error:
                                 mailbox.acknowledge(command['id'],error=str(error))
                                 continue
@@ -527,9 +604,21 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                             engine._clear_run_end_ceiling()
                             await client.query(prepared)
                             emit({'type':'system', 'subtype':'coderfleet_message_accepted', 'task_id':spec.task_id,
-                                  'request_id':command['id'], 'text':text,'attachment_count':len(images)})
-                            mailbox.acknowledge(command['id'], {'queued_in_sdk': True})
+                                  'request_id':command['id'], 'user_message_uuid':input_message_uuid(spec.task_id,command['id']),
+                                  'text':text,'attachment_count':len(images)})
+                            mailbox.acknowledge(command['id'], {'queued_in_sdk': True,
+                                'user_message_uuid':input_message_uuid(spec.task_id,command['id'])})
                     elif command['kind'] == 'interrupt':
+                        if native_workflow:
+                            async def stop_workflow(identifier: str) -> None:
+                                try:
+                                    await client.stop_task(identifier)
+                                except Exception:
+                                    # Completion may race the stop response. Only
+                                    # a recorded terminal event proves it harmless.
+                                    if workflow_runs.get(identifier) == 'running': raise
+                            await asyncio.wait_for(asyncio.gather(*(stop_workflow(identifier)
+                                for identifier,status in list(workflow_runs.items()) if status == 'running')),timeout=4)
                         await client.interrupt()
                         interrupted = True
                         accepting = False
@@ -545,6 +634,9 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
                             arguments = protocol.validate_control(operation, payload.get('arguments', {}))
                         except (ValueError, RuntimeError) as error:
                             mailbox.acknowledge(command['id'], error=str(error))
+                            continue
+                        if native_workflow and operation not in {'set_model','get_context_usage','get_server_info','mcp_status','stop_task'}:
+                            mailbox.acknowledge(command['id'],error='Native workflow read-only policy cannot be changed during this Task')
                             continue
                         methods = {name:getattr(client,name) for name in protocol.CONTROL_OPERATIONS}
                         previous_mode = permission_mode
@@ -643,6 +735,17 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
         # The pinned SDK owns full-run completion, including background agents.
         # receive_response() stops at one ResultMessage and is too early here.
         while not consumer.done():
+            # An explicit profile interrupt closes this Task after native stop
+            # requests; it must not wait for background-triggered model turns.
+            # The existing disconnect/owned-process cleanup still runs below.
+            if interrupted and native_workflow:
+                return 143
+            if workflow_deadline is not None and loop.time() >= workflow_deadline:
+                errors.show('Native workflow reached its execution time limit; the run was stopped.',spec.task_id)
+                return 1
+            if workflow_available is False:
+                errors.show('Native Workflow tool is unavailable for this account or runtime; no substitute run was accepted.',spec.task_id)
+                return 1
             engine = client._query
             if transport.results and engine is not None and engine._run_ended_event.is_set() and not questions:
                 async with command_lock:
@@ -661,6 +764,12 @@ async def run_task(spec: TaskSpec, report: dict[str, Any], diagnostic: TextIO, e
             return 143
         if transport.failed or not transport.results:
             errors.show("Claude SDK run failed or ended without a terminal result; see the task diagnostic log.", spec.task_id)
+            return 1
+        if native_workflow and (workflow_available is False or not workflow_started or not workflow_runs):
+            errors.show('Requested native workflow did not launch; a normal answer is not a verified workflow result.',spec.task_id)
+            return 1
+        if native_workflow and 'completed' not in workflow_runs.values():
+            errors.show('Native workflow ended without a completed run; inspect its failure details before continuing.',spec.task_id)
             return 1
         succeeded = True
         return 0

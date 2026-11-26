@@ -497,6 +497,8 @@ def _sdk_command(task_id: str, action: str, request_id: Optional[str], text: Opt
     if response.status_code != 200:
         raise click.ClickException(_http_error_detail(response))
     click.echo('✓ SDK 已接收；' + ('当前运行正在中断' if action == 'interrupt' else '消息将在 SDK 调度后处理'))
+    if identity := response.json().get('result', {}).get('user_message_uuid'):
+        click.echo('消息 UUID: ' + identity)
 
 
 @task_group.command('interrupt')
