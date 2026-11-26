@@ -2,15 +2,12 @@ name: Container image
 
 # The image the App downloads (下载镜像) instead of building it on the user's
 # machine: node-app/template/, for amd64 and arm64.
-#   push to main (template changed) → :latest
-#   tag app-v1.2.3                  → :1.2.3 and :latest
+# Built for releases only, not for every commit:
+#   tag app-v1.2.3 → :1.2.3 and :latest
+#   run by hand    → :latest
 on:
   push:
-    branches: [main]
     tags: ['app-v*']
-    paths:
-      - 'node-app/template/**'
-      - '.github/workflows/image.yml'
   workflow_dispatch:
 
 permissions:

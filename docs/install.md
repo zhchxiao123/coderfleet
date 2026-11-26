@@ -22,8 +22,6 @@ Docker 不在这台电脑上也可以：App 装在你的电脑上，Docker 在�
 
 iOS 暂时没有安装包，需要用 Xcode 自行编译，见仓库里的 `mobile/README.md`。
 
-每次提交到 `main` 的最新构建在 [Actions → Build apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml) 每次运行的 Artifacts 里。
-
 ## 首次打开的系统提示
 
 安装包目前没有开发者签名，系统会拦一下。

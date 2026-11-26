@@ -38,9 +38,11 @@ scripts/release.sh 0.2.1
 
 `main` 上的版本号一直是**最近发布的那个版本**，发下一版时才改。
 
-不是从标签构建出来的包（`main` 上的每次推送、PR），CI 会在版本号后面加上提交号：`0.2.0+36a1781`，意思是「0.2.0 之后、提交 36a1781 的构建」。文件名、App 里显示的后端版本、远程后端的升级判断用的都是这个带提交号的版本，所以测试包和正式版、测试包和测试包之间都分得清。
+平时的提交和 PR，CI 只做校验（版本号一致、两个 App 的测试），不构建安装包，也不构建镜像。要在发版之前拿到一份安装包试用，到 [Actions → Apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml) 点 **Run workflow**。这样构建出来的包，CI 会在版本号后面加上提交号：`0.2.0+36a1781`，意思是「0.2.0 之后、提交 36a1781 的构建」。文件名、App 里显示的后端版本、远程后端的升级判断用的都是这个带提交号的版本，所以测试包和正式版、测试包和测试包之间都分得清。
 
-这些包在 [Actions → Build apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml) 每次运行的 Artifacts 里，保留 90 天，不进 Releases。
+这些包在那次运行的 Artifacts 里，保留 90 天，不进 Releases。
+
+因为平时不打包，打包本身的问题要到这一步才看得出来：改过打包脚本、安装包或镜像的 `Dockerfile` 之后，发版前先这样手动跑一次（镜像是 [Actions → Container image](https://github.com/zhchxiao123/coderfleet/actions/workflows/image.yml)）。
 
 ## CI 会拦下的情况
 

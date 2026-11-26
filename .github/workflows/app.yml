@@ -1,8 +1,9 @@
-name: Build apps
+name: Apps
 
 # 桌面 App（Electron，node-app/）和手机 App（Flutter，mobile/）。
-#   push 到 main / PR  → 测试并构建，产物在本次运行的 Artifacts 里
-#   推送 app-v<版本> 标签 → 另外创建 GitHub Release 并附上全部安装包
+#   push 到 main / PR      → 只做校验：版本号一致、两个 App 的测试
+#   推送 app-v<版本> 标签   → 校验后构建全部平台的安装包，创建 GitHub Release
+#   手动运行（Run workflow）→ 校验后构建安装包，产物在本次运行的 Artifacts 里，不发布
 on:
   push:
     branches: [main]
@@ -65,9 +66,26 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "label=$label" >> "$GITHUB_OUTPUT"
 
+  test:
+    name: Desktop tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: node-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node-app/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   desktop:
     name: Desktop (${{ matrix.name }})
-    needs: version
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: [version, test]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -101,10 +119,6 @@ jobs:
           key: backend-node-${{ hashFiles('node-app/scripts/package-backend.mjs') }}
 
       - run: npm ci
-
-      - name: Test
-        if: runner.os == 'Linux'
-        run: npm test
 
       # 非正式构建把带提交号的版本写进 package.json：App 和后端显示、比较的都是它。
       # 系统层面的版本字段（Info.plist、exe 资源）只能是数字，仍用基础版本号。
@@ -159,6 +173,7 @@ jobs:
       - run: flutter test
 
       - name: Build APK
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
           flutter build apk --release \
             --build-name=${{ needs.version.outputs.label }} \
@@ -168,6 +183,7 @@ jobs:
             "release/CoderFleet-${{ needs.version.outputs.label }}-android.apk"
 
       - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         with:
           name: mobile-android
           path: mobile/release/*
@@ -177,6 +193,7 @@ jobs:
   # 没有签名证书，出不了可安装的 ipa；这里只保证 iOS 工程能编译。
   ios:
     name: Mobile (iOS, compile only)
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     defaults:
       run:
@@ -196,7 +213,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/app-v')
-    needs: [version, desktop, android, ios]
+    needs: [version, test, desktop, android, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write

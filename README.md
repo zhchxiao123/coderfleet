@@ -2,7 +2,7 @@
 
 > 把多个 Codex CLI / Claude Code / OpenCode / Hermes Agent / Grok Build / Kimi Code 账号变成一支可调度的 AI 开发舰队。
 
-[![Build apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml/badge.svg)](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml)
+[![Apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml/badge.svg)](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml)
 [![Release](https://img.shields.io/github/v/release/zhchxiao123/coderfleet?label=下载)](https://github.com/zhchxiao123/coderfleet/releases/latest)
 
 **[使用文档](https://zhchxiao123.github.io/coderfleet/)** · [下载](https://github.com/zhchxiao123/coderfleet/releases/latest)
@@ -47,7 +47,7 @@ CoderFleet 是面向 AI 编程重度用户的多账号开发工作台：在一�
 | Android | `CoderFleet-<版本>-android.apk` | 直接安装 |
 | iOS | 暂无安装包 | 用 Xcode 自行编译（见 [mobile/README.md](mobile/README.md)） |
 
-目前主要在 macOS 上验证；Windows 和 Linux 包是自动构建的产物，尚未充分测试。每次提交到 `main` 的最新构建在 [Actions → Build apps](https://github.com/zhchxiao123/coderfleet/actions/workflows/app.yml) 的 Artifacts 里。
+目前主要在 macOS 上验证；Windows 和 Linux 包是自动构建的产物，尚未充分测试。
 
 > 安装包目前没有开发者签名。macOS 首次打开若提示无法验证，执行 `xattr -dr com.apple.quarantine /Applications/CoderFleet.app` 后再打开；Windows 在 SmartScreen 提示里选「仍要运行」。
 
