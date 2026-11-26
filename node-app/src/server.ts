@@ -255,6 +255,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     const job = jobs.get(id);
     // A message the user queued meanwhile runs first; the job is settled after that turn.
     if (!job || job.state !== 'working' || followUps.list(id).length) return;
+    // A turn from before the job (stopped just before it started, ending late) is not the job's.
+    if (turn.createdAt < job.createdAt) return;
     if (turn.role === 'review') { void settleReview(job, turn); return; }
     if (turn.status === 'failed' || turn.status === 'cancelled') {
       jobs.patch(id, ['working'], { state: 'waiting', reason: turn.status === 'failed' ? 'failed' : 'stopped', error: turn.status === 'failed' ? turn.error : undefined });
