@@ -53,6 +53,14 @@ coderfleet-backend schedule remove <id>
 | `weekly 1,3 09:00` | 每周一、周三 9 点（1 = 周一 … 7 = 周日） |
 | `every 6` | 每隔 6 小时 |
 
+## 镜像
+
+```bash
+coderfleet-backend image status   # 镜像有没有准备好
+coderfleet-backend image pull     # 下载现成的镜像（按这台机器的芯片）
+coderfleet-backend image build    # 用工作区里的 Dockerfile 自己构建
+```
+
 ## 机器助手
 
 ```bash

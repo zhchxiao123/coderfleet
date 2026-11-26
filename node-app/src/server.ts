@@ -641,6 +641,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return readSettings(workspace);
     }],
     ['POST', /^image\/build$/, async () => lifecycle.build()],
+    ['POST', /^image\/pull$/, async () => lifecycle.pull()],
     // Background operations (image builds, container starts…) without their logs, newest first.
     ['GET', /^operations$/, async () => lifecycle.recent()],
     ['GET', /^operations\/([\w-]+)$/, async (_request, [id]) => {

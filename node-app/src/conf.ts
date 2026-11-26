@@ -284,6 +284,8 @@ export function setProjectHelper(workspace: string, name: string, access: string
 export const SETTINGS: Readonly<Record<string, string>> = {
   PROXY_HOST: 'host.docker.internal', PROXY_HTTP_PORT: '7890', CONTAINER_TIMEZONE: 'Asia/Shanghai',
   BUILD_PLATFORM: 'linux/amd64', IMAGE_NAME: 'coderfleet', IMAGE_TAG: 'latest',
+  // Where 下载镜像 takes the published image from; a registry mirror can replace it.
+  IMAGE_SOURCE: 'ghcr.io/zhchxiao123/coderfleet-worker',
   // The system LLM for translation (settings_schema.py), never a pooled account.
   SYSTEM_LLM_PROVIDER: 'anthropic', SYSTEM_LLM_API_KEY: '', SYSTEM_LLM_MODEL: '', SYSTEM_LLM_BASE_URL: '', SYSTEM_LLM_PROXY: '',
 };

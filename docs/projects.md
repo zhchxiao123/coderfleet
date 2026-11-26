@@ -45,10 +45,10 @@
 
 ## 镜像
 
-所有项目默认共用一个镜像，在「设置 → 通用 → 高级 → 工作区与镜像」里构建和重新构建。镜像基于 Ubuntu 24.04，带有：
+所有项目默认共用一个镜像，在「设置 → 通用 → 高级 → 工作区与镜像」里下载或者自己构建。「下载镜像」取的是随 App 每个版本发布的现成镜像，按这台机器的芯片（Intel / AMD 或 ARM）自动选择。镜像基于 Ubuntu 24.04，带有：
 
 - 各家编程 CLI：Claude Code、Codex、OpenCode、Hermes、Grok、Kimi、Pi、Antigravity
 - 运行时：Node.js 22、Python 3.12、Rust、Java 21 和 Maven
 - 工具：`gh`、FFmpeg、LibreOffice、Playwright 和 Chromium、code-server
 
-构建文件是工作区里的 `Dockerfile`，可以自己改，改完重新构建镜像并重启项目。
+想改镜像里装的东西，就改工作区里的 `Dockerfile`，然后点「自己构建」并重启项目。之后再点「下载镜像」会换回现成的镜像。

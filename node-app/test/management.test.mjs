@@ -38,6 +38,30 @@ test('the App initializes the workspace and manages accounts, projects, containe
     delete process.env.FAKE_BUILD_STEPS;
     assert.match((await env.get('operations/' + build.id)).body.output, /--tag coderfleet:latest/);
 
+    // Downloading the published image: this Docker's processor, this App's version, under the workspace's image name.
+    const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+    process.env.FAKE_PULL_MS = '2500';
+    const pull = (await env.post('image/pull')).body;
+    assert.equal((await env.post('image/build')).status, 400);
+    const pulling = await until(() => env.get('operations'), value => value.body[0]?.step, 'pull layers');
+    assert.deepEqual([pulling.body[0].id, pulling.body[0].kind, pulling.body[0].step], [pull.id, 'pull', { current: 2, total: 3 }]);
+    assert.equal((await operation(env, pull.id)).body.status, 'succeeded');
+    delete process.env.FAKE_PULL_MS;
+    const pulled = (await env.get('operations/' + pull.id)).body.output;
+    assert.ok(pulled.includes('$ docker pull --platform linux/arm64 ghcr.io/zhchxiao123/coderfleet-worker:' + version + '\n'), pulled);
+    assert.ok(pulled.includes('$ docker tag ghcr.io/zhchxiao123/coderfleet-worker:' + version + ' coderfleet:latest\n'), pulled);
+    assert.equal((await env.get('settings')).body.BUILD_PLATFORM, 'linux/arm64');
+    // A version without a published image takes the newest; a mirror and another processor are followed.
+    await env.put('settings', { IMAGE_SOURCE: 'mirror.example/coderfleet-worker' });
+    Object.assign(process.env, { FAKE_PULL_MISSING: version, FAKE_ARCH: 'amd64' });
+    const latest = (await operation(env, (await env.post('image/pull')).body.id)).body;
+    assert.equal(latest.status, 'succeeded');
+    assert.ok(latest.output.includes('$ docker tag mirror.example/coderfleet-worker:latest coderfleet:latest\n'), latest.output);
+    assert.equal((await env.get('settings')).body.BUILD_PLATFORM, 'linux/amd64');
+    process.env.FAKE_ARCH = 'riscv64';
+    assert.match((await operation(env, (await env.post('image/pull')).body.id)).body.error, /riscv64/);
+    delete process.env.FAKE_PULL_MISSING; delete process.env.FAKE_ARCH;
+
     // Accounts.
     assert.equal((await env.post('accounts', { name: 'bad name', type: 'claude' })).status, 400);
     assert.equal((await env.post('accounts', { name: 'codex-env', type: 'codex', auth: 'env' })).status, 400);
@@ -191,6 +215,12 @@ test('all containers start, stop and restart at once, from the App and the comma
     assert.deepEqual(await states(), { web: 'exited', api: 'running', old: 'exited' });
     await assert.rejects(cli('containers', 'start', 'nope'), /项目不存在/);
     await assert.rejects(cli('containers', 'down'), /Usage/);
+    // The image, too.
+    assert.equal(await cli('image', 'status'), 'coderfleet:latest  已就绪\n');
+    assert.equal(await cli('image', 'pull'), '镜像已下载\n');
+    // This workspace was never initialized: nothing to build from.
+    await assert.rejects(cli('image', 'build'), /没有 Dockerfile/);
+    await assert.rejects(cli('image', 'push'), /Usage/);
 
     // With no enabled project there is nothing to start.
     for (const name of ['web', 'api']) await env.post('projects/' + name + '/disable');

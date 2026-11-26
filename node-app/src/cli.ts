@@ -10,6 +10,8 @@
 //                    定时: things the service starts by itself (rule: daily HH:MM | weekly 1,3 HH:MM | every <hours>)
 //   containers list | start|stop|restart [project]
 //                    容器: all containers at once, or one project's (stop keeps them; the relay stops with all)
+//   image status | pull | build
+//                    镜像: download the published image for this machine, or build the workspace's Dockerfile
 //   helper status | install | start | stop | upgrade | restart-relay | access <project> off|command
 //          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | policy unlisted <allow|confirm|deny> | policy path <directory> … | audit [n]
 //                    机器助手: the separate program that runs listed commands on this machine for tasks
@@ -27,7 +29,7 @@ const argv = process.argv.slice(2);
 const flag = argv.indexOf('--config');
 const flagged = flag >= 0 ? argv.splice(flag, 2)[1] : undefined;
 const [mode, rawPath] = argv;
-const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' || mode === 'helper' || mode === 'containers' ? '' : rawPath) || join(home, 'config.json'));
+const configPath = resolve(flagged || (mode === 'job' || mode === 'schedule' || mode === 'helper' || mode === 'containers' || mode === 'image' ? '' : rawPath) || join(home, 'config.json'));
 
 const JOB_STATES: Readonly<Record<string, string>> = { working: '在做', waiting: '等你', review: '待验收', accepted: '已收下', discarded: '已丢弃' };
 interface JobView { conversationId: string; projectId: string; title: string; branch: string; state: string; error?: string; mergeError?: string; mergedInto?: string; createdAt: string;
@@ -217,6 +219,17 @@ async function containersCommand(verb: string | undefined, args: string[]): Prom
   } else throw new Error('Usage: coderfleet-backend containers list | start|stop|restart [project] [--config config.json]');
 }
 
+async function imageCommand(verb: string | undefined): Promise<void> {
+  if (verb === 'status') {
+    const { image } = await call<{ image?: { name: string; exists: boolean } }>('GET', 'overview');
+    console.log(image ? image.name + '  ' + (image.exists ? '已就绪' : '还没有') : '连不上 Docker');
+  } else if (verb === 'pull' || verb === 'build') {
+    const label = verb === 'pull' ? '下载' : '构建';
+    await finished(await call<OperationView>('POST', 'image/' + verb, {}), '镜像没有' + label + '成功');
+    console.log('镜像已' + label);
+  } else throw new Error('Usage: coderfleet-backend image status | pull | build [--config config.json]');
+}
+
 try {
   if (mode === 'serve') {
     // Turns run in containers, so stopping the service never stops their work.
@@ -255,11 +268,13 @@ try {
     await scheduleCommand(argv[1], argv.slice(2));
   } else if (mode === 'containers') {
     await containersCommand(argv[1], argv.slice(2));
+  } else if (mode === 'image') {
+    await imageCommand(argv[1]);
   } else if (mode === 'helper') {
     await helperCommand(argv[1], argv.slice(2));
   } else if (mode === 'version') {
     console.log(VERSION);
-  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | containers … | helper … | version');
+  } else throw new Error('Usage: coderfleet-backend serve|init|status [config.json] | job … | schedule … | containers … | image … | helper … | version');
 } catch (error) {
   console.error(message(error));
   process.exitCode = 1;

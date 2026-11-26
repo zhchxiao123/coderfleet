@@ -21,7 +21,7 @@ const file = state + '/containers.json';
 const containers = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
 const save = () => writeFileSync(file, JSON.stringify(containers));
 const project = process.env.FAKE_PROJECT;
-if (command === 'version') { console.log('27.0.0'); process.exit(0); }
+if (command === 'version') { console.log(args.join(' ').includes('Arch') ? process.env.FAKE_ARCH || 'arm64' : '27.0.0'); process.exit(0); }
 if (command === 'ps') { for (const [name, value] of Object.entries(containers)) console.log(name + '\\t' + value + '\\t' + value); process.exit(0); }
 if (command === 'image') process.exit(process.env.FAKE_IMAGE === 'missing' ? 1 : 0);
 if (command === 'build') {
@@ -34,6 +34,17 @@ if (command === 'build') {
   }
   process.exit(0);
 }
+if (command === 'pull') {
+  // FAKE_PULL_MISSING: a tag the registry does not have.
+  if (process.env.FAKE_PULL_MISSING && args.at(-1).endsWith(':' + process.env.FAKE_PULL_MISSING)) { console.error('manifest unknown'); process.exit(1); }
+  console.log('Pulling from ' + args.at(-1));
+  for (const layer of ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc']) console.log(layer + ': Pulling fs layer');
+  for (const layer of ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']) console.log(layer + ': Pull complete');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_PULL_MS || 0));
+  console.log('cccccccccccc: Pull complete');
+  process.exit(0);
+}
+if (command === 'tag') process.exit(0);
 if (command === 'rm') { for (const name of args.filter(value => !value.startsWith('-'))) delete containers[name]; save(); process.exit(0); }
 if (command === 'compose') {
   const services = args.slice(3).filter(value => !value.startsWith('-'));

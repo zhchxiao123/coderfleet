@@ -8,9 +8,10 @@
     PROXY_HOST: ['宿主机代理地址', '容器经 relay 转发到这个地址，一般是 host.docker.internal'],
     PROXY_HTTP_PORT: ['代理端口', '本机 Clash / V2Ray 等代理的 HTTP 端口'],
     CONTAINER_TIMEZONE: ['容器时区', '例如 Asia/Shanghai'],
-    BUILD_PLATFORM: ['镜像平台', 'Apple 芯片用 linux/arm64，Intel 用 linux/amd64'],
+    BUILD_PLATFORM: ['镜像平台', '下载镜像时自动设置；自己构建时 Apple 芯片用 linux/arm64'],
     IMAGE_NAME: ['镜像名', ''],
     IMAGE_TAG: ['镜像标签', ''],
+    IMAGE_SOURCE: ['镜像下载地址', '下载慢时可以换成镜像站的地址'],
   };
 
   /** Starts a build, or shows the running one: the build continues in the background either way. */
@@ -18,6 +19,14 @@
     const operation = await CF.busy(button, () => CF.api('POST', 'image/build'));
     if (!operation) return;
     CF.operationLog(operation, '构建镜像');
+    CF.activity.refresh();
+  }
+
+  /** Downloads the published image instead of building it; also continues in the background. */
+  async function pull(button) {
+    const operation = await CF.busy(button, () => CF.api('POST', 'image/pull'));
+    if (!operation) return;
+    CF.operationLog(operation, '下载镜像');
     CF.activity.refresh();
   }
 
@@ -32,8 +41,9 @@
   CF.settings = {
     initBanner: () => h('div.banner', h('span.banner-icon', CF.icon('folder', 16)), h('div.text', h('strong', '工作区还没有初始化'), h('span', '会在 ' + (CF.state.overview?.workspace || '') + ' 创建配置和镜像构建文件。')),
       h('button.btn.primary.small', { on: { click: event => init(event.currentTarget) } }, '初始化')),
-    imageBanner: () => h('div.banner', h('span.banner-icon', CF.icon('box', 16)), h('div.text', h('strong', '还没有容器镜像'), h('span', '第一次构建需要几分钟。')),
-      h('button.btn.primary.small', { on: { click: event => build(event.currentTarget) } }, CF.icon('box', 13), '构建镜像')),
+    imageBanner: () => h('div.banner', h('span.banner-icon', CF.icon('box', 16)), h('div.text', h('strong', '还没有容器镜像'), h('span', '下载现成的最省事；也可以在这台机器上自己构建。')),
+      h('div.btn-row', h('button.btn.ghost.small', { on: { click: event => build(event.currentTarget) } }, '自己构建'),
+        h('button.btn.primary.small', { on: { click: event => pull(event.currentTarget) } }, CF.icon('box', 13), '下载镜像'))),
 
     async mount(container) {
       const { overview, profiles, backendId } = CF.state;
@@ -182,22 +192,30 @@
       let image = overview.image;
       // These parts follow background operations live; the rest of the page (and what is typed in it) stays.
       const buildButton = overview.initialized && overview.docker ? h('button.btn.small', { on: { click: event => build(event.currentTarget) } }) : null;
+      const pullButton = buildButton ? h('button.btn.small', { on: { click: event => pull(event.currentTarget) } }) : null;
       const imageValue = h('dd');
       const operationsValue = h('dd');
-      // The name and tag are edited in the card below; here only whether it is built (and the name, before there are settings).
-      const drawImage = () => imageValue.replaceChildren(...(image ? [...(overview.initialized ? [] : [h('span.mono', image.name), ' · ']), image.exists ? '已构建' : '未构建'] : ['—']));
+      // The name and tag are edited in the card below; here only whether it is there (and the name, before there are settings).
+      const drawImage = () => imageValue.replaceChildren(...(image ? [...(overview.initialized ? [] : [h('span.mono', image.name), ' · ']), image.exists ? '已就绪' : '还没有'] : ['—']));
       let lastBuild = '';
+      // A download sets the image platform: the field below must not keep (and later save) the old one.
+      let syncPlatform = () => undefined;
       const drawOperations = operations => {
         if (!page.isConnected && lastBuild) return false;
         const building = operations.find(item => item.kind === 'build' && item.status === 'running');
+        const pulling = operations.find(item => item.kind === 'pull' && item.status === 'running');
         if (buildButton) buildButton.replaceChildren(...(building
           ? [h('span.spinner'), '构建中 · ' + CF.operationProgress(building)]
-          : [CF.icon('box', 13), image?.exists ? '重新构建镜像' : '构建镜像']));
-        // A build just finished: read the image state again.
-        const latest = operations.find(item => item.kind === 'build');
+          : [image?.exists ? '重新构建' : '自己构建']));
+        if (pullButton) pullButton.replaceChildren(...(pulling
+          ? [h('span.spinner'), '下载中 · ' + CF.operationProgress(pulling)]
+          : [CF.icon('box', 13), image?.exists ? '重新下载镜像' : '下载镜像']));
+        // A build or download just finished: read the image state (and the platform it set) again.
+        const latest = operations.find(item => item.kind === 'build' || item.kind === 'pull');
         const key = latest ? latest.id + latest.status : '';
         if (lastBuild && key !== lastBuild && latest?.status !== 'running') {
           void CF.get('overview').then(next => { CF.state.overview = next; image = next.image; drawImage(); }).catch(() => undefined);
+          if (latest?.kind === 'pull') syncPlatform();
         }
         lastBuild = key || 'none';
         operationsValue.replaceChildren(operations.length
@@ -215,7 +233,7 @@
         h('div.card-head', h('h2', '工作区与镜像'),
           h('div.btn-row',
             overview.initialized ? null : h('button.btn.small.primary', { on: { click: event => init(event.currentTarget) } }, '初始化工作区'),
-            buildButton)),
+            buildButton, pullButton)),
         h('div.card-body', h('dl.kv',
           h('dt', '工作区'), h('dd.mono', overview.workspace),
           h('dt', 'Docker'), h('dd', overview.docker ? '已连接 · ' + overview.docker : '未连接'),
@@ -229,6 +247,7 @@
         inputs[key] = h('input', { value: values[key] ?? '', spellcheck: false });
         return h('label.field', h('span', label, hint ? h('span.hint', ' ' + hint) : null), inputs[key]);
       });
+      syncPlatform = () => void CF.get('settings').then(next => { inputs.BUILD_PLATFORM.value = next.BUILD_PLATFORM; }).catch(() => undefined);
       const save = h('button.btn.primary.small', { on: { click: () => CF.busy(save, async () => {
         await CF.api('PUT', 'settings', Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value.trim()])));
         CF.toast('已保存，重启项目后生效');

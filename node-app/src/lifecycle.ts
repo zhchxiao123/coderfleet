@@ -8,12 +8,13 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { imageName, writeCompose } from './compose.js';
-import { loadConfig, readWorkspace, removeProject, truthy, WorkspaceError, type WorkspaceProject } from './conf.js';
+import { loadConfig, readWorkspace, removeProject, SETTINGS, truthy, WorkspaceError, writeSettings, type WorkspaceProject } from './conf.js';
+import { VERSION } from './version.js';
 
 const run = promisify(execFile);
 const MAX_OUTPUT = 2 * 1024 * 1024;
 
-export type OperationKind = 'build' | 'start' | 'stop' | 'restart' | 'remove';
+export type OperationKind = 'build' | 'pull' | 'start' | 'stop' | 'restart' | 'remove';
 export type OperationStatus = 'running' | 'succeeded' | 'failed';
 export interface Operation {
   readonly id: string;
@@ -29,21 +30,32 @@ export interface Operation {
 /** Target of the operations on every container at once; never a project name (those are ASCII). */
 export const ALL_CONTAINERS = '全部容器';
 
-const LABELS: Readonly<Record<OperationKind, string>> = { build: '构建镜像', start: '启动', stop: '停止', restart: '重启', remove: '删除' };
+const LABELS: Readonly<Record<OperationKind, string>> = { build: '构建镜像', pull: '下载镜像', start: '启动', stop: '停止', restart: '重启', remove: '删除' };
 
 /** What the App shows for a background operation without its full log. */
 export interface OperationSummary {
   readonly id: string; readonly kind: OperationKind; readonly target: string; readonly status: OperationStatus;
   readonly startedAt: string; readonly finishedAt?: string; readonly error?: string;
-  /** Build step from Docker's output (`[ 5/14]`), when it reports one. */
+  /** Build step from Docker's output (`[ 5/14]`), or the layers of a download that are in place, when it reports them. */
   readonly step?: { readonly current: number; readonly total: number };
   readonly lastLine: string;
+}
+
+/** Layers of the running `docker pull` (the last one in the log): how many are in place, of those announced. */
+function pullLayers(output: string): OperationSummary['step'] {
+  const layers = new Map<string, boolean>();
+  for (const line of output.slice(output.lastIndexOf('$ docker pull')).split('\n')) {
+    const match = /^([0-9a-f]{6,}): (.+)$/.exec(line.trim());
+    if (match) layers.set(match[1] as string, layers.get(match[1] as string) === true || /^(Pull complete|Already exists)/.test(match[2] as string));
+  }
+  return layers.size ? { current: [...layers.values()].filter(Boolean).length, total: layers.size } : undefined;
 }
 
 export function summarize(operation: Operation): OperationSummary {
   const tail = operation.output.slice(-8_000);
   let step: OperationSummary['step'];
-  for (const match of tail.matchAll(/\[\s*(\d+)\/(\d+)\]/g)) step = { current: Number(match[1]), total: Number(match[2]) };
+  if (operation.kind === 'pull') step = pullLayers(operation.output);
+  else for (const match of tail.matchAll(/\[\s*(\d+)\/(\d+)\]/g)) step = { current: Number(match[1]), total: Number(match[2]) };
   const lastLine = tail.split('\n').map(line => line.trim()).filter(Boolean).at(-1)?.slice(0, 200) ?? '';
   const { output: _output, ...rest } = operation;
   return { ...rest, ...(step ? { step } : {}), lastLine };
@@ -108,14 +120,14 @@ export class Lifecycle {
   private compose(): string[] { return ['compose', '-f', join(this.workspace, 'docker-compose.yml')]; }
 
   private start(kind: OperationKind, target: string, steps: (log: (text: string) => void, exec: (args: string[]) => Promise<void>) => Promise<void>): Operation {
-    const key = kind === 'build' ? 'image' : target === ALL_CONTAINERS ? 'all' : 'project:' + target;
+    const key = kind === 'build' || kind === 'pull' ? 'image' : target === ALL_CONTAINERS ? 'all' : 'project:' + target;
     // One project's operation and one on all containers would run `docker compose` on the same services.
     const clash = key === 'all' ? [...this.busy.keys()].find(item => item.startsWith('project:')) : key === 'image' ? undefined : 'all';
     const current = this.operations.get(this.busy.get(key) ?? '') ?? this.operations.get(this.busy.get(clash ?? '') ?? '');
     if (current) {
       // Asking again for what is already running returns it, so the App can show its progress.
       if (current.kind === kind && current.target === target) return current;
-      throw new WorkspaceError('正在' + LABELS[current.kind] + (current.kind === 'build' ? '' : ' ' + current.target) + '，等它完成后再试');
+      throw new WorkspaceError('正在' + LABELS[current.kind] + (current.kind === 'build' || current.kind === 'pull' ? '' : ' ' + current.target) + '，等它完成后再试');
     }
     const operation: Operation = { id: randomUUID(), kind, target, startedAt: new Date().toISOString(), status: 'running', output: '' };
     this.operations.set(operation.id, operation);
@@ -155,6 +167,35 @@ export class Lifecycle {
     return this.start('build', image, async (_log, exec) => {
       // Image builds use Docker's own network, not the relay.
       await exec(['build', '--platform', config.BUILD_PLATFORM || 'linux/amd64', '--tag', image, '--file', dockerfile, this.workspace]);
+    });
+  }
+
+  /**
+   * Downloads the image published with the App instead of building it: the one
+   * for this Docker's processor, under the workspace's image name. The image
+   * platform setting follows, so containers run it natively.
+   */
+  public pull(): Operation {
+    const config = loadConfig(this.workspace);
+    const image = imageName(config);
+    const source = config.IMAGE_SOURCE || SETTINGS.IMAGE_SOURCE as string;
+    return this.start('pull', image, async (log, exec) => {
+      const arch = (await run(this.dockerPath, ['version', '--format', '{{.Server.Arch}}'], { timeout: 10_000 })).stdout.trim();
+      if (arch !== 'amd64' && arch !== 'arm64') throw new WorkspaceError('没有适用于 ' + (arch || '这台机器') + ' 的现成镜像，请自己构建');
+      const platform = 'linux/' + arch;
+      // The image of this App version; a build ahead of its release has none yet and takes the newest.
+      let reference = source + ':' + VERSION.replace(/[+-].*$/, '');
+      try { await exec(['pull', '--platform', platform, reference]); }
+      catch {
+        reference = source + ':latest';
+        log('没有下载到这个版本的镜像，改为下载最新的。\n');
+        await exec(['pull', '--platform', platform, reference]);
+      }
+      await exec(['tag', reference, image]);
+      if ((config.BUILD_PLATFORM || SETTINGS.BUILD_PLATFORM) !== platform) {
+        writeSettings(this.workspace, { BUILD_PLATFORM: platform });
+        log('镜像平台已改为 ' + platform + '；已有的容器重启后使用新镜像。\n');
+      }
     });
   }
 

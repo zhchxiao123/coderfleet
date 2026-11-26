@@ -56,7 +56,7 @@ CoderFleet 是面向 AI 编程重度用户的多账号开发工作台：在一�
 需要：Docker Desktop（macOS / Windows）或 Docker Engine + Compose V2（Linux）；容器要走代理时，宿主机上运行 Clash / v2ray 等并开启 allow-lan。
 
 1. 打开 App，选择「这台电脑」，点 **初始化工作区**（默认在 `~/.coderfleet`）。
-2. 构建镜像（首次约 5–10 分钟）。
+2. 点 **下载镜像**，取现成的容器镜像（也可以选「自己构建」）。
 3. 添加账号并登录，添加项目并选择它使用的账号。
 4. 在项目里开始对话。
 

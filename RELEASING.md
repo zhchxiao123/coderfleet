@@ -18,6 +18,8 @@ scripts/release.sh 0.2.1
 
 之后由 CI（[app.yml](.github/workflows/app.yml)）测试、构建全部平台的安装包，创建 GitHub Release 并标为 Latest，更新说明按上一个版本以来的提交自动生成。大约 15 分钟。
 
+同一个标签还会触发 [image.yml](.github/workflows/image.yml)：构建 amd64 和 arm64 的容器镜像，发布为 `ghcr.io/zhchxiao123/coderfleet-worker:0.2.1` 和 `:latest`。App 里的「下载镜像」取的就是和自己版本号相同的那个。
+
 不要手工改版本号或手工打标签。
 
 ## 版本号怎么定

@@ -366,10 +366,10 @@
   };
 
   /** How an operation reads in lists and notifications. */
-  CF.operationLabel = operation => operation.kind === 'build' ? '构建镜像'
+  CF.operationLabel = operation => operation.kind === 'build' ? '构建镜像' : operation.kind === 'pull' ? '下载镜像'
     : ({ start: '启动', stop: '停止', restart: '重启', remove: '删除' }[operation.kind] || operation.kind) + ' ' + operation.target;
   CF.operationProgress = operation => operation.status !== 'running' ? { succeeded: '已完成', failed: '失败' }[operation.status]
-    : operation.step ? '第 ' + operation.step.current + '/' + operation.step.total + ' 步' : '进行中';
+    : operation.step ? operation.kind === 'pull' ? operation.step.current + '/' + operation.step.total + ' 层' : '第 ' + operation.step.current + '/' + operation.step.total + ' 步' : '进行中';
 
   /**
    * Background operations of the connected backend (image builds, container
