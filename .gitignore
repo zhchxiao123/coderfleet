@@ -74,3 +74,6 @@ skills-lock.json
 .helper-build/
 node-app/dist/
 node-app/node_modules/
+
+# ── 工作草稿（原型、截图、调研过程、worktree）────────────
+.scratch/
