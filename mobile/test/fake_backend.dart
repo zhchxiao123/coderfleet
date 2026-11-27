@@ -30,6 +30,9 @@ class FakeBackend {
   bool translation = true;
   /// Turn ID → remaining polls before it finishes.
   final pending = <String, int>{};
+  /// 领航 (GET lead/changes): null is a backend from before it (404).
+  Map<String, dynamic>? lead;
+  final leadItems = <Map<String, dynamic>>[];
 
   String _id() => (++_ids).toRadixString(16).padLeft(12, '0');
   void _touch() => _version++;
@@ -204,6 +207,32 @@ class FakeBackend {
         pending[turnId] = 0;
         _touch();
         return _json({'accepted': true});
+      case ('GET', ['lead', 'changes']) when lead != null:
+        final etag = 'l$_version';
+        if (request.url.queryParameters['since'] == etag) return _unchanged(request, etag);
+        final open = leadItems.where((item) => item['type'] == 'ask' && item['resolved'] == null).length;
+        return _json({'etag': etag, ...lead!, 'waiting': open, 'items': leadItems});
+      case ('POST', ['lead', 'messages']) when lead != null:
+        final item = {'id': _id(), 'at': DateTime.now().toUtc().toIso8601String(), 'type': 'user', 'text': body['text']};
+        leadItems.add(item);
+        _touch();
+        return _json({'item': item});
+      case ('POST', ['lead', 'asks', final id]) when lead != null:
+        final ask = leadItems.where((item) => item['id'] == id && item['type'] == 'ask').firstOrNull;
+        if (ask == null || ask['resolved'] != null) return _json({'error': '这张卡片已经处理过了'}, 409);
+        final answer = body['answer'] as String? ?? '', answers = (body['answers'] as Map?)?.cast<String, String>();
+        // Like the backend: an approval takes only its two words, a question needs its picks.
+        if (ask['kind'] == 'approval' && answer != '批准' && answer != '拒绝') return _json({'error': '这张卡片只能选「批准」或「拒绝」'}, 409);
+        if (ask['kind'] == 'question' && (answers == null || answers.isEmpty)) return _json({'error': '先选一个答案'}, 409);
+        ask['resolved'] = {'answer': answers == null ? answer : answers.values.join('；'), 'by': 'user'};
+        _touch();
+        return _json({'accepted': true});
+      case ('POST', ['lead', 'undo', final id]) when lead != null:
+        final did = leadItems.where((item) => item['id'] == id && item['type'] == 'did').firstOrNull;
+        if (did == null || did['undo'] != 'stop' || did['undone'] == true) return _json({'error': '这一轮已经结束了，撤不回了'}, 409);
+        did..['undone'] = true..['undo'] = '';
+        _touch();
+        return _json({'accepted': true});
       case ('POST', ['turns', final turnId, 'cancel']):
         final turn = turns.values.expand((list) => list).firstWhere((item) => item['id'] == turnId);
         turn['status'] = 'cancelled';
@@ -213,6 +242,47 @@ class FakeBackend {
     }
     return _json({'error': 'Unknown API endpoint'}, 404);
   });
+
+  /// 领航 on, following two projects: its thread holds the user's words, its answers, what it settled and one card of each kind.
+  /// Returns the conversations it names, by a short key.
+  Map<String, Map<String, dynamic>> seedLead() {
+    final now = DateTime.now();
+    final login = conversation('reminis-app', '修登录页', status: 'running', updatedAt: now.subtract(const Duration(minutes: 2)));
+    final port = conversation('coderfleet', '端口读环境变量', attention: true, updatedAt: now.subtract(const Duration(minutes: 1)));
+    final docs = conversation('coderfleet', '补文档', status: 'failed', updatedAt: now.subtract(const Duration(minutes: 30)));
+    final at = now.toUtc().toIso8601String();
+    Map<String, dynamic> about(Map<String, dynamic> conversation) =>
+        {'conversationId': conversation['id'], 'conversation': conversation['name'], 'projectId': conversation['projectId'], 'turnId': 't-${conversation['id']}', 'at': at};
+    lead = {
+      'configured': true, 'model': 'demo', 'enabled': true, 'rules': [{'id': 'r1', 'text': '删除、推送这类要紧的操作一律问你', 'fixed': true}, {'id': 'r2', 'text': '测试没过不收下'}],
+      'manual': <String>[], 'rest': 4, 'working': 'Demo', 'draft': '', 'step': '在读对话「修登录页」',
+      'watching': [
+        {'id': port['id'], 'name': port['name'], 'projectId': 'coderfleet', 'account': 'claude-1', 'status': 'waiting', 'note': '等你批准', 'at': at},
+        {'id': login['id'], 'name': login['name'], 'projectId': 'reminis-app', 'account': 'codex-1', 'status': 'running', 'note': '在跑', 'at': ''},
+        {'id': docs['id'], 'name': docs['name'], 'projectId': 'coderfleet', 'account': 'claude-1', 'status': 'failed', 'note': '失败了', 'at': at},
+      ],
+    };
+    leadItems.addAll([
+      {'id': 'u1', 'at': at, 'type': 'user', 'text': '现在都在忙什么'},
+      {'id': 'l1', 'at': at, 'type': 'lead', 'text': '[修登录页](conv:${login['id']})'},
+      {'id': 'd1', 'type': 'did', 'action': 'approve', ...about(login), 'asked': 'npm test', 'said': '', 'reason': '只是跑测试', 'undo': 'stop', 'undone': false,
+        'evidence': [{'command': 'git status --short', 'output': ' M src/login.ts'}]},
+      {'id': 's1', 'type': 'seen', ...about(docs)},
+      {'id': 'a1', 'type': 'ask', 'kind': 'approval', ...about(port), 'asked': '要执行 git push origin main', 'quote': '', 'why': '推送一律问你', 'lean': '',
+        'options': ['批准', '拒绝'], 'free': false, 'evidence': <Map<String, dynamic>>[], 'resolved': null},
+      {'id': 'a2', 'type': 'ask', 'kind': 'question', ...about(port), 'asked': '端口默认用多少？', 'why': '', 'lean': '', 'options': <String>[], 'free': false,
+        'questions': [{'question': '默认端口', 'header': '端口', 'multiSelect': false, 'options': [{'label': '8080', 'description': ''}, {'label': '8877', 'description': ''}]}],
+        'evidence': <Map<String, dynamic>>[], 'resolved': null},
+      {'id': 'a3', 'type': 'ask', 'kind': 'job', ...about(login), 'asked': '「修登录页」做完了，等收下', 'why': '改了 3 个文件，测试都过了', 'lean': '', 'options': ['收下并合并', '我去看'],
+        'free': false, 'evidence': <Map<String, dynamic>>[], 'resolved': null},
+      {'id': 'a4', 'type': 'ask', 'kind': 'finished', ...about(docs), 'asked': '文档写到 README 还是 docs/？', 'quote': '我应该把文档写到哪里？', 'why': '', 'lean': '我倾向 docs/',
+        'options': ['我去看'], 'free': true, 'evidence': <Map<String, dynamic>>[], 'resolved': null},
+      {'id': 'a5', 'type': 'ask', 'kind': 'approval', ...about(port), 'asked': '要删除 dist/', 'quote': '', 'why': '删除一律问你', 'lean': '', 'options': ['批准', '拒绝'],
+        'free': false, 'evidence': <Map<String, dynamic>>[], 'resolved': {'answer': '拒绝', 'by': 'user'}},
+    ]);
+    _touch();
+    return {'login': login, 'port': port, 'docs': docs};
+  }
 
   /// A realistic demo: a finished answer with Markdown and tools, and one waiting for approval.
   void seedDemo() {

@@ -62,6 +62,16 @@ void main() {
       await tester.pump();
       await screenshot(tester, '$out/$name-7-composer.png');
       await teardown(tester);
+
+      final lead = FakeBackend()..seedLead();
+      await pumpApp(tester, lead, mode: mode);
+      await tester.tap(find.byTooltip('领航'));
+      await settle(tester);
+      await screenshot(tester, '$out/$name-8-lead.png');
+      await tester.drag(find.byType(ListView).last, const Offset(0, 1400));
+      await settle(tester, 2);
+      await screenshot(tester, '$out/$name-9-lead-earlier.png');
+      await teardown(tester);
     });
   }
 }
