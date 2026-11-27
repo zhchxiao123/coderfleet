@@ -579,18 +579,28 @@
       // Images: picked, pasted or dropped; uploaded into the project right away.
       const attachRow = h('div.attach-row', { hidden: true });
       const fileInput = h('input', { type: 'file', multiple: true, hidden: true });
-      const attachButton = h('button.composer-icon', { title: '添加附件：图片、PDF 或任意文件（也可以粘贴或拖进来）', on: { click: () => fileInput.click() } }, CF.icon('clip', 16));
+      // One "+" holds the attachment and the two switches, so the bar stays short. A switch that is
+      // on shows in the bar as a chip; a click there turns it off.
+      const attachButton = h('button.composer-icon', { title: '附件、自动模式、做完为止', 'aria-label': '附件、自动模式、做完为止', on: { click: () => CF.menu(attachButton, [
+        { icon: 'clip', label: '添加附件', hint: '图片、PDF 或任意文件，也可以粘贴或拖进来', run: () => fileInput.click() },
+        autoOffered() || jobOffered ? '-' : null,
+        autoOffered() ? { icon: 'bolt', label: '自动模式', hint: '工具直接执行，不再逐个确认', checked: autoOn(), run: toggleAuto } : null,
+        jobOffered ? { icon: 'check', label: '做完为止', checked: jobWanted,
+          hint: jobSupport.supported ? '在独立分支上做到为止，再由你收下或丢弃' : '用不了' + (jobSupport.reason ? '：' + jobSupport.reason : ''), run: toggleJob } : null,
+      ], { alignStart: true }) } }, CF.icon('plus', 16));
       // Auto mode: tools run without asking (Python `auto`), remembered per project.
       const autoKey = 'cf.auto:' + CF.state.backendId + ':' + projectId;
+      const autoOn = () => autoButton.getAttribute('aria-pressed') === 'true';
+      const toggleAuto = () => {
+        const next = !autoOn();
+        try { localStorage.setItem(autoKey, next ? '1' : ''); } catch { /* storage unavailable */ }
+        setAuto(next);
+        CF.toast(next ? '自动模式已开：之后发的消息里，工具不再逐个确认' : '已关闭自动模式');
+      };
       const autoButton = h('button.auto-toggle', {
-        title: '自动模式：工具直接执行，不再逐个确认。Claude 跳过权限确认，Codex 不再限制在工作区，其他账号自动批准。',
-        on: { click: () => {
-          const next = autoButton.getAttribute('aria-pressed') !== 'true';
-          try { localStorage.setItem(autoKey, next ? '1' : ''); } catch { /* storage unavailable */ }
-          setAuto(next);
-          CF.toast(next ? '自动模式已开：之后发的消息里，工具不再逐个确认' : '已关闭自动模式');
-        } },
-      }, CF.icon('bolt', 13), h('span', '自动'));
+        title: '自动模式已开：工具直接执行，不再逐个确认。Claude 跳过权限确认，Codex 不再限制在工作区，其他账号自动批准。点一下关闭。',
+        on: { click: toggleAuto },
+      }, CF.icon('bolt', 13), h('span', '自动'), CF.icon('x', 11));
       // The model stays with the conversation: the one its latest message used (all agent types),
       // or, for a new conversation, the one last used in this project. A choice made here wins.
       const modelKey = () => 'cf.model:' + CF.state.backendId + ':' + projectId + (several() ? ':' + accountName() : '');
@@ -605,10 +615,9 @@
         if (wanted === null) { try { wanted = localStorage.getItem(modelKey()); } catch { /* storage unavailable */ } }
         if (wanted !== null && [...modelSelect.options].some(option => option.value === wanted)) modelSelect.value = wanted;
       };
-      const setAuto = on => { autoButton.setAttribute('aria-pressed', String(on)); autoButton.classList.toggle('on', on); };
+      const setAuto = on => { autoButton.setAttribute('aria-pressed', String(on)); autoButton.classList.toggle('on', on); renderSwitches(); };
       let savedAuto = '';
       try { savedAuto = localStorage.getItem(autoKey) || ''; } catch { /* storage unavailable */ }
-      setAuto(Boolean(savedAuto));
       // 做完为止: a message can start a job, in a new conversation or one already going. From
       // then on the work happens in its own branch and directory until its changes are accepted
       // or discarded (see job.js); after that the conversation goes on, and can start another.
@@ -618,25 +627,34 @@
         jobWanted = on;
         jobToggle.setAttribute('aria-pressed', String(on));
         jobToggle.classList.toggle('on', on);
+        renderSwitches();
+      };
+      // While a job is open its messages go to it: neither switch is offered then.
+      let jobOffered = !['working', 'waiting', 'review'].includes(conversation?.job);
+      let jobSupport = { supported: false, reason: '' };
+      const autoOffered = () => jobOffered && !jobWanted;
+      const toggleJob = () => {
+        if (!jobWanted && !jobSupport.supported) { CF.toast('做完为止用不了' + (jobSupport.reason ? '：' + jobSupport.reason : ''), { error: true }); return; }
+        setJobWanted(!jobWanted);
+        if (jobWanted) CF.toast('做完为止已开：它先列出做完的标准，在独立分支上做到为止，再由你收下或丢弃');
       };
       const jobToggle = h('button.auto-toggle.job-toggle', {
-        disabled: true, hidden: ['working', 'waiting', 'review'].includes(conversation?.job), title: '做完为止',
-        on: { click: () => {
-          setJobWanted(!jobWanted);
-          autoButton.hidden = jobWanted || jobIsOpen();
-          if (jobWanted) CF.toast('做完为止已开：它先列出做完的标准，在独立分支上做到为止，再由你收下或丢弃');
-        } },
-      }, CF.icon('check', 13), h('span', '做完为止'));
+        title: '做完为止已开：它先列出做完的标准，在独立的分支和目录里做，逐条做到并经过核对后，由你收下（合并）或丢弃。有 PRD 或 issue 就把文件路径告诉它。点一下关闭。',
+        on: { click: toggleJob },
+      }, CF.icon('check', 13), h('span', '做完为止'), CF.icon('x', 11));
+      const renderSwitches = () => {
+        autoButton.hidden = !(autoOffered() && autoOn());
+        jobToggle.hidden = !(jobOffered && jobWanted);
+      };
+      setAuto(Boolean(savedAuto));
       const loadJobSupport = () => {
         if (!projectId) return;
         const asked = accountName();
         CF.get('projects/' + encodeURIComponent(projectId) + '/job-support' + (several() ? '?account=' + encodeURIComponent(asked) : '')).then(support => {
           if (asked !== accountName()) return;
-          jobToggle.disabled = !support.supported;
-          jobToggle.title = support.supported
-            ? '做完为止：它先列出做完的标准，在独立的分支和目录里做，逐条做到并经过核对后，由你收下（合并）或丢弃。有 PRD 或 issue 就把文件路径告诉它。'
-            : '做完为止用不了：' + support.reason;
-        }).catch(() => { jobToggle.disabled = true; jobToggle.title = '做完为止暂时用不了'; });
+          jobSupport = { supported: Boolean(support.supported), reason: support.reason || '' };
+          if (!jobSupport.supported && jobWanted) setJobWanted(false);
+        }).catch(() => { jobSupport = { supported: false, reason: '' }; if (jobWanted) setJobWanted(false); });
       };
       const followHost = h('div.follow-ups');
       // Only a new conversation can still change its project.
@@ -666,12 +684,12 @@
         sendButton.classList.toggle('stop', stopping);
         sendButton.replaceChildren(stopping ? h('span.stop-mark') : CF.icon('send', 16));
         sendButton.disabled = stopping ? Boolean(running.stopping) : current.sending || current.readOnly || !content || uploading || !containerReady;
-        sendButton.title = stopping ? (running.stopping ? '正在停止…' : '中断（Esc）') : running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送';
+        sendButton.title = stopping ? (running.stopping ? '正在停止…' : '中断（Esc）') : running ? (canInject(running) ? '发送（插入当前回答）' : '发送（这轮结束后发出）') : '发送（Enter）· Shift+Enter 换行';
         sendButton.setAttribute('aria-label', sendButton.title);
         hint.textContent = running?.stopping ? '正在停止…' : running && !content ? '正在回答 · Esc 停止，也可以继续输入'
           : running ? (canInject(running) ? '发送会插入这一轮回答' : '发送会排在这轮回答之后')
           : current.job?.state === 'review' && !running ? '发消息就是让它再改 · Enter 发送'
-          : 'Enter 发送 · Shift+Enter 换行';
+          : '';
         modelSelect.disabled = Boolean(running);
         accountChip.disabled = Boolean(running);
       };
@@ -1033,9 +1051,9 @@
             chip?.remove();
           }
           const result = await CF.api('POST', 'conversations/' + current.conversationId + '/turns',
-            { prompt, images, model: modelSelect.value, auto: autoButton.getAttribute('aria-pressed') === 'true',
+            { prompt, images, model: modelSelect.value, auto: autoOn(),
               ...(jobWanted ? { job: true } : {}) });
-          if (jobWanted) { jobToggle.hidden = true; setJobWanted(false); }
+          if (jobWanted) { jobOffered = false; setJobWanted(false); }
           try { localStorage.setItem(modelKey(), modelSelect.value); } catch { /* storage unavailable */ }
           if (result?.delivered === 'queued') CF.toast('已排队，这一轮结束后自动发出');
           textarea.value = '';
@@ -1091,8 +1109,8 @@
             current.job = job;
             jobButton.hidden = !job;
             // While a job is open its messages go to it; once closed, the next can start here.
-            jobToggle.hidden = jobIsOpen();
-            autoButton.hidden = jobIsOpen() || jobWanted;
+            jobOffered = !jobIsOpen();
+            renderSwitches();
             renderHeader();
             renderJobLines();
             if (!first) void CF.app.refreshConversations();

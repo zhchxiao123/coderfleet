@@ -705,7 +705,9 @@ button.flow-row.tool-toggle { cursor: default; }
 /* Accounts as headings, their models underneath (a project with several accounts). */
 .picker-group { display: flex; align-items: center; gap: 8px; padding: 9px 10px 4px; color: var(--text-3); font-size: 12px; }
 .picker-item.grouped .dot { visibility: hidden; }
-.composer-bar > .account-chip { flex: 0 1 auto; min-width: 56px; max-width: 300px; }
+.composer-bar > .project-chip { flex: 0 1 auto; min-width: 56px; }
+/* The model's name gives way before the project's. */
+.composer-bar > .account-chip { max-width: 300px; flex-shrink: 4; }
 .picker-empty { padding: 14px 10px; color: var(--text-3); font-size: 12.5px; }
 /* No menu may run off the window; long ones scroll inside. */
 .menu { max-height: calc(100vh - 24px); overflow-y: auto; }
@@ -1052,6 +1054,7 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 .auto-toggle.job-toggle.on { background: var(--accent-soft); color: var(--accent); }
 .auto-toggle:disabled { opacity: 0.45; cursor: default; }
 .auto-toggle[hidden] { display: none; }
+.auto-toggle svg:last-child { opacity: 0.6; }
 .job-card {
   position: absolute; top: 10px; right: 14px; z-index: 5; width: 292px; max-height: calc(100% - 150px); overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-float);

@@ -112,7 +112,9 @@ try {
   await shot('job-accepted');
   // The job is closed, the conversation is not: the next message is an ordinary one, and
   // 做完为止 can be switched on again for the next job.
-  await page.waitForSelector('.composer .job-toggle:not([hidden])');
+  await page.click('.composer .composer-icon');
+  await page.waitForSelector('.menu button:has-text("做完为止")');
+  await page.click('.composer textarea');
   await page.fill('.composer textarea', '顺便看一下 README 要不要更新');
   await page.keyboard.press('Enter');
   await page.waitForSelector('.job-divider:has-text("已收下") ~ .turn, .job-divider:has-text("已收下") ~ *:has-text("README")');
@@ -126,8 +128,9 @@ try {
   await shot('job-question');
   // 做完为止 can also be turned on in a conversation that is already going.
   await page.click('.conv-item:has-text("hello")');
-  await page.waitForSelector('.job-toggle:not([disabled])');
-  await page.click('.job-toggle');
+  await page.click('.composer .composer-icon');
+  await page.click('.menu button:has-text("在独立分支上做到为止")');
+  await page.waitForSelector('.job-toggle:not([hidden])');
   await shot('job-toggle-midway');
   await page.click('.job-toggle');
   await page.click('.conv-item:has-text("给启动流程补上集成测试")');

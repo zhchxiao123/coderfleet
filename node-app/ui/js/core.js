@@ -149,7 +149,7 @@
     const below = window.innerHeight - rect.bottom - 8;
     const above = rect.top - 8;
     menu.style.top = (height + 6 <= below || below >= above ? Math.min(rect.bottom + 6, window.innerHeight - height - 8) : Math.max(8, rect.top - 6 - height)) + 'px';
-    menu.style.left = Math.max(8, Math.min(options.matchWidth ? rect.left : rect.right - width, window.innerWidth - width - 8)) + 'px';
+    menu.style.left = Math.max(8, Math.min(options.matchWidth || options.alignStart ? rect.left : rect.right - width, window.innerWidth - width - 8)) + 'px';
     openMenu = menu;
     setTimeout(() => document.addEventListener('click', function close(event) {
       if (!menu.contains(event.target)) { menu.remove(); document.removeEventListener('click', close); }
