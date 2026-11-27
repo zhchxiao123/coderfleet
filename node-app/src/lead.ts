@@ -723,7 +723,7 @@ export class Lead {
     const evidence: Evidence[] = [];
     await this.decide(event, conversation, [
       '对话「' + conversation.name + '」（ID ' + conversation.id + '）里「做完为止」的活「' + job.title + '」做完了，等用户收下并合并。',
-      '复审（账号 ' + (job.review?.account ?? '') + '）结论：通过。完成标准：', list,
+      '独立复审（干净上下文、只读）结论：通过。完成标准：', list,
       '改动：' + size, ...changes.files.map(file => '- ' + file.path + '（' + file.status + '，+' + file.added + ' −' + file.removed + '）'),
       '它的工作目录是 ' + job.directory + '，run_command 就在那里跑。',
     ].join('\n'), [

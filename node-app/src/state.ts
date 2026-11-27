@@ -147,7 +147,7 @@ export interface Turn {
   readonly forkAt?: { readonly sessionId: string; readonly messageId: string };
   /** Sent by the service, not the user: the job's agent stopped with criteria unmet (or none listed) for the n-th time. */
   readonly checkRound?: number;
-  /** Sent by the service too: `review` is the reviewer checking the job's changes against its criteria (a fresh read-only session, in another account's project when there is one); `review-feedback` hands its findings to the author. */
+  /** Sent by the service too: `review` is the reviewer checking the job's changes against its criteria (read-only, on the conversation's own project and account: Claude in the author's session through a sub-agent, the other engines in a fresh session); `review-feedback` hands its findings to the author. */
   readonly role?: 'review' | 'review-feedback' | 'accept';
   readonly requestedModel: string;
   readonly createdAt: string;

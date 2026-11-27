@@ -39,7 +39,7 @@ export interface Changes { readonly files: ChangedFile[]; readonly added: number
  * when it starts and stops, the reviewer when it has checked each line).
  */
 export interface Criterion { readonly text: string; readonly state: 'open' | 'done' | 'ask'; readonly note: string }
-/** What the reviewer said about the changes. `unclear`: it gave no verdict line; `failed`: its turn did not finish. */
+/** What the reviewer said about the changes (`account`: the one it ran on, the job's own). `unclear`: it gave no verdict line; `failed`: its turn did not finish. */
 export interface Review {
   readonly account: string;
   readonly verdict: 'pass' | 'changes' | 'unclear' | 'failed';
@@ -158,17 +158,33 @@ export function unmetFeedback(items: readonly Criterion[], round: number): strin
     '接着做，做到后把整个 ```标准 代码块连同证据再写一遍。确实必须由我来定的，把那条写成 `- [?] 标准 —— 要我定什么`。'].join('\n');
 }
 
-/** What the reviewer is asked: check the changes against each criterion, change nothing, end with a verdict line. */
-export function reviewPrompt(job: Job, task: string, items: readonly Criterion[]): string {
-  return [
+/**
+ * What the reviewer is asked: check the changes against each criterion, change nothing, end with
+ * a verdict line. With `subagent` (Claude, in the author's own session) the agent is told to hand
+ * exactly that to a sub-agent, which has not seen the work, and to repeat its block and verdict.
+ * In the foreground: once the turn's answer is in, the worker stops what is left in the
+ * background after a short grace (claude-worker.ts BACKGROUND_GRACE), and a review takes longer.
+ */
+export function reviewPrompt(job: Job, task: string, items: readonly Criterion[], subagent = false): string {
+  const review = [
     '请核对另一个 AI 在这个目录里做的改动：' + job.directory + '（git 分支 ' + job.branch + '）。',
+    '你是独立复审人，没有参与前面的实现：作者说的不算证据，改动自己看，测试自己跑。',
     '- 全部改动是 `git diff ' + job.base + '`（包含还没提交的）；新建的文件用 `git status --short` 找。',
     '- 只读：不要修改、创建或删除任何文件，不要提交。可以运行测试来验证。',
     '- 下面是这件事「做完的标准」和它自己给的证据。逐条核对：看改动，必要时自己跑一遍，不要只信它的说法。',
-    '- 另外只找真问题：会出错的、漏掉的情况、和周围代码明显不一致的。不挑风格，不提可有可无的建议。',
+    '- 另外只找真问题：会出错的、漏掉的情况、和周围代码明显不一致的。不照顾作者的面子，也不为了显得严格而挑毛病；不挑风格，不提可有可无的建议。',
     '- 把标准原样抄成下面的代码块：确实做到的写 `- [x] 标准 —— 你核对到的证据`，没做到的写 `- [ ] 标准 —— 差在哪`。',
     '- 最后单独一行写结论：有标准没做到或有必须改的问题写 `结论：要改`，否则写 `结论：通过`。',
     '', listed(items), '', '它被要求做的事：', task,
+  ].join('\n');
+  if (!subagent) return review;
+  return [
+    '请核对你在这个目录里做的改动：' + job.directory + '（git 分支 ' + job.branch + '）。这一轮你自己不审：',
+    '- 用 Task 工具（有的版本叫 Agent）起一个子 agent，把两行 ---- 之间的要求原样交给它。它看不到前面的对话，由它做独立复审。',
+    '- 子 agent 要在前台跑（`run_in_background: false`），等它回来再结束这一轮：这一轮一结束，留在后台的会被停掉。',
+    '- 这一轮只读：你和子 agent 都不要修改、创建或删除文件，不要提交。',
+    '- 子 agent 回来后，把它的 ```标准 代码块和最后那行 `结论：…` 原样输出，不改它的结论，也不替自己辩解。',
+    '----', review, '----',
   ].join('\n');
 }
 
@@ -180,9 +196,9 @@ export function reviewVerdict(answer: string): 'pass' | 'changes' | 'unclear' {
 }
 
 /** What the author is told when the reviewer asked for changes. */
-export function reviewFeedback(account: string, answer: string): string {
+export function reviewFeedback(answer: string): string {
   return [
-    '另一个 AI（' + account + '）核对了你的改动，认为要改。它的意见：', '', answer.trim(), '',
+    '一个独立的复审人核对了你的改动，认为要改。它的意见：', '', answer.trim(), '',
     '逐条处理：确实是问题的就改掉；你认为不成立的，说明理由，不用改。改完把整个 ```标准 代码块连同证据再写一遍。',
   ].join('\n');
 }

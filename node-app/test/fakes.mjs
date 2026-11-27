@@ -174,9 +174,18 @@ async function handle(message) {
   } else if (prompt.startsWith('请核对')) {
     // A job's reviewer (做完为止): every criterion it was given holds.
     const items = prompt.split('\\n').filter(line => line.startsWith('- [')).map(line => line.slice(6).split(' —— ')[0]);
-    send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'v1', name: 'Bash', input: { command: 'git diff --stat && npm test' } }] } });
-    send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'v1', content: '…' }] } });
-    say(['逐条看了改动，也自己跑了一遍测试。', '', '\`\`\`标准', ...items.map(item => '- [x] ' + item + ' —— 看了改动并重跑，属实'), '\`\`\`', '', '没有发现必须改的问题。', '', '结论：通过'].join('\\n'));
+    // In the author's session it hands the review to a sub-agent, whose steps carry its ID.
+    const agent = prompt.includes('子 agent');
+    if (agent) send({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'review-agent', name: 'Agent', input: { description: '独立复审', prompt: prompt.split('----')[1] } }] } });
+    const parent = agent ? { parent_tool_use_id: 'review-agent' } : {};
+    send({ type: 'assistant', ...parent, session_id: sessionId, message: { content: [{ type: 'tool_use', id: 'v1', name: 'Bash', input: { command: 'git diff --stat && npm test' } }] } });
+    send({ type: 'user', ...parent, session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'v1', content: '…' }] } });
+    if (agent) send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'review-agent', content: '结论：通过' }] } });
+    say([...(agent ? ['resume:' + resume, 'disallowed:' + flag('--disallowedTools')] : []), '逐条看了改动，也自己跑了一遍测试。', '', '\`\`\`标准', ...items.map(item => '- [x] ' + item + ' —— 看了改动并重跑，属实'), '\`\`\`', '', '没有发现必须改的问题。', '', '结论：通过'].join('\\n'));
+    finish();
+  } else if (prompt.endsWith('job-done')) {
+    // A job's author that met its one criterion.
+    say(['写好了。', '', '\`\`\`标准', '- [x] 写好了 —— 加了 a.txt', '\`\`\`'].join('\\n'));
     finish();
   } else if (prompt.includes('做完的标准')) {
     // A job's author that cannot decide one of its criteria.
@@ -482,7 +491,7 @@ process.stdin.on('end', () => {
   if (reviewing) {
     const state = join(cwd, 'state.txt');
     const bad = existsSync(state) && !readFileSync(state, 'utf8').includes('good');
-    text = sandbox + ' ' + (bad ? block('- [ ] 写好了 —— state.txt 第 1 行应该是 good') + '\\n结论：要改' : block('- [x] 写好了 —— 看过了') + '\\n结论：通过');
+    text = sandbox + ' ' + (resumed ? 'resumed=' + resumed + ' ' : '') + (bad ? block('- [ ] 写好了 —— state.txt 第 1 行应该是 good') + '\\n结论：要改' : block('- [x] 写好了 —— 看过了') + '\\n结论：通过');
   } else {
     if (verb === 'fail') { send({ type: 'turn.failed', error: { message: 'quota exceeded' } }); process.exit(1); }
     if (verb === 'slow') { process.on('SIGINT', () => process.exit(130)); setInterval(() => undefined, 1000); return; }
