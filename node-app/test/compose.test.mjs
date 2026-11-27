@@ -36,5 +36,15 @@ test('docker-compose generation matches the recorded output', async () => {
     assert.deepEqual(Object.keys(expected.services).sort(),
       ['claude-project-alpha', 'codex-project-beta', 'ide-project-alpha', 'opencode-project-gamma', 'proxy-relay']);
     assert.deepEqual(actual, expected);
+
+    // A container shared by several accounts carries no account's keys: each turn brings its own account's.
+    const projects = await readFile(join(workspace, 'projects.conf'), 'utf8');
+    await writeFile(join(workspace, 'projects.conf'), projects.replace('ACCOUNT=open-env', 'ACCOUNT=open-env  SECONDARY_ACCOUNTS=kimi-s'));
+    const shared = (await generateCompose(workspace, 'docker')).data.services['opencode-project-gamma'];
+    assert.equal(shared.env_file, undefined);
+    assert.ok(shared.volumes.includes('./accounts/kimi-s:/home/byclaw/.kimi-code'));
+    // One container has one way out: a relay account and a direct one never share it.
+    await writeFile(join(workspace, 'projects.conf'), projects.replace('ACCOUNT=codex-b', 'ACCOUNT=codex-b  SECONDARY_ACCOUNTS=kimi-s'));
+    await assert.rejects(generateCompose(workspace, 'docker'), /不能放在同一个项目里/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -48,6 +48,32 @@
         CF.api('POST', 'projects/' + id + '/terminal', { cols, rows }));
     },
 
+    /**
+     * The accounts of one project, as a checklist: one of each type, all with the same proxy
+     * setting (the backend holds the same rules). `chosen` is in the order they were picked,
+     * the first being the account the project is built on; `locked` cannot be unpicked.
+     */
+    accountChoice(accounts, chosen, locked = '') {
+      const list = h('div.account-choice');
+      const render = () => {
+        const picked = chosen.map(name => accounts.find(item => item.name === name)).filter(Boolean);
+        list.replaceChildren(...accounts.map(item => {
+          const on = chosen.includes(item.name);
+          const why = on ? (item.name === locked ? '项目建在这个账号上' : '')
+            : picked.some(other => other.type === item.type) ? '每种账号只能选一个'
+              : picked.some(other => other.proxy !== item.proxy) ? '代理设置和已选的账号不一样' : '';
+          const box = h('input', { type: 'checkbox', checked: on, disabled: Boolean(why), on: { change: () => {
+            if (box.checked) chosen.push(item.name); else chosen.splice(chosen.indexOf(item.name), 1);
+            render();
+          } } });
+          return h('label.check' + (why && !on ? '.off' : ''), { title: why }, box, CF.typeBadge(item.type, item.typeLabel), h('span.name', item.name),
+            why ? h('span.hint', why) : null);
+        }));
+      };
+      render();
+      return list;
+    },
+
     create() {
       const accounts = CF.state.accounts.filter(item => item.runtime === 'container');
       if (!accounts.length) {
@@ -55,7 +81,7 @@
         return;
       }
       const name = h('input', { placeholder: '例如 my-app', autofocus: true, spellcheck: false });
-      const account = h('select', accounts.map(item => h('option', { value: item.name }, item.name + ' · ' + item.typeLabel)));
+      const chosen = [accounts[0].name];
       const path = h('input', { placeholder: '/Users/you/code/my-app', spellcheck: false });
       const start = h('input', { type: 'checkbox', checked: true });
       const pick = CF.transport.pickDirectory && CF.app.isLocal() ? h('button.btn', { type: 'button', on: { click: async () => {
@@ -67,14 +93,14 @@
       } } }, '选择…') : null;
       const sheet = CF.sheet({ title: '新建项目', subtitle: '项目目录会挂载到账号容器的 /workspace。' }, () => [
         h('label.field', h('span', '项目名', h('span.hint', ' 字母、数字和连字符')), name),
-        h('label.field', h('span', '账号'), account),
+        h('div.field', h('span', '账号', accounts.length > 1 ? h('span.hint', ' 可以选几个不同类型的，对话时再挑') : null), CF.projects.accountChoice(accounts, chosen)),
         h('div.field', h('span', '项目目录'), h('div.input-row', path, pick)),
         h('label.check', start, '创建后立即启动容器'),
       ]);
       const save = h('button.btn.primary', { on: { click: () => CF.busy(save, async () => {
         sheet.error('');
         try {
-          const result = await CF.api('POST', 'projects', { name: name.value.trim(), account: account.value, path: path.value.trim(), start: start.checked });
+          const result = await CF.api('POST', 'projects', { name: name.value.trim(), accounts: chosen, path: path.value.trim(), start: start.checked });
           sheet.close();
           await CF.app.refreshProjects();
           if (result.operation) void track(result.name, '启动', result.operation);
@@ -127,6 +153,31 @@
         try { vars = collect(); } catch (error) { sheet.error(error.message); return; }
         await CF.api('PUT', 'projects/' + encodeURIComponent(project.id) + '/env', { vars });
         sheet.close();
+        if (!restart) { CF.toast(running ? '已保存，重启项目后生效' : '已保存，启动项目时生效'); return; }
+        const operation = await CF.api('POST', 'projects/' + project.id + '/restart');
+        if (operation) void track(project.id, '重启', operation);
+      };
+      const saveOnly = h('button.btn', { on: { click: () => CF.busy(saveOnly, () => save(false)) } }, '保存');
+      const saveRestart = running ? h('button.btn.primary', { on: { click: () => CF.busy(saveRestart, () => save(true)) } }, '保存并重启') : null;
+      sheet.foot(h('button.btn.ghost', { on: { click: () => sheet.close() } }, '取消'), saveOnly, saveRestart);
+      if (!running) saveOnly.classList.add('primary');
+    },
+
+    /**
+     * Which accounts the project holds (SECONDARY_ACCOUNTS in projects.conf). An added account
+     * is in the container once it is recreated; conversations of a removed one stay, to read.
+     */
+    accounts(project) {
+      const chosen = project.accounts.map(item => item.name);
+      const running = project.state === 'running';
+      const sheet = CF.sheet({ title: project.name + ' · 账号', subtitle: '每种账号选一个，开始对话时挑用哪个。新加的账号要重启项目后才能用；去掉的账号，它的对话还能看，不能再发消息。' }, () => [
+        CF.projects.accountChoice(CF.state.accounts.filter(item => item.runtime === 'container'), chosen, project.account),
+      ]);
+      const save = async restart => {
+        sheet.error('');
+        try { await CF.api('PUT', 'projects/' + project.id + '/accounts', { accounts: chosen }); } catch (error) { sheet.error(error); return; }
+        sheet.close();
+        await Promise.all([CF.app.refreshProjects(), CF.app.refreshConversations()]);
         if (!restart) { CF.toast(running ? '已保存，重启项目后生效' : '已保存，启动项目时生效'); return; }
         const operation = await CF.api('POST', 'projects/' + project.id + '/restart');
         if (operation) void track(project.id, '重启', operation);
@@ -224,6 +275,7 @@
           running ? { label: '停止容器', icon: 'stop', run: () => act('stop', '停止')({ currentTarget: menuButton }) } : null,
           running ? { label: '重启容器', icon: 'restart', run: () => act('restart', '重启')({ currentTarget: menuButton }) } : null,
           running ? { label: '打开终端', icon: 'terminal', run: () => CF.projects.terminal(project.id) } : null,
+          project.accounts ? { label: '账号…', icon: 'user', run: () => CF.projects.accounts(project) } : null,
           { label: '环境变量…', icon: 'key', run: () => CF.projects.env(project) },
           { label: '挂载目录…', icon: 'folder', run: () => CF.projects.mounts(project) },
           { label: project.helper === 'command' ? '关闭机器操作' : '允许机器操作…', icon: 'terminal', run: () => CF.projects.helper(project) },
@@ -248,8 +300,8 @@
             h('span.row-avatar.' + project.type, project.name.slice(0, 1).toUpperCase(),
               h('span.status' + (busy ? '.busy' : running ? '.running' : ''), { title: CF.stateText(project.state) })),
             h('div.row-main',
-              h('div.row-title', h('span.name', project.name), CF.pins.has(project.id) ? h('span.pin-mark', { title: '已置顶' }, CF.icon('pin', 12)) : null, CF.typeBadge(project.type, project.typeLabel), project.active ? null : h('span.badge', '已停用')),
-              h('div.row-sub', h('span', busy ? busy + '中…' : CF.stateText(project.state)), h('span.sep'), h('span', project.account),
+              h('div.row-title', h('span.name', project.name), CF.pins.has(project.id) ? h('span.pin-mark', { title: '已置顶' }, CF.icon('pin', 12)) : null, ...(project.accounts || [project]).map(item => CF.typeBadge(item.type, item.typeLabel)), project.active ? null : h('span.badge', '已停用')),
+              h('div.row-sub', h('span', busy ? busy + '中…' : CF.stateText(project.state)), h('span.sep'), h('span', { title: (project.accounts || []).map(item => item.name).join('、') }, project.accounts?.length > 1 ? project.accounts.length + ' 个账号' : project.account),
                 h('span.sep'), h('span.path', { title: project.path }, CF.shortPath(project.path))))),
           h('div.row-actions',
             running ? h('button.btn.small.icon', { title: '终端', 'aria-label': '终端', on: { click: () => CF.projects.terminal(project.id) } }, CF.icon('terminal', 14)) : null,

@@ -124,13 +124,13 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
     _open(conversation: conversation);
   }
 
-  void _open({Conversation? conversation, Project? project}) {
+  void _open({Conversation? conversation, Project? project, String? account}) {
     final client = widget.state.client, current = feed;
     if (client == null || current == null) return;
     feed?.stop();
     _chatOpen = true;
     Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => ChatScreen(client: client, feed: current, conversation: conversation, projectId: project?.id ?? conversation!.projectId)))
+        .push(MaterialPageRoute(builder: (_) => ChatScreen(client: client, feed: current, conversation: conversation, projectId: project?.id ?? conversation!.projectId, account: account)))
         .then((_) {
           _chatOpen = false;
           if (mounted) feed?.start();
@@ -145,7 +145,11 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
     final projects = current.projects.where((item) => item.canChat).toList()
       ..sort((a, b) => a.running != b.running ? (a.running ? -1 : 1) : a.name.compareTo(b.name));
     final picked = await showModalBottomSheet<Project>(context: context, isScrollControlled: true, builder: (context) => ProjectPicker(projects: projects));
-    if (picked != null) _open(project: picked);
+    if (picked == null || !mounted) return;
+    // A project with several accounts: the conversation is with one of them, chosen here.
+    if (picked.choices.isEmpty) return _open(project: picked);
+    final account = await showModalBottomSheet<ProjectAccount>(context: context, isScrollControlled: true, builder: (context) => AccountPicker(project: picked));
+    if (account != null) _open(project: picked, account: account.name);
   }
 
   void _backends() {
@@ -267,7 +271,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
                                       child: Text(section, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: item.attention ? palette.amber : palette.text3)))
                                 else
                                   Padding(padding: const EdgeInsets.only(left: 16), child: Divider(color: palette.line)),
-                                _Row(conversation: item, project: current.project(item.projectId)?.name ?? item.projectId, onTap: () => _open(conversation: item)),
+                                _Row(conversation: item, project: _place(current.project(item.projectId), item), onTap: () => _open(conversation: item)),
                               ]);
                             }))),
               ]);
@@ -345,6 +349,33 @@ class _Row extends StatelessWidget {
   }
 }
 
+/// Where a conversation runs: its project, and which account when the project holds several.
+String _place(Project? project, Conversation conversation) {
+  if (project == null) return conversation.projectId;
+  final account = project.accounts.length > 1 ? project.account(conversation.account) : null;
+  return account == null ? project.name : '${project.name} · ${account.shortType}';
+}
+
+/// Which of the project's accounts a new conversation is with; the one used last comes checked.
+class AccountPicker extends StatelessWidget {
+  const AccountPicker({super.key, required this.project});
+  final Project project;
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text('用哪个账号？', style: Theme.of(context).textTheme.titleMedium)),
+      for (final account in project.choices)
+        ListTile(
+          title: Text(account.typeLabel, style: TextStyle(color: palette.text)),
+          subtitle: Text(account.note, style: TextStyle(color: palette.text3, fontSize: 12.5)),
+          trailing: account.name == project.defaultAccount ? Icon(Icons.check, size: 20, color: palette.accent) : null,
+          onTap: () => Navigator.pop(context, account),
+        ),
+    ]));
+  }
+}
+
 class ProjectPicker extends StatefulWidget {
   const ProjectPicker({super.key, required this.projects});
   final List<Project> projects;
@@ -372,7 +403,7 @@ class _ProjectPickerState extends State<ProjectPicker> {
                   ListTile(
                     leading: Container(width: 8, height: 8, decoration: BoxDecoration(shape: BoxShape.circle, color: project.running ? palette.green : palette.line)),
                     title: Text(project.name, style: TextStyle(color: project.running ? palette.text : palette.text2)),
-                    trailing: Text(project.running ? project.typeLabel : '${project.typeLabel} · 容器未运行', style: TextStyle(color: palette.text3, fontSize: 12.5)),
+                    trailing: Text(project.running ? _types(project) : '${_types(project)} · 容器未运行', style: TextStyle(color: palette.text3, fontSize: 12.5)),
                     onTap: () => Navigator.pop(context, project),
                   ),
               ])),
@@ -380,6 +411,8 @@ class _ProjectPickerState extends State<ProjectPicker> {
     ));
   }
 }
+
+String _types(Project project) => project.accounts.length > 1 ? project.accounts.map((item) => item.shortType).join(' + ') : project.typeLabel;
 
 class _Notice extends StatelessWidget {
   const _Notice({required this.icon, required this.title, required this.text, this.action});

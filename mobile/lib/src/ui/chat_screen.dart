@@ -81,13 +81,15 @@ class _Attachment {
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
-    super.key, required this.client, required this.feed, required this.projectId, this.conversation,
+    super.key, required this.client, required this.feed, required this.projectId, this.conversation, this.account,
     this.autoStore, this.attachmentSource = pickAttachments, this.chatWait = const Duration(seconds: 25),
   });
   final BackendClient client;
   final ConversationFeed feed;
   final Conversation? conversation;
   final String projectId;
+  /// For a new conversation in a project with several accounts: the one picked for it.
+  final String? account;
   final AutoModeStore? autoStore;
   final AttachmentSource attachmentSource;
   final Duration chatWait;
@@ -113,6 +115,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   String get autoKey => '${widget.client.profile.id}:${widget.projectId}';
   Project? get project => widget.feed.project(widget.projectId);
+  /// The account this conversation uses, where the project holds several (null: the project's only one).
+  String? get account => (project?.accounts.length ?? 0) > 1 ? widget.conversation?.account ?? widget.account : null;
 
   @override
   void initState() {
@@ -125,7 +129,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     scroller.addListener(() => away.value = scroller.hasClients && scroller.offset > 240);
     autos.get(autoKey).then((value) { if (mounted) setState(() => auto = value); });
     widget.client.canTranslate().then((value) { if (mounted) setState(() => translatable = value); }).catchError((_) {});
-    widget.client.models(widget.projectId).then((list) { if (mounted) setState(() => models = list); }).catchError((_) {});
+    widget.client.models(widget.projectId, account: account == null || account!.isEmpty ? null : account).then((list) { if (mounted) setState(() => models = list); }).catchError((_) {});
   }
 
   void _follow(String id) {
@@ -186,7 +190,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     try {
       var id = conversationId;
       if (id == null) {
-        final created = await widget.client.createConversation(widget.projectId);
+        final created = await widget.client.createConversation(widget.projectId, account: account);
         id = conversationId = created.id;
         _follow(id);
       }
@@ -245,7 +249,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       appBar: AppBar(
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-          Text(project == null ? widget.projectId : '${project!.name} · ${project!.typeLabel}', style: TextStyle(fontSize: 12, color: palette.text3, fontWeight: FontWeight.w400)),
+          Text(project == null ? widget.projectId : '${project!.name} · ${project!.label(account)}', style: TextStyle(fontSize: 12, color: palette.text3, fontWeight: FontWeight.w400)),
         ]),
         actions: [if (conversationId != null) IconButton(icon: const Icon(Icons.edit_outlined), tooltip: '重命名', onPressed: _rename)],
       ),

@@ -454,15 +454,21 @@
     return CF.state.projects.find(item => item.id === session?.projectId);
   }
 
-  async function loadModels(projectId, select) {
-    let list = models.get(projectId);
+  /** The models of one of the project's accounts (`account` empty: the one new conversations start with), always with a default row. */
+  async function modelList(projectId, account) {
+    const key = projectId + '\0' + account;
+    let list = models.get(key);
     if (!list) {
       // A failed list (container stopped) is asked for again next time.
-      try { list = await CF.get('projects/' + projectId + '/models'); models.set(projectId, list); } catch { list = []; }
+      try { list = await CF.get('projects/' + projectId + '/models' + (account ? '?account=' + encodeURIComponent(account) : '')); models.set(key, list); } catch { list = []; }
     }
-    const current = select.value;
     // Claude lists its own default row (id ''), named after the model it resolves to.
-    const options = list.some(item => item.id === '') ? list : [{ id: '', label: '默认模型' }, ...list];
+    return { list, options: list.some(item => item.id === '') ? list : [{ id: '', label: '默认模型' }, ...list] };
+  }
+
+  async function loadModels(projectId, account, select) {
+    const { list, options } = await modelList(projectId, account);
+    const current = select.value;
     select.replaceChildren(...options.map(item => h('option', { value: item.id, ...(item.title ? { title: item.title } : {}) }, item.label)));
     select.value = list.some(item => item.id === current) ? current : '';
     select.hidden = !list.length;
@@ -522,6 +528,52 @@
       const notice = h('div.chat-notice');
       const textarea = h('textarea', { rows: 1, placeholder: '描述你想做的事', 'aria-label': '消息' });
       const modelSelect = h('select', { 'aria-label': '模型', hidden: true });
+      // A project with several accounts: a conversation keeps the account it began with. A new one starts
+      // with the account the project used last, until another is picked in the chip (which then stands
+      // in for the model list: each account with its models).
+      const held = () => CF.state.projects.find(item => item.id === projectId)?.accounts || [];
+      const several = () => held().length > 1;
+      let pickedAccount = null;
+      const accountName = () => {
+        const record = CF.findConversation(current.conversationId);
+        return record ? record.account || '' : pickedAccount ?? project()?.defaultAccount ?? '';
+      };
+      /** The account this conversation runs as; for a project with one account, that one. */
+      const account = () => {
+        const info = project();
+        return (several() && held().find(item => item.name === accountName())) || (info ? { name: info.account, type: info.type, typeLabel: info.typeLabel } : null);
+      };
+      const listAccount = () => (several() ? accountName() : '');
+      const pickAccount = async () => {
+        const fixed = Boolean(current.conversationId);
+        const offered = held().filter(item => item.chat && (!fixed || item.name === accountName()));
+        const lists = await Promise.all(offered.map(item => modelList(projectId, item.name)));
+        if (session !== current) return;
+        const items = offered.flatMap((item, position) => lists[position].options.map(model => ({
+          id: item.name + '\0' + model.id, account: item.name, model: model.id, label: model.label,
+          selected: item.name === accountName() && model.id === modelSelect.value, muted: !item.signedIn,
+          group: { id: item.name, type: item.type, label: item.typeLabel, hint: CF.accountNote(item) },
+        })));
+        CF.picker(accountChip, { items, placeholder: fixed ? '搜索模型' : '搜索账号或模型', onPick: async item => {
+          if (item.account !== accountName()) {
+            pickedAccount = item.account;
+            await loadModels(projectId, item.account, modelSelect);
+            loadJobSupport();
+          }
+          modelSelect.value = item.model;
+          pickedModel = item.model;
+          renderHeader();
+        } });
+      };
+      const accountChip = h('button.project-chip.account-chip', { hidden: true, on: { click: () => void pickAccount() } }, CF.icon('user', 13), h('span.name'));
+      const renderAccountChip = () => {
+        const own = account();
+        accountChip.hidden = !several() || !own || current.readOnly;
+        if (accountChip.hidden) return;
+        modelSelect.hidden = true;
+        accountChip.title = current.conversationId ? own.name + ' · 选择模型' : '选择账号和模型';
+        accountChip.querySelector('.name').textContent = CF.shortType(own.typeLabel) + ' · ' + (modelSelect.selectedOptions[0]?.textContent || '默认模型');
+      };
       const sendButton = h('button.send', { title: '发送' }, CF.icon('send', 16));
       const hint = h('span.hint');
       // Images: picked, pasted or dropped; uploaded into the project right away.
@@ -541,7 +593,7 @@
       }, CF.icon('bolt', 13), h('span', '自动'));
       // The model stays with the conversation: the one its latest message used (all agent types),
       // or, for a new conversation, the one last used in this project. A choice made here wins.
-      const modelKey = 'cf.model:' + CF.state.backendId + ':' + projectId;
+      const modelKey = () => 'cf.model:' + CF.state.backendId + ':' + projectId + (several() ? ':' + accountName() : '');
       let pickedModel = null;
       modelSelect.addEventListener('change', () => { pickedModel = modelSelect.value; renderHeader(); });
       const applyModel = () => {
@@ -550,7 +602,7 @@
           const own = current.turns.filter(turn => !turn.inherited);
           wanted = own.length ? own[own.length - 1].requestedModel ?? '' : null;
         }
-        if (wanted === null) { try { wanted = localStorage.getItem(modelKey); } catch { /* storage unavailable */ } }
+        if (wanted === null) { try { wanted = localStorage.getItem(modelKey()); } catch { /* storage unavailable */ } }
         if (wanted !== null && [...modelSelect.options].some(option => option.value === wanted)) modelSelect.value = wanted;
       };
       const setAuto = on => { autoButton.setAttribute('aria-pressed', String(on)); autoButton.classList.toggle('on', on); };
@@ -575,14 +627,17 @@
           if (jobWanted) CF.toast('做完为止已开：它先列出做完的标准，在独立分支上做到为止，再由你收下或丢弃');
         } },
       }, CF.icon('check', 13), h('span', '做完为止'));
-      if (projectId) {
-        CF.get('projects/' + encodeURIComponent(projectId) + '/job-support').then(support => {
+      const loadJobSupport = () => {
+        if (!projectId) return;
+        const asked = accountName();
+        CF.get('projects/' + encodeURIComponent(projectId) + '/job-support' + (several() ? '?account=' + encodeURIComponent(asked) : '')).then(support => {
+          if (asked !== accountName()) return;
           jobToggle.disabled = !support.supported;
           jobToggle.title = support.supported
             ? '做完为止：它先列出做完的标准，在独立的分支和目录里做，逐条做到并经过核对后，由你收下（合并）或丢弃。有 PRD 或 issue 就把文件路径告诉它。'
             : '做完为止用不了：' + support.reason;
-        }).catch(() => { jobToggle.title = '做完为止暂时用不了'; });
-      }
+        }).catch(() => { jobToggle.disabled = true; jobToggle.title = '做完为止暂时用不了'; });
+      };
       const followHost = h('div.follow-ups');
       // Only a new conversation can still change its project.
       const chip = conversation ? null : projectChip(projectId);
@@ -593,6 +648,7 @@
         etag: '', round: 0, jobAt: 0, streams: new Map(), written: new Set() };
       if (projectId) { try { localStorage.setItem(lastKey(), projectId); } catch { /* storage unavailable */ } }
       const current = session;
+      loadJobSupport();
       textarea.value = drafts.get(key) || '';
 
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
@@ -617,27 +673,32 @@
           : current.job?.state === 'review' && !running ? '发消息就是让它再改 · Enter 发送'
           : 'Enter 发送 · Shift+Enter 换行';
         modelSelect.disabled = Boolean(running);
+        accountChip.disabled = Boolean(running);
       };
       const renderHeader = () => {
         const info = project();
+        const own = account();
         const name = CF.findConversation(current.conversationId)?.name;
         title.textContent = name || '新对话';
         meta.replaceChildren(
           info ? h('span', info.name) : null,
-          info ? CF.typeBadge(info.type, info.typeLabel) : null,
+          own ? CF.typeBadge(own.type, own.typeLabel) : null,
           // The container only needs mentioning when it is not running.
           info && info.state !== 'running' ? h('span.container-warn', h('span.dot.waiting'), '容器' + CF.stateText(info.state)) : null,
-          info ? CF.accounts.usagePill(info.account, modelSelect.value) : null,
+          own ? CF.accounts.usagePill(own.name, modelSelect.value) : null,
         );
         textarea.placeholder = info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
         const record = CF.findConversation(current.conversationId);
-        current.readOnly = Boolean(record?.type && info && record.type !== info.type);
+        // `account` empty: the project no longer holds the account this conversation used.
+        // (A backend from before projects held several accounts does not say; there the types are compared.)
+        current.readOnly = Boolean(record && info && (record.account === undefined ? record.type && record.type !== info.type : !record.account && record.type));
         textarea.disabled = current.readOnly;
+        renderAccountChip();
         if (current.readOnly) {
           notice.replaceChildren(h('div.banner', h('span.banner-icon', CF.icon('chat', 16)),
-            h('div.text', h('strong', '这是 ' + record.type + ' 账号的历史对话'), h('span', '项目现在绑定的是 ' + info.typeLabel + '，这段对话只能查看。'))));
+            h('div.text', h('strong', '这段对话只能查看'), h('span', '它用的 ' + record.type + ' 账号已经不在这个项目里。'))));
           updateComposer();
           return;
         }
@@ -963,7 +1024,7 @@
         updateComposer();
         try {
           if (!current.conversationId) {
-            const created = await CF.api('POST', 'conversations', { projectId });
+            const created = await CF.api('POST', 'conversations', { projectId, ...(several() ? { account: accountName() } : {}) });
             current.conversationId = created.id;
             drafts.delete(key);
             CF.state.conversations.unshift({ ...created, updatedAt: created.createdAt, status: 'starting', turns: 0 });
@@ -975,7 +1036,7 @@
             { prompt, images, model: modelSelect.value, auto: autoButton.getAttribute('aria-pressed') === 'true',
               ...(jobWanted ? { job: true } : {}) });
           if (jobWanted) { jobToggle.hidden = true; setJobWanted(false); }
-          try { localStorage.setItem(modelKey, modelSelect.value); } catch { /* storage unavailable */ }
+          try { localStorage.setItem(modelKey(), modelSelect.value); } catch { /* storage unavailable */ }
           if (result?.delivered === 'queued') CF.toast('已排队，这一轮结束后自动发出');
           textarea.value = '';
           current.attachments = [];
@@ -1057,14 +1118,14 @@
               drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); addFiles([...event.dataTransfer.files]); },
             },
           }, attachRow, textarea, fileInput,
-            h('div.composer-bar', attachButton, chip, modelSelect, autoButton, jobToggle, hint, sendButton)))), chatColumn),
+            h('div.composer-bar', attachButton, chip, accountChip, modelSelect, autoButton, jobToggle, hint, sendButton)))), chatColumn),
       );
       let filesOpen = false;
       try { filesOpen = localStorage.getItem('cf.filesOpen') === '1'; } catch { /* storage unavailable */ }
       if (filesOpen) toggleFiles(true);
       renderHeader();
       autosize();
-      void loadModels(projectId, modelSelect).then(applyModel);
+      void loadModels(projectId, listAccount(), modelSelect).then(() => { if (session === current) { applyModel(); renderHeader(); } });
       // Translation needs the backend's system LLM; ask once per backend.
       if (!translateReady.has(CF.state.backendId)) {
         const backend = CF.state.backendId;

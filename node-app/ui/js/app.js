@@ -254,7 +254,7 @@
     const more = h('span.conv-actions', { role: 'button', tabIndex: 0, title: '更多', 'aria-label': '对话操作',
       on: { click: event => { event.stopPropagation(); CF.menu(more, CF.conversationMenu(item)); } } }, CF.icon('more', 14));
     const node = h('button.conv-item' + extra + (view.name === 'chat' && view.conversationId === item.id ? '.selected' : ''), {
-      title: item.name + ' · ' + CF.fullTime(item.updatedAt), on: {
+      title: [item.name, CF.conversationAccount(item), CF.fullTime(item.updatedAt)].filter(Boolean).join(' · '), on: {
         click: () => CF.app.go({ name: 'chat', conversationId: item.id, projectId: item.projectId }),
         contextmenu: event => { event.preventDefault(); CF.menu(node, CF.conversationMenu(item)); },
       },
@@ -272,7 +272,8 @@
     const { view, projects, conversations, connected } = CF.state;
     const chatProjects = CF.pins.sort(projects.filter(item => item.chat && item.active));
     const visible = conversations.filter(item => chatProjects.some(project => project.id === item.projectId));
-    const projectName = id => projects.find(project => project.id === id)?.name || id;
+    // Outside its project's group a conversation says where it runs: the project and, when that has several accounts, which.
+    const place = item => [projects.find(project => project.id === item.projectId)?.name || item.projectId, CF.conversationAccount(item)].filter(Boolean).join(' · ');
     const lastUsed = new Map();
     for (const item of visible) {
       const time = Date.parse(item.updatedAt) || 0;
@@ -341,8 +342,8 @@
       const since = new Date(); since.setHours(0, 0, 0, 0);
       const yesterday = since.getTime() - DAY;
       const recent = visible.filter(item => !active.includes(item) && (Date.parse(item.updatedAt) || 0) >= yesterday).slice(0, 5);
-      if (active.length) top.push(section('active', '进行中', () => h('div.conv-list', active.map(item => conversationButton(item, '.recent', projectName(item.projectId))))));
-      if (recent.length) top.push(section('recent', '最近', () => h('div.conv-list', recent.map(item => conversationButton(item, '.recent', projectName(item.projectId))))));
+      if (active.length) top.push(section('active', '进行中', () => h('div.conv-list', active.map(item => conversationButton(item, '.recent', place(item))))));
+      if (recent.length) top.push(section('recent', '最近', () => h('div.conv-list', recent.map(item => conversationButton(item, '.recent', place(item))))));
     }
 
     const cutoff = Date.now() - 30 * DAY;
@@ -359,7 +360,7 @@
     const archived = CF.state.archived.filter(item => !filter || item.name.toLowerCase().includes(filter));
     const archivedGroup = archivedOpen || filter
       ? (archived.length || !filter ? section('archived', '已归档', () => h('div.conv-list', archived.length
-        ? archived.map(item => conversationButton(item, '.recent', projectName(item.projectId)))
+        ? archived.map(item => conversationButton(item, '.recent', place(item)))
         : h('div.sidebar-empty.small', '没有归档的对话。')), archived.length || undefined, true) : null)
       : section('archived', '已归档', () => null, undefined, true);
     conversationsHost.replaceChildren(groups.length || olderGroup

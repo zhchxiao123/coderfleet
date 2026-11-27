@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { gzip } from 'node:zlib';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type Account, type WorkspaceProject, projectAs, setProjectAccounts, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
 } from './conf.js';
 import { projectMounts } from './compose.js';
 import { assertContainer, models } from './docker.js';
@@ -135,9 +135,51 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const terminals = new Terminals(workspace, config.dockerPath);
   const usage = new UsageTracker(workspace, config.dockerPath);
   const template = fileURLToPath(new URL('../template/', import.meta.url));
-  const chatProject = (id: string): WorkspaceProject | undefined =>
-    readWorkspace(workspace).projects.find(item => item.name === id && chatSupported(item.account.type) && item.account.runtime === 'container');
-  const runner = new TaskRunner(store, config.dockerPath, chatProject);
+  const hasLogin = (item: Account): boolean => {
+    try { return readdirSync(join(workspace, 'accounts', item.name)).length > 0; } catch { return false; }
+  };
+  /** How full the account's fullest subscription window is, in percent; null when it has none or none was read yet. */
+  const usedMost = (item: Account): number | null => {
+    const known = usageSupported(item) ? usage.cached(item.name) : undefined;
+    const all = [known?.fiveHour, known?.sevenDay, ...(known?.pools ?? [])].flatMap(window => window ? [window.used] : []);
+    return all.length ? Math.round(Math.max(...all)) : null;
+  };
+  /** An account that can hold conversations. */
+  const chatAccount = (item: Account): boolean => chatSupported(item.type) && item.runtime === 'container';
+  /** New conversations start with the account the project's newest conversation uses, as long as the project still holds it; else its first. */
+  const defaultAccount = (target: WorkspaceProject): Account | undefined => {
+    const usable = target.accounts.filter(chatAccount);
+    if (usable.length < 2) return usable[0];
+    const last = store.conversations().filter(item => item.projectId === target.name).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .flatMap(item => usable.find(entry => entry.name === item.account) ?? [])[0];
+    return last ?? usable[0];
+  };
+  /** The project as one of its accounts runs conversations in it: the named one, or the one new conversations start with. */
+  const chatProject = (id: string, accountName?: string): WorkspaceProject | undefined => {
+    const found = readWorkspace(workspace).projects.find(item => item.name === id);
+    const chosen = found && (accountName === undefined ? defaultAccount(found) : found.accounts.find(item => item.name === accountName && chatAccount(item)));
+    return found && chosen ? projectAs(found, chosen.name) : undefined;
+  };
+  /**
+   * The account a conversation goes on with: the one it began with, or the project's account of the
+   * same type when that one was replaced. Nothing when the project holds neither: the conversation can only be read.
+   */
+  const conversationAccount = (target: WorkspaceProject, conversation: Pick<Conversation, 'account' | 'type'>): Account | undefined => {
+    const own = target.accounts.find(item => item.name === conversation.account) ?? (conversation.type
+      ? target.accounts.find(item => item.type === conversation.type)
+      // Records from before conversations carried a type belong to the project's first account.
+      : conversation.account ? undefined : target.accounts[0]);
+    return own && chatAccount(own) && (!conversation.type || own.type === conversation.type) ? own : undefined;
+  };
+  const conversationProject = (conversation: Conversation): WorkspaceProject => {
+    const found = readWorkspace(workspace).projects.find(item => item.name === conversation.projectId);
+    if (!found) throw new HttpError(404, 'Project not found');
+    const own = conversationAccount(found, conversation);
+    if (!own) throw new HttpError(409, '这个对话用的' + (conversation.account ? '账号 ' + conversation.account : ' ' + (conversation.type ?? '') + ' 账号') + '已经不在项目里，只能查看');
+    return projectAs(found, own.name) as WorkspaceProject;
+  };
+  const runner = new TaskRunner(store, config.dockerPath, (id, accountName) =>
+    accountName === undefined ? readWorkspace(workspace).projects.find(item => item.name === id) : chatProject(id, accountName));
   const helper = new HelperHost(workspace, config.dockerPath);
   runner.taskEnv = async (target, turn) => {
     const granted = await helper.grant(target, turn.id);
@@ -215,9 +257,13 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }
     const jobStates = new Map(jobs.list().map(job => [job.conversationId, job.state]));
     const origins = schedules.origins();
+    const projects = new Map(readWorkspace(workspace).projects.map(item => [item.name, item]));
     return store.conversations({ archived }).map(item => {
       const summary = summaries.get(item.id);
+      const owner = projects.get(item.projectId);
       return { id: item.id, projectId: item.projectId, name: item.name, createdAt: item.createdAt, type: item.type ?? '',
+        // The account its next turn runs as; '' when the project no longer holds one for it (it can only be read).
+        account: (owner && conversationAccount(owner, item)?.name) ?? '',
         forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
         updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false,
         // 做完为止: the state of the job this conversation works on ('' when it has none).
@@ -322,14 +368,16 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       } finally { reviewing.delete(id); }
     })();
   };
-  /** The projects another account has on the same directory: the first of them reviews this project's jobs. */
-  const reviewers = (target: WorkspaceProject): WorkspaceProject[] => readWorkspace(workspace).projects.filter(item =>
-    item.name !== target.name && item.path === target.path && item.account.name !== target.account.name
-    && chatSupported(item.account.type) && item.account.runtime === 'container');
+  /** Who else can work on the same directory: the project's other accounts, then other accounts' projects on it. The first reviews the job. */
+  const reviewers = (target: WorkspaceProject): WorkspaceProject[] => [
+    ...target.accounts.filter(item => item.name !== target.account.name && chatAccount(item)).map(item => ({ ...target, account: item })),
+    ...readWorkspace(workspace).projects.filter(item =>
+      item.name !== target.name && item.path === target.path && item.account.name !== target.account.name && chatAccount(item.account)),
+  ];
   /**
    * The author says every criterion is met. A reviewer now checks each against the changes in
    * a turn of its own (a fresh session, read-only) shown in the same conversation: another
-   * account's project on this directory when there is one, else the same account. When it
+   * account of the project or on this directory when there is one, else the same account. When it
    * cannot start, the job goes to the user.
    */
   const reviewing = new Set<string>();
@@ -343,7 +391,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     const turnId = randomUUID().replaceAll('-', '').slice(0, 12);
     let account = '';
     try {
-      const target = project(job.projectId);
+      const authored = store.conversation(id);
+      const target = authored ? conversationProject(authored) : project(job.projectId);
       const reviewer = reviewers(target)[0] ?? target;
       account = reviewer.account.name;
       await assertContainer(config.dockerPath, reviewer);
@@ -452,9 +501,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   /** Starts a new turn in a conversation that has none running. */
   const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>, by: { checkRound?: number; role?: 'review-feedback' | 'accept'; jobStart?: boolean } = {}): Promise<Turn> => {
     const system = Boolean(by.checkRound || by.role);
-    const target = chatProject(conversation.projectId);
-    if (!target) throw new HttpError(404, 'Project not found');
-    if (conversation.type && conversation.type !== target.account.type) throw new HttpError(409, '这个对话属于 ' + conversation.type + ' 账号，项目现在绑定的是 ' + target.account.type);
+    const target = conversationProject(conversation);
     try { await assertContainer(config.dockerPath, target); }
     catch (error) { throw new HttpError(409, message(error)); }
     // Re-read after the await: the check and the save below run without yielding.
@@ -525,7 +572,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
   /** 做完为止: opens a worktree and branch for the conversation and starts its first turn there. */
   const startJob = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>): Promise<Turn> => {
-    const target = project(conversation.projectId);
+    const target = conversationProject(conversation);
     const support = await jobs.support(target);
     if (!support.supported) throw new HttpError(409, '这个项目用不了「做完为止」：' + support.reason);
     await jobCall(() => jobs.start(target, conversation.id, randomUUID().replaceAll('-', '').slice(0, 8), input.text || '图片'));
@@ -695,13 +742,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     ['GET', /^accounts$/, async () => {
       const { accounts, projects } = readWorkspace(workspace);
       return accounts.map(item => {
-        const authDirectory = join(workspace, 'accounts', item.name);
-        let hasLogin = false;
-        try { hasLogin = readdirSync(authDirectory).length > 0; } catch { /* none yet */ }
         return {
           name: item.name, type: item.type, typeLabel: accountType(item.type).label, auth: item.auth, proxy: item.proxy, runtime: item.runtime,
-          projects: projects.filter(entry => entry.account.name === item.name).map(entry => entry.name),
-          envKeys: envKeys(item), hasLogin,
+          projects: projects.filter(entry => entry.accounts.some(held => held.name === item.name)).map(entry => entry.name),
+          envKeys: envKeys(item), hasLogin: hasLogin(item),
           // null: this kind of account has no subscription windows to show.
           usage: usageSupported(item) ? usage.cached(item.name) ?? {} : null,
         };
@@ -746,13 +790,19 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         id: item.name, name: item.name, account: item.account.name, type: item.account.type, typeLabel: accountType(item.account.type).label,
         path: item.path, active: item.active, runtime: item.account.runtime, container: item.container,
         state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item), helper: projectHelperAccess(item),
-        chat: chatSupported(item.account.type) && item.account.runtime === 'container',
+        chat: item.accounts.some(chatAccount),
+        // Every account in the container, the first being `account`; `defaultAccount`: the one a new conversation starts with.
+        accounts: item.accounts.map(entry => ({ name: entry.name, type: entry.type, typeLabel: accountType(entry.type).label, chat: chatAccount(entry),
+          signedIn: entry.auth === 'env' ? envKeys(entry).length > 0 : hasLogin(entry), used: usedMost(entry) })),
+        defaultAccount: defaultAccount(item)?.name ?? '',
       }));
     }],
     ['POST', /^projects$/, async request => {
       const input = await body(request);
       const name = text(input.name).trim();
-      addProject(workspace, { name, account: text(input.account), path: text(input.path) });
+      // `accounts`: the first names the container. `account` alone is the older form of the same request.
+      const accounts = Array.isArray(input.accounts) ? input.accounts.map(item => text(item)) : [text(input.account)];
+      addProject(workspace, { name, accounts, path: text(input.path) });
       return input.start === false ? { name } : { name, operation: lifecycle.startProject(name) };
     }],
     ['DELETE', /^projects\/([\w-]+)$/, async (_request, [name]) => {
@@ -775,12 +825,23 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       setProjectActive(workspace, name as string, action === 'enable');
       return { active: action === 'enable' };
     }],
+    // The accounts the project's container holds, the first unchanged; applies when the container is recreated.
+    // An account whose conversation is running cannot be taken out.
+    ['PUT', /^projects\/([\w-]+)\/accounts$/, async (request, [name]) => {
+      const target = project(name as string);
+      const input = (await body(request)).accounts;
+      const names = (Array.isArray(input) ? input : []).map(item => text(item));
+      const busy = store.liveTurns().find(turn => turn.projectId === target.name && active(turn) && turn.account && !names.includes(turn.account));
+      if (busy) throw new HttpError(409, '账号 ' + busy.account + ' 还有正在运行的对话，等它结束再去掉');
+      setProjectAccounts(workspace, target.name, names);
+      return { accounts: names };
+    }],
     // Extra host directories in the project's container (EXTRA_MOUNTS); they apply when it is recreated.
     ['PUT', /^projects\/([\w-]+)\/mounts$/, async (request, [name]) => {
       const target = project(name as string);
       const input = (await body(request)).mounts;
       const specs = (Array.isArray(input) ? input : []).map(item => text(item).trim()).filter(Boolean);
-      projectMounts(target.name, specs.join(','), accountType(target.account.type).authDir);
+      projectMounts(target.name, specs.join(','), target.accounts.map(item => accountType(item.type).authDir));
       setProjectMounts(workspace, target.name, specs);
       return { mounts: specs };
     }],
@@ -811,8 +872,9 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const [cols, rows] = size(await body(request));
       return { terminalId: await terminals.shell(project(name as string).name, cols, rows) };
     }],
-    ['GET', /^projects\/([\w-]+)\/models$/, async (_request, [name]) => {
-      const target = chatProject(name as string);
+    // ?account=: the models of that account of the project (default: the one new conversations start with).
+    ['GET', /^projects\/([\w-]+)\/models$/, async (_request, [name], url) => {
+      const target = chatProject(name as string, url.searchParams.get('account') ?? undefined);
       if (!target) throw new HttpError(404, '项目不支持对话');
       if (target.account.type === 'claude') {
         const key = target.name + '\0' + target.account.name;
@@ -900,8 +962,9 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }],
     ['POST', /^conversations$/, async request => {
       const input = await body(request);
-      const target = chatProject(text(input.projectId));
-      if (!target) throw new HttpError(404, '项目不存在或不支持对话');
+      // `account`: which of the project's accounts the conversation uses, for good.
+      const target = chatProject(text(input.projectId), input.account === undefined ? undefined : text(input.account));
+      if (!target) throw new HttpError(404, input.account === undefined ? '项目不存在或不支持对话' : '项目里没有这个账号，或它不支持对话');
       return newConversation(target, text(input.name));
     }],
     ['PUT', /^conversations\/([\w-]+)$/, async (request, [id]) => {
@@ -1045,7 +1108,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }],
     // 做完为止: the job of a conversation, what it changed, and its two endings (accept: the agent is asked to merge).
     ['GET', /^jobs$/, async () => jobs.list().map(job => ({ ...job, conversation: store.conversation(job.conversationId)?.name ?? '' }))],
-    ['GET', /^projects\/([\w.-]+)\/job-support$/, async (_request, [name]) => jobs.support(project(name as string))],
+    ['GET', /^projects\/([\w.-]+)\/job-support$/, async (_request, [name], url) => {
+      const named = url.searchParams.get('account');
+      const target = named === null ? chatProject(name as string) ?? project(name as string) : chatProject(name as string, named);
+      if (!target) throw new HttpError(404, '项目里没有这个账号，或它不支持对话');
+      return jobs.support(target);
+    }],
     ['GET', /^conversations\/([\w-]+)\/job$/, async (_request, [id]) => {
       const job = jobs.get(identifier(id));
       return { job: job ? { ...job, criteria: criteria(jobTurns(job)) } : null, earlier: jobs.earlier(identifier(id)) };
@@ -1268,8 +1336,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   // Subscription usage, asked from the accounts' own containers; see usage.ts for how often.
   const pollUsage = (): void => {
     const { accounts, projects } = readWorkspace(workspace);
-    const running = new Set(store.liveTurns().filter(active).map(turn => turn.projectId));
-    const busy = new Set(projects.filter(item => running.has(item.name)).map(item => item.account.name));
+    // A turn from before turns named their account ran as its project's first one.
+    const busy = new Set(store.liveTurns().filter(active).flatMap(turn => turn.account ?? projects.find(item => item.name === turn.projectId)?.account.name ?? []));
     void usage.poll(accounts, projects, busy).catch(error => console.error('Usage poll failed:', message(error)));
   };
   const usageTimer = setInterval(pollUsage, 30_000);

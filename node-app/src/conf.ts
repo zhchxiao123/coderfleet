@@ -90,7 +90,10 @@ export interface Account {
 
 export interface WorkspaceProject {
   readonly name: string;
+  /** The account this view of the project runs as: the project's first one unless `projectAs` chose another. */
   readonly account: Account;
+  /** Every account the project's container holds, of different types; the first names the container. */
+  readonly accounts: readonly Account[];
   /** Host directory mounted at /workspace in the project's container. */
   readonly path: string;
   readonly active: boolean;
@@ -122,12 +125,23 @@ export function readWorkspace(workspace: string): { accounts: Account[]; project
     const account = byName.get(record.ACCOUNT ?? '');
     if (!name || !account || !record.PATH) return [];
     const path = expandHome(record.PATH);
+    const others = secondaryNames(record).flatMap(item => byName.get(item) ?? []);
     return [{
-      name, account, path: isAbsolute(path) ? path : resolve(workspace, path), active: truthy(record.ACTIVE ?? 'on'),
+      name, account, accounts: [account, ...others], path: isAbsolute(path) ? path : resolve(workspace, path), active: truthy(record.ACTIVE ?? 'on'),
       container: account.type + '-' + name, service: account.type + '-project-' + name, record,
     }];
   });
   return { accounts, projects };
+}
+
+/** The project as one of its accounts runs it (same container and directory), or nothing when the account is not the project's. */
+export function projectAs(project: WorkspaceProject, accountName: string): WorkspaceProject | undefined {
+  const account = project.accounts.find(item => item.name === accountName);
+  return account ? { ...project, account } : undefined;
+}
+
+function secondaryNames(record: ConfRecord): string[] {
+  return (record.SECONDARY_ACCOUNTS ?? '').split(',').map(item => item.trim()).filter(Boolean);
 }
 
 export class WorkspaceError extends Error {}
@@ -153,7 +167,7 @@ export function addAccount(workspace: string, input: NewAccount): Account {
 }
 
 export function removeAccount(workspace: string, name: string): void {
-  const used = parseConf(join(workspace, 'projects.conf')).filter(record => record.ACCOUNT === name).map(record => record.NAME);
+  const used = parseConf(join(workspace, 'projects.conf')).filter(record => record.ACCOUNT === name || secondaryNames(record).includes(name)).map(record => record.NAME);
   if (used.length) throw new WorkspaceError('账号仍被项目使用：' + used.join('、') + '。请先删除这些项目。');
   if (!rewriteConf(join(workspace, 'accounts.conf'), 'NAME', name, () => null)) throw new WorkspaceError('账号不存在');
 }
@@ -222,20 +236,56 @@ export function writeProjectEnv(workspace: string, name: string, values: Record<
   chmodSync(path, 0o600);
 }
 
-export interface NewProject { name: string; account: string; path: string }
+/**
+ * The accounts one project may hold together, in the given order: container accounts of
+ * different types that all leave the container the same way (through the relay, or all direct).
+ */
+export function projectAccounts(workspace: string, names: readonly string[]): Account[] {
+  const all = readWorkspace(workspace).accounts;
+  if (!names.length) throw new WorkspaceError('至少选一个账号');
+  const chosen = names.map(name => {
+    const account = all.find(item => item.name === name);
+    if (!account) throw new WorkspaceError('账号 ' + name + ' 不存在');
+    if (account.runtime !== 'container') throw new WorkspaceError('桌面版只管理容器账号');
+    return account;
+  });
+  for (const [index, account] of chosen.entries()) {
+    const same = chosen.findIndex(item => item.type === account.type);
+    if (same !== index) throw new WorkspaceError('一个项目里每种账号只能有一个：' + chosen[same]?.name + ' 和 ' + account.name + ' 都是 ' + accountType(account.type).label);
+  }
+  const first = chosen[0] as Account;
+  const other = chosen.find(item => item.proxy !== first.proxy);
+  if (other) throw new WorkspaceError('走 relay 的账号和不走代理的账号不能放在同一个项目里：' + first.name + ' 和 ' + other.name);
+  return chosen;
+}
+
+/** `accounts`: the first one names the container; the others share it. */
+export interface NewProject { name: string; accounts: readonly string[]; path: string }
 
 export function addProject(workspace: string, input: NewProject): void {
   if (!NAME.test(input.name)) throw new WorkspaceError('项目名只能包含字母、数字和连字符');
-  const accounts = readWorkspace(workspace).accounts;
-  const account = accounts.find(item => item.name === input.account);
-  if (!account) throw new WorkspaceError('账号不存在');
-  if (account.runtime !== 'container') throw new WorkspaceError('桌面版只管理容器账号');
+  const [account, ...others] = projectAccounts(workspace, input.accounts) as [Account, ...Account[]];
   const path = expandHome(input.path.trim());
   if (!isAbsolute(path)) throw new WorkspaceError('项目目录必须是绝对路径');
   if (!existsSync(path)) throw new WorkspaceError('项目目录不存在：' + path);
   const conf = join(workspace, 'projects.conf');
   if (parseConf(conf).some(record => record.NAME === input.name)) throw new WorkspaceError('项目 ' + input.name + ' 已存在');
-  appendConf(conf, { NAME: input.name, ACCOUNT: input.account, PATH: path });
+  appendConf(conf, { NAME: input.name, ACCOUNT: account.name, PATH: path, ...(others.length ? { SECONDARY_ACCOUNTS: others.map(item => item.name).join(',') } : {}) });
+}
+
+/**
+ * Replaces the accounts a project holds. The first one stays: the container is named after
+ * its type. The change reaches the container when it is recreated.
+ */
+export function setProjectAccounts(workspace: string, name: string, names: readonly string[]): void {
+  const project = readWorkspace(workspace).projects.find(item => item.name === name);
+  if (!project) throw new WorkspaceError('项目不存在');
+  if (names[0] !== project.accounts[0]?.name) throw new WorkspaceError('项目建在账号 ' + project.accounts[0]?.name + ' 上，它不能去掉');
+  const others = projectAccounts(workspace, names).slice(1);
+  rewriteConf(join(workspace, 'projects.conf'), 'NAME', name, record => {
+    const { SECONDARY_ACCOUNTS: _previous, ...rest } = record;
+    return others.length ? { ...rest, SECONDARY_ACCOUNTS: others.map(item => item.name).join(',') } : rest;
+  });
 }
 
 export function removeProject(workspace: string, name: string): void {

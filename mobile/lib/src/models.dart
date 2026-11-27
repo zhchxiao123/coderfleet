@@ -6,15 +6,40 @@ List<Map<String, dynamic>> _maps(Object? value) => value is List ? value.whereTy
 String _text(Object? value) => value is String ? value : '';
 List<String> _strings(Object? value) => value is List ? value.whereType<String>().toList() : const [];
 
+/// One of the accounts a project holds. `used`: how full its fullest quota window is, in percent (null when unknown).
+class ProjectAccount {
+  ProjectAccount({required this.name, required this.type, required this.typeLabel, required this.chat, required this.signedIn, this.used});
+  factory ProjectAccount.fromJson(Map<String, dynamic> json) => ProjectAccount(
+        name: _text(json['name']), type: _text(json['type']), typeLabel: _text(json['typeLabel']),
+        chat: json['chat'] == true, signedIn: json['signedIn'] != false, used: json['used'] is num ? (json['used'] as num).round() : null);
+  final String name, type, typeLabel;
+  final bool chat, signedIn;
+  final int? used;
+  /// The type in one word ("Claude Code" → "Claude").
+  String get shortType => typeLabel.split(' ').first;
+  String get note => [name, if (!signedIn) '未登录' else if (used != null) '已用 $used%'].join(' · ');
+}
+
 class Project {
-  Project({required this.id, required this.name, required this.type, required this.typeLabel, required this.state, required this.chat, required this.active});
+  Project({required this.id, required this.name, required this.type, required this.typeLabel, required this.state, required this.chat, required this.active,
+      this.accounts = const [], this.defaultAccount = ''});
   factory Project.fromJson(Map<String, dynamic> json) => Project(
         id: _text(json['id']), name: _text(json['name']), type: _text(json['type']), typeLabel: _text(json['typeLabel']),
-        state: _text(json['state']), chat: json['chat'] == true, active: json['active'] != false);
+        state: _text(json['state']), chat: json['chat'] == true, active: json['active'] != false,
+        accounts: _maps(json['accounts']).map(ProjectAccount.fromJson).toList(), defaultAccount: _text(json['defaultAccount']));
   final String id, name, type, typeLabel, state;
   final bool chat, active;
+  /// The accounts the project holds (empty from a backend that knows one account per project) and
+  /// the one a new conversation starts with unless another is picked.
+  final List<ProjectAccount> accounts;
+  final String defaultAccount;
   bool get running => state == 'running';
   bool get canChat => chat && active;
+  /// The accounts a conversation can be started with, when there is a choice.
+  List<ProjectAccount> get choices => accounts.length > 1 ? accounts.where((item) => item.chat).toList() : const [];
+  ProjectAccount? account(String? name) => accounts.where((item) => item.name == name).firstOrNull;
+  /// What a conversation of this project is labelled with: the type of the account it uses.
+  String label(String? accountName) => account(accounts.length > 1 ? accountName : null)?.typeLabel ?? typeLabel;
 }
 
 class ModelOption {
@@ -23,13 +48,15 @@ class ModelOption {
 }
 
 class Conversation {
-  Conversation({required this.id, required this.projectId, required this.name, required this.status, required this.attention, required this.updatedAt, required this.turns, this.preview = ''});
+  Conversation({required this.id, required this.projectId, required this.name, required this.status, required this.attention, required this.updatedAt, required this.turns, this.preview = '', this.account});
   factory Conversation.fromJson(Map<String, dynamic> json) => Conversation(
         id: _text(json['id']), projectId: _text(json['projectId']), name: _text(json['name']), status: _text(json['status']),
         attention: json['attention'] == true, updatedAt: DateTime.tryParse(_text(json['updatedAt'])) ?? DateTime.fromMillisecondsSinceEpoch(0),
-        turns: json['turns'] is int ? json['turns'] as int : 0, preview: _text(json['preview']));
+        turns: json['turns'] is int ? json['turns'] as int : 0, preview: _text(json['preview']), account: json['account'] as String?);
   /// `preview`: the line the latest answer ended on ('' while it runs or when there is none).
   final String id, projectId, name, status, preview;
+  /// The project's account this conversation uses; '' when the project no longer holds it (null: the backend does not say).
+  final String? account;
   final bool attention;
   final DateTime updatedAt;
   final int turns;

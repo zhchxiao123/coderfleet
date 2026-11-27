@@ -136,8 +136,8 @@ class BackendClient {
 
   Future<List<Project>> projects() async => parseList(await _call('GET', 'projects'), Project.fromJson);
 
-  Future<List<ModelOption>> models(String projectId) async =>
-      parseList(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/models'), (item) => ModelOption(item['id'] as String? ?? '', item['label'] as String? ?? ''));
+  Future<List<ModelOption>> models(String projectId, {String? account}) async =>
+      parseList(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/models${account == null ? '' : '?account=${Uri.encodeQueryComponent(account)}'}'), (item) => ModelOption(item['id'] as String? ?? '', item['label'] as String? ?? ''));
 
   /// Long poll of the conversation list: returns null when nothing changed within [wait].
   /// Only the [limit] most recent conversations (matching [query], when given) come back; `total` counts all of them.
@@ -162,7 +162,8 @@ class BackendClient {
     return (turns: parseList(data['turns'], Turn.fromJson), earlier: data['earlier'] is int ? data['earlier'] as int : 0);
   }
 
-  Future<Conversation> createConversation(String projectId) async => Conversation.fromJson(asMap(await _call('POST', 'conversations', body: {'projectId': projectId})));
+  Future<Conversation> createConversation(String projectId, {String? account}) async =>
+      Conversation.fromJson(asMap(await _call('POST', 'conversations', body: {'projectId': projectId, 'account': ?account})));
 
   Future<void> rename(String conversationId, String name) => _call('PUT', 'conversations/$conversationId', body: {'name': name});
 

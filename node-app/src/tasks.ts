@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { accountType } from './accounts.js';
 import { type WorkspaceProject } from './conf.js';
 import { ControlMailbox, type CommandKind } from './control.js';
 import { assertContainer, containerPath, execDetached, execText, quote, signalGroup, workerAlive } from './docker.js';
@@ -287,7 +288,8 @@ export class TaskRunner {
   public constructor(
     private readonly store: WorkspaceStore,
     private readonly dockerPath: string,
-    private readonly project: (id: string) => WorkspaceProject | undefined,
+    /** The project as `account` runs it; without one, the project whichever account a turn used. */
+    private readonly project: (id: string, account?: string) => WorkspaceProject | undefined,
   ) {}
 
   private paths(project: WorkspaceProject, turn: Turn) {
@@ -306,7 +308,8 @@ export class TaskRunner {
 
   /** `run.cwd`: where the agent works (default: the project root); `run.preamble`: text put before the prompt, not shown as the user's. */
   public async launch(turn: Turn, run: { cwd?: string; preamble?: string; readOnly?: boolean } = {}): Promise<void> {
-    const project = this.project(turn.projectId);
+    // The turn's own account, never another of the project's: its sign-in and quota are what the turn was started for.
+    const project = turn.account ? this.project(turn.projectId, turn.account) : undefined;
     try {
       if (!project) throw new Error('The project configuration is missing');
       const paths = this.paths(project, turn);
@@ -336,7 +339,11 @@ export class TaskRunner {
         + ' --task-marker ' + quote('coderfleet-task-' + turn.id) + ' ) >> ' + log + ' 2>> ' + quote(inside(turn.id + '.sdk-diagnostic.log'))
         + '; cf_rc=$?; echo $cf_rc > ' + exit + '.tmp; mv ' + exit + '.tmp ' + exit;
       const extra = await this.taskEnv?.(project, turn) ?? {};
-      await execDetached(this.dockerPath, project.container, { ...extra, CODERFLEET_TASK_ID: turn.id }, body);
+      // A container shared by several accounts carries no account's settings itself (compose.ts): the turn brings its own.
+      const shared = project.accounts.length > 1;
+      const own = shared ? accountType(project.account.type).envVars : {};
+      const keys = shared && project.account.auth === 'env' && existsSync(project.account.envFile) ? project.account.envFile : undefined;
+      await execDetached(this.dockerPath, project.container, { ...own, ...extra, CODERFLEET_TASK_ID: turn.id }, body, keys);
     } catch (error) {
       this.finish(turn, 'failed', message(error));
     }

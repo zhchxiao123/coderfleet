@@ -77,6 +77,37 @@ void main() {
     await teardown(tester);
   });
 
+  testWidgets('a project with several accounts asks which one the new conversation is with', (tester) async {
+    final backend = FakeBackend()..seedDemo();
+    backend.projects.first.addAll({'defaultAccount': 'claude-work', 'accounts': [
+      {'name': 'claude-work', 'type': 'claude', 'typeLabel': 'Claude Code', 'chat': true, 'signedIn': true, 'used': 82},
+      {'name': 'codex-team', 'type': 'codex', 'typeLabel': 'Codex CLI', 'chat': true, 'signedIn': false, 'used': null},
+    ]});
+    await pumpApp(tester, backend);
+    await tester.tap(find.byTooltip('新对话'));
+    await settle(tester, 3);
+    expect(find.text('Claude + Codex'), findsOneWidget);
+    await tester.tap(find.text('coderfleet').last);
+    await settle(tester, 3);
+    expect(find.text('claude-work · 已用 82%'), findsOneWidget);
+    await tester.tap(find.text('codex-team · 未登录'));
+    await settle(tester, 3);
+    expect(find.text('coderfleet · Codex CLI'), findsOneWidget);
+    expect(backend.queries.any((uri) => uri.path.endsWith('/models') && uri.queryParameters['account'] == 'codex-team'), isTrue);
+
+    await tester.enterText(find.byType(TextField), 'hello');
+    await tester.pump();
+    await tester.tap(find.byTooltip('发送'));
+    await settle(tester, 10);
+    final created = backend.requests.firstWhere((item) => item['method'] == 'POST' && item['path'] == 'conversations');
+    expect(created['body'], {'projectId': 'coderfleet', 'account': 'codex-team'});
+    await tester.pageBack();
+    await settle(tester, 3);
+    // In the list, the conversation says which account it is with.
+    expect(find.text('coderfleet · Codex'), findsOneWidget);
+    await teardown(tester);
+  });
+
   testWidgets('other agents queue a message sent mid-turn; it can be withdrawn', (tester) async {
     final backend = FakeBackend()..seedDemo();
     final conversation = backend.conversation('reminis-app', 'codex');

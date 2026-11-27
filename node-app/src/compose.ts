@@ -115,10 +115,10 @@ function parseMounts(raw: string): { volume: string; host: string; container: st
 }
 
 /** A project's EXTRA_MOUNTS, checked: the format, that the host paths exist and that nothing lands on a path the container already uses. */
-export function projectMounts(name: string, raw: string, authDir: string): { volume: string; host: string; container: string }[] {
+export function projectMounts(name: string, raw: string, authDirs: readonly string[]): { volume: string; host: string; container: string }[] {
   const mounts = parseMounts(raw);
   for (const mount of mounts) {
-    if (mount.container === '/workspace' || mount.container === authDir) {
+    if (mount.container === '/workspace' || authDirs.includes(mount.container)) {
       throw new WorkspaceError('项目 ' + name + ' 的 EXTRA_MOUNTS 配置无效：容器路径 ' + mount.container + ' 已被项目工作区或账号认证目录占用');
     }
     if (!existsSync(mount.host)) throw new WorkspaceError('项目 ' + name + ' 的 EXTRA_MOUNTS 配置无效：宿主机路径 ' + mount.host + ' 不存在');
@@ -200,6 +200,9 @@ export async function generateCompose(workspace: string, dockerPath = 'docker'):
     }
     const duplicates = [...new Set(types.filter((item, index) => types.indexOf(item) !== index))];
     if (duplicates.length) throw new WorkspaceError('项目 ' + name + ' 绑定的账号类型冲突：' + duplicates.join(' / ') + ' 类型的账号只能绑定一个');
+    // One container has one way out: an account that must use the relay never shares it with one that goes direct.
+    const mixed = secondary.find(item => ((accounts.get(item) as ConfRecord).PROXY || 'relay') !== proxy);
+    if (mixed) throw new WorkspaceError('项目 ' + name + ' 的账号 ' + accountName + ' 和 ' + mixed + ' 一个走 relay、一个不走代理，不能放在同一个项目里');
     const spec = accountType(type);
     const serviceName = type + '-project-' + name;
     ensureBindMountDir(join(workspace, 'accounts', accountName));
@@ -226,9 +229,6 @@ export async function generateCompose(workspace: string, dockerPath = 'docker'):
       const secondaryAccount = accounts.get(secondaryName) as ConfRecord;
       ensureBindMountDir(join(workspace, 'accounts', secondaryName));
       volumes.push('./accounts/' + secondaryName + ':' + accountType(secondaryAccount.TYPE || 'codex').authDir);
-      if ((secondaryAccount.AUTH || 'login') === 'env' && secondaryAccount.ENV_FILE && secondaryAccount.ENV_FILE !== '-') {
-        ((service.env_file ??= []) as string[]).push(secondaryAccount.ENV_FILE);
-      }
     }
     const socketConfig = { ...config };
     if ('DOCKER_SOCKET' in project) socketConfig.DOCKER_SOCKET = project.DOCKER_SOCKET ?? '';
@@ -240,7 +240,7 @@ export async function generateCompose(workspace: string, dockerPath = 'docker'):
       environment.CODERFLEET_HOST_WORKSPACE = path;
       environment.CODERFLEET_DOCKER_SOCKET = socket.container;
     }
-    for (const mount of projectMounts(name, project.EXTRA_MOUNTS ?? '', spec.authDir)) volumes.push(mount.volume);
+    for (const mount of projectMounts(name, project.EXTRA_MOUNTS ?? '', types.map(item => accountType(item).authDir))) volumes.push(mount.volume);
     let idePort = 0; let ideRemote = false;
     if (ideEnabled) {
       if (project.IDE_PORT) {
@@ -258,7 +258,9 @@ export async function generateCompose(workspace: string, dockerPath = 'docker'):
       ensureBindMountDir(join(workspace, 'ide-data', name));
       volumes.push('./ide-data/' + name + ':/home/byclaw/.local/share/code-server');
     }
-    if (auth === 'env' && envFile && envFile !== '-') service.env_file = [envFile, ...((service.env_file as string[] | undefined) ?? [])];
+    // An account's API keys are container-wide only when it has the container to itself. In a shared
+    // one each turn gets its own account's file (tasks.ts), so one account's key never answers for another.
+    if (auth === 'env' && envFile && envFile !== '-' && !secondary.length) service.env_file = [envFile];
     const projectEnv = join(workspace, 'projects', name, 'env');
     if (existsSync(projectEnv)) {
       for (const raw of readFileSync(projectEnv, 'utf8').split('\n')) {

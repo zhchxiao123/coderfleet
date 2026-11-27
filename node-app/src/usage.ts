@@ -6,7 +6,7 @@
 // usage endpoints itself. Tokens are only read: the CLI refreshes them.
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type Account, type WorkspaceProject } from './conf.js';
+import { projectAs, type Account, type WorkspaceProject } from './conf.js';
 import { assertContainer, execText } from './docker.js';
 import { message, record, text } from './state.js';
 
@@ -231,9 +231,10 @@ export class UsageTracker {
   private async probe(account: Account, projects: readonly WorkspaceProject[]): Promise<AccountUsage> {
     let container = '';
     let refused: unknown;
-    for (const project of projects) {
-      if (project.account.name !== account.name) continue;
-      // Also refuses a relay account's container that could reach the network directly.
+    for (const held of projects) {
+      const project = projectAs(held, account.name);
+      if (!project) continue;
+      // Also refuses a relay account's container that could reach the network directly, and one created before it held this account.
       try { await assertContainer(this.dockerPath, project); container = project.container; break; } catch (error) { refused = error; }
     }
     if (!container) throw new NoContainerError(refused ? message(refused) : 'The account has no project');

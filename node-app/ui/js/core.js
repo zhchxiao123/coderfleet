@@ -222,7 +222,8 @@
   /**
    * A searchable list popover (project pickers and the like). Opens above the
    * anchor when there is more room there. Arrow keys move, Enter picks, Esc closes.
-   * items: [{ id, label, hint?, dot?, selected?, muted? }]
+   * items: [{ id, label, hint?, dot?, selected?, muted?, group? }]. Items that follow each other with the
+   * same `group.id` sit under one heading: { id, type, label, hint } (an account: type badge and a note).
    */
   CF.picker = (anchor, { items, placeholder = '搜索…', empty = '没有匹配项', footer, onPick }) => {
     openMenu?.remove();
@@ -235,13 +236,17 @@
     const pick = item => { close(); onPick(item); };
     const draw = () => {
       const query = input.value.trim().toLowerCase();
-      shown = items.filter(item => !query || (item.label + ' ' + (item.hint || '')).toLowerCase().includes(query));
+      shown = items.filter(item => !query || (item.label + ' ' + (item.hint || '') + ' ' + (item.group ? item.group.label + ' ' + (item.group.hint || '') : '')).toLowerCase().includes(query));
       index = Math.max(0, Math.min(index, shown.length - 1));
-      list.replaceChildren(...(shown.length ? shown.map((item, position) => h('button.picker-item' + (position === index ? '.active' : '') + (item.selected ? '.selected' : '') + (item.muted ? '.muted' : ''), {
-        role: 'option', 'aria-selected': String(Boolean(item.selected)),
-        on: { click: () => pick(item), mousemove: () => { if (index !== position) { index = position; draw(); } } },
-      }, h('span.dot' + (item.dot ? '.' + item.dot : '')), h('span.name', item.label), item.hint ? h('span.hint', item.hint) : null,
-        item.selected ? CF.icon('check', 13) : null)) : [h('div.picker-empty', empty)]));
+      list.replaceChildren(...(shown.length ? shown.flatMap((item, position) => [
+        item.group && item.group.id !== shown[position - 1]?.group?.id
+          ? h('div.picker-group', CF.typeBadge(item.group.type, item.group.label), item.group.hint ? h('span', item.group.hint) : null) : null,
+        h('button.picker-item' + (position === index ? '.active' : '') + (item.selected ? '.selected' : '') + (item.muted ? '.muted' : '') + (item.group ? '.grouped' : ''), {
+          role: 'option', 'aria-selected': String(Boolean(item.selected)),
+          on: { click: () => pick(item), mousemove: () => { if (index !== position) { index = position; draw(); } } },
+        }, h('span.dot' + (item.dot ? '.' + item.dot : '')), h('span.name', item.label), item.hint ? h('span.hint', item.hint) : null,
+          item.selected ? CF.icon('check', 13) : null),
+      ].filter(Boolean)) : [h('div.picker-empty', empty)]));
       list.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
     };
     input.addEventListener('input', () => { index = 0; draw(); });
@@ -437,6 +442,16 @@
   CF.projectPath = path => String(path || '').replace(/^\/workspace\//, '');
 
   CF.typeBadge = (type, label) => h('span.badge.type-' + type, label || type);
+  /** An account type in one word, where there is little room: "Claude Code" → "Claude". */
+  CF.shortType = label => (label || '').split(' ')[0];
+  /** Which of its project's accounts a conversation uses, in one word; '' when the project has only one. */
+  CF.conversationAccount = item => {
+    const project = CF.state.projects.find(entry => entry.id === item.projectId);
+    if ((project?.accounts?.length ?? 0) < 2) return '';
+    return CF.shortType(project.accounts.find(entry => entry.name === item.account)?.typeLabel) || item.type || '';
+  };
+  /** What the pickers say next to an account: how full its fullest window is, or that nobody signed in. */
+  CF.accountNote = account => [account.name, !account.signedIn ? '未登录' : account.used === null || account.used === undefined ? '' : '已用 ' + account.used + '%'].filter(Boolean).join(' · ');
   CF.stateDot = state => h('span.dot' + (state === 'running' ? '.running' : state === 'restarting' ? '.busy' : ''));
   CF.stateText = state => ({ running: '运行中', exited: '已停止', created: '未启动', restarting: '重启中', paused: '已暂停', missing: '未创建', dead: '异常' }[state] || state || '未知');
 

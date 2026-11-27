@@ -702,6 +702,10 @@ button.flow-row.tool-toggle { cursor: default; }
 .picker-item.muted .name { color: var(--text-2); }
 .picker-item .hint { flex: none; color: var(--text-3); font-size: 12px; }
 .picker-item svg { flex: none; color: var(--accent); }
+/* Accounts as headings, their models underneath (a project with several accounts). */
+.picker-group { display: flex; align-items: center; gap: 8px; padding: 9px 10px 4px; color: var(--text-3); font-size: 12px; }
+.picker-item.grouped .dot { visibility: hidden; }
+.composer-bar > .account-chip { flex: 0 1 auto; min-width: 56px; max-width: 300px; }
 .picker-empty { padding: 14px 10px; color: var(--text-3); font-size: 12.5px; }
 /* No menu may run off the window; long ones scroll inside. */
 .menu { max-height: calc(100vh - 24px); overflow-y: auto; }
@@ -862,6 +866,11 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .mount-head, .mount-row { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) auto 30px 30px; }
 .mount-head span:nth-child(2) { grid-column: 2 / span 4; }
 .mount-row .check { margin: 0; white-space: nowrap; }
+.account-choice { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
+.account-choice .check { padding: 6px 8px; border-radius: 8px; color: var(--text); cursor: pointer; }
+.account-choice .check:hover { background: var(--hover); }
+.account-choice .check.off { opacity: .5; cursor: default; }
+.account-choice .check .hint { margin-left: auto; font-size: 12px; color: var(--text-3); }
 .env-rows { display: grid; gap: 8px; margin-bottom: 10px; }
 .env-row input { min-width: 0; font: 13px var(--mono); }
 

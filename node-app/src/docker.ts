@@ -3,7 +3,8 @@
 // `docker exec`; this service never creates per-turn containers.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { type WorkspaceProject } from './conf.js';
+import { accountType } from './accounts.js';
+import { type Account, type WorkspaceProject } from './conf.js';
 
 const run = promisify(execFile);
 const CONTAINER_ROOT = '/workspace';
@@ -38,6 +39,10 @@ export async function assertContainer(dockerPath: string, project: WorkspaceProj
   } catch {
     throw new Error('Container ' + project.container + ' is not running. Start it with `coderfleet up` first.');
   }
+  // An account added to the project after its container was created is not in the container yet.
+  if (project.account.name !== project.accounts[0]?.name && !await accountMounted(dockerPath, project.container, project.account)) {
+    throw new Error('账号 ' + project.account.name + ' 是后来加进项目的，重启这个项目后才能用（项目的「···」→「重启容器」）');
+  }
   if (project.account.proxy === 'off') return;
   if (!networks.length) throw new Error('Container ' + project.container + ' has no network');
   for (const network of networks) {
@@ -52,9 +57,19 @@ export async function assertContainer(dockerPath: string, project: WorkspaceProj
 
 export function containerPath(relative: string): string { return CONTAINER_ROOT + '/' + relative; }
 
+/** True when the container was created with the account's sign-in directory mounted. */
+export async function accountMounted(dockerPath: string, container: string, account: Account): Promise<boolean> {
+  try {
+    const { stdout } = await run(dockerPath, ['inspect', '--format', '{{range .Mounts}}{{.Destination}} {{end}}', container], { timeout: 10_000 });
+    return stdout.trim().split(/\s+/).includes(accountType(account.type).authDir);
+  } catch { return false; }
+}
+
 /** Starts a detached command inside the container and returns once Docker accepted it. */
-export async function execDetached(dockerPath: string, container: string, env: Record<string, string>, script: string): Promise<void> {
+export async function execDetached(dockerPath: string, container: string, env: Record<string, string>, script: string, envFile?: string): Promise<void> {
   const args = ['exec', '-d', '--workdir', CONTAINER_ROOT];
+  // A file, not `--env`: the values are keys and must not show in the process list.
+  if (envFile) args.push('--env-file', envFile);
   for (const [key, value] of Object.entries(env)) args.push('--env', key + '=' + value);
   await run(dockerPath, [...args, container, 'bash', '-c', script], { timeout: 30_000 });
 }

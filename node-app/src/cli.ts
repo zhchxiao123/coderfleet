@@ -206,12 +206,12 @@ async function helperCommand(verb: string | undefined, args: string[]): Promise<
 
 const CONTAINER_VERBS: Readonly<Record<string, string>> = { start: '启动', stop: '停止', restart: '重启' };
 const CONTAINER_STATES: Readonly<Record<string, string>> = { running: '运行中', exited: '已停止', created: '未启动', missing: '未创建' };
-interface ProjectView { name: string; account: string; typeLabel: string; active: boolean; runtime: string; state: string; path: string }
+interface ProjectView { name: string; accounts: { name: string; typeLabel: string }[]; active: boolean; runtime: string; state: string; path: string }
 
 async function containersCommand(verb: string | undefined, args: string[]): Promise<void> {
   if (verb === 'list') {
     const projects = (await call<ProjectView[]>('GET', 'projects')).filter(item => item.runtime === 'container');
-    console.log(projects.length ? projects.map(item => [item.name, CONTAINER_STATES[item.state] ?? item.state, item.account, item.typeLabel + (item.active ? '' : ' · 已停用'), item.path].join('  ')).join('\n') : '还没有容器项目');
+    console.log(projects.length ? projects.map(item => [item.name, CONTAINER_STATES[item.state] ?? item.state, item.accounts.map(account => account.name).join('+'), item.accounts.map(account => account.typeLabel).join(' + ') + (item.active ? '' : ' · 已停用'), item.path].join('  ')).join('\n') : '还没有容器项目');
   } else if (verb && CONTAINER_VERBS[verb] && args.length <= 1) {
     const label = CONTAINER_VERBS[verb] as string;
     await finished(await call<OperationView>('POST', (args[0] ? 'projects/' + args[0] : 'containers') + '/' + verb, {}), '没有' + label + '成功');

@@ -37,7 +37,7 @@ class FakeBackend {
   void changed() => _touch();
 
   Map<String, dynamic> conversation(String projectId, String name, {String status = 'done', bool attention = false, DateTime? updatedAt}) {
-    final item = {'id': _id(), 'projectId': projectId, 'name': name, 'status': status, 'attention': attention,
+    final item = <String, dynamic>{'id': _id(), 'projectId': projectId, 'name': name, 'status': status, 'attention': attention,
       'updatedAt': (updatedAt ?? DateTime.now()).toUtc().toIso8601String(), 'turns': 0};
     conversations.insert(0, item);
     turns[item['id'] as String] = [];
@@ -128,7 +128,7 @@ class FakeBackend {
         final ordered = [...found.where((item) => item['attention'] == true), ...found.where((item) => item['attention'] != true)];
         return _json({'etag': etag, 'conversations': ordered.take(limit).toList(), 'total': found.length});
       case ('POST', ['conversations']):
-        return _json(conversation(body['projectId'] as String, '新对话', status: ''), 201);
+        return _json(conversation(body['projectId'] as String, '新对话', status: '')..addAll({'account': ?body['account']}), 201);
       case ('PUT', ['conversations', final id]):
         conversations.firstWhere((item) => item['id'] == id)['name'] = body['name'];
         _touch();

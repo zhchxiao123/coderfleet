@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { accountType } from './accounts.js';
 import { imageName } from './compose.js';
 import { ensureBindMountDir, loadConfig, readWorkspace, WorkspaceError, type Account } from './conf.js';
+import { accountMounted } from './docker.js';
 import { join } from 'node:path';
 
 const run = promisify(execFile);
@@ -136,9 +137,13 @@ export class Terminals {
     const spec = accountType(account.type);
     const title = account.name + ' · 登录';
     for (const project of readWorkspace(this.workspace).projects) {
-      if (project.account.name === account.name && await this.running(project.container)) {
-        return this.open(title, ['exec', '-i', project.container, ...Terminals.wrap([...spec.login], cols, rows)]);
-      }
+      if (!project.accounts.some(item => item.name === account.name) || !await this.running(project.container)) continue;
+      const first = project.accounts[0]?.name === account.name;
+      // A container created before the project held this account has nowhere to keep its sign-in.
+      if (!first && !await accountMounted(this.dockerPath, project.container, account)) continue;
+      // The container carries its first account's settings; another account's come with the command.
+      const own = first ? [] : Object.entries(spec.envVars).flatMap(([key, value]) => ['-e', key + '=' + value]);
+      return this.open(title, ['exec', '-i', ...own, project.container, ...Terminals.wrap([...spec.login], cols, rows)]);
     }
     const config = loadConfig(this.workspace);
     const image = imageName(config);

@@ -63,6 +63,12 @@ if (command === 'inspect') {
   const format = args[1];
   const running = containers[args.at(-1)] === 'running';
   if (!running) { console.log('false'); process.exit(0); }
+  // $FAKE_STATE/mounts.json: container name → the directories mounted in it (only asked for a project's added accounts).
+  if (format.includes('.Mounts')) {
+    const mounts = existsSync(state + '/mounts.json') ? JSON.parse(readFileSync(state + '/mounts.json', 'utf8')) : {};
+    console.log((mounts[args.at(-1)] ?? []).join(' '));
+    process.exit(0);
+  }
   console.log(format.includes('Networks') ? 'true ' + process.env.FAKE_NETWORK + ' ' : 'true');
   process.exit(0);
 }
@@ -75,7 +81,8 @@ for (; index < args.length; index += 1) {
   if (value === '-d') detached = true;
   else if (value === '-i' || value === '-it') continue;
   else if (value === '--workdir') index += 1;
-  else if (value === '--env') { const [k, ...v] = args[++index].split('='); env[k] = v.join('='); }
+  else if (value === '--env' || value === '-e') { const [k, ...v] = args[++index].split('='); env[k] = v.join('='); }
+  else if (value === '--env-file') for (const line of readFileSync(args[++index], 'utf8').split('\\n').filter(Boolean)) { const [k, ...v] = line.split('='); env[k] = v.join('='); }
   else break;
 }
 if (containers[args[index]] !== 'running') { console.error('container is not running'); process.exit(1); }
