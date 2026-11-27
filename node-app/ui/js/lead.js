@@ -194,6 +194,7 @@
     const state = view();
     if (!state) { host.replaceChildren(h('div.empty', h('h3', '这个后端还没有领航'), h('p', '把后端升级到和 App 一样的版本就有了。'))); return; }
     renderBar();
+    parts.updateSend();
     const text = JSON.stringify(state);
     if (!force && text === shown) return;
     shown = text;
@@ -231,11 +232,37 @@
       const watch = h('div.lead-watch-host');
       const textarea = h('textarea', { rows: 1, placeholder: '直接说就行：交代一件事，或者一句话回它问你的几件事…', 'aria-label': '给领航的话' });
       const sendButton = h('button.send', { title: '发送', disabled: true }, CF.icon('send', 16));
+      const hint = h('span.hint', 'Enter 发送');
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
       // Files for 领航: kept by the backend; whatever it hands to a conversation goes along with them.
       const attach = CF.attachments({ projectId: null, upload: (name, file) => CF.transport.upload(CF.state.backendId, null, name, file),
         alive: () => host?.isConnected && parts?.textarea === textarea, onChange: () => updateSend() });
-      const updateSend = () => { sendButton.disabled = (!textarea.value.trim() && !attach.count()) || attach.uploading(); };
+      // One button, as in a conversation: with an empty box while 领航 is on a run it stops that run.
+      const updateSend = () => {
+        const state = view();
+        const run = state?.run ?? null;
+        if (sendButton.dataset.stopping && sendButton.dataset.stopping !== run) delete sendButton.dataset.stopping;
+        const content = Boolean(textarea.value.trim()) || attach.count() > 0;
+        const stopping = Boolean(run) && !content;
+        sendButton.classList.toggle('stop', stopping);
+        sendButton.replaceChildren(stopping ? h('span.stop-mark') : CF.icon('send', 16));
+        sendButton.disabled = stopping ? Boolean(sendButton.dataset.stopping) : !content || attach.uploading();
+        sendButton.title = stopping ? (sendButton.dataset.stopping ? '正在停止…' : '停止（Esc）') : '发送（Enter）';
+        sendButton.setAttribute('aria-label', sendButton.title);
+        hint.textContent = sendButton.dataset.stopping ? '正在停止…'
+          : stopping ? (state.working === '你的话' ? '领航正在回复' : '领航正在处理') + ' · Esc 停止，也可以继续输入'
+          : run ? '发送会排在这一轮之后' : 'Enter 发送';
+      };
+      // Ends the run the page shows; the button waits as 正在停止… until the backend has moved on from it.
+      const stop = async () => {
+        const run = view()?.run;
+        if (!run || sendButton.dataset.stopping) return;
+        sendButton.dataset.stopping = run;
+        updateSend();
+        try { await CF.api('POST', 'lead/stop', { run }); await CF.lead.refresh(); }
+        catch (error) { delete sendButton.dataset.stopping; CF.fail(error); }
+        finally { updateSend(); }
+      };
       const attachButton = h('button.composer-icon', { title: '添加附件', 'aria-label': '添加附件', on: { click: () => CF.menu(attachButton, [
         { icon: 'clip', label: '添加附件', hint: '图片、PDF 或任意文件，也可以粘贴或拖进来', run: attach.pick },
       ], { alignStart: true }) } }, CF.icon('plus', 16));
@@ -255,12 +282,13 @@
       textarea.addEventListener('paste', attach.paste);
       textarea.addEventListener('keydown', event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
+        else if (event.key === 'Escape' && view()?.run && !textarea.value) { event.preventDefault(); void stop(); }
       });
-      sendButton.addEventListener('click', () => void send());
+      sendButton.addEventListener('click', () => void (sendButton.classList.contains('stop') ? stop() : send()));
       host = h('div.chat.lead-chat', watch, transcript,
         h('div.composer-wrap', notice, h('div.composer', { on: attach.drop }, attach.row, textarea, attach.input,
-          h('div.composer-bar', attachButton, HINTS.map(hint => h('button.lead-chip', { on: { click: () => void send(hint) } }, hint)), h('span.hint', 'Enter 发送'), sendButton))));
-      parts = { transcript, inner, notice, textarea, watch };
+          h('div.composer-bar', attachButton, HINTS.map(hint => h('button.lead-chip', { on: { click: () => void send(hint) } }, hint)), hint, sendButton))));
+      parts = { transcript, inner, notice, textarea, watch, updateSend };
       container.replaceChildren(h('div.chat-row', host));
       shown = ''; cards.clear();
       render(true);

@@ -59,7 +59,7 @@ test('new work goes to the project\'s usual account unless it is nearly used up'
 });
 
 test('a phone may read and answer 领航, not switch it on or off', () => {
-  for (const [method, path] of [['GET', 'lead'], ['GET', 'lead/changes'], ['POST', 'lead/messages'], ['POST', 'lead/uploads'], ['GET', 'lead/uploads/0123456789abcdef-a.png'],
+  for (const [method, path] of [['GET', 'lead'], ['GET', 'lead/changes'], ['POST', 'lead/messages'], ['POST', 'lead/stop'], ['POST', 'lead/uploads'], ['GET', 'lead/uploads/0123456789abcdef-a.png'],
     ['POST', 'lead/asks/abc123'], ['POST', 'lead/undo/abc123'], ['PUT', 'conversations/abc/lead']])
     assert.equal(deviceAllowed(method, path), true, method + ' ' + path);
   assert.equal(deviceAllowed('PUT', 'lead/settings'), false);
@@ -502,6 +502,49 @@ test('what 领航 writes to the user shows as it comes, and what it is looking a
     assert.equal(said.text, answer);
     const after = (await env.get('lead')).body;
     assert.deepEqual([after.draft, after.step, after.working], ['', '', null]);
+  } finally { await close(); }
+});
+
+test('停止 ends the run going on for good, and what was queued comes next', { timeout: 120_000 }, async () => {
+  const slow = '这一句很长，一段一段慢慢到，用来在中途被停下。'.repeat(8);
+  const { llm, env, items, close } = await setup(prompt => /用户刚对你说\n第二句/.test(prompt) ? '第二句收到了。' : slow, { pace: 100 });
+  try {
+    await env.post('lead/messages', { text: '第一句' });
+    const writing = await until(() => env.get('lead'), value => value.body.draft, 'the first words');
+    const run = writing.body.run;
+    assert.match(run, /^u:/);
+    await env.post('lead/messages', { text: '第二句' });
+    // Only the run the page showed is stopped.
+    assert.deepEqual((await env.post('lead/stop', { run: 'u:other' })).body, { stopped: false });
+    assert.deepEqual((await env.post('lead/stop', { run })).body, { stopped: true });
+    const [note] = await until(() => items('note'), value => value.length === 1, 'the stop');
+    assert.equal(note.text, '你让我停下了，这一轮到此为止');
+    const [said] = await until(() => items('lead'), value => value.length === 1, 'the queued answer');
+    assert.equal(said.text, '第二句收到了。');
+    const after = (await env.get('lead')).body;
+    assert.deepEqual([after.run, after.working, after.draft], [null, null, '']);
+    // Not carried on: the stopped run asked the model once, and its words never became an answer.
+    assert.equal(llm.requests.filter(request => /用户刚对你说\n第一句/.test(request.prompt)).length, 1);
+    assert.ok(!(await items('lead')).some(item => item.text.startsWith('这一句很长')));
+    assert.deepEqual((await env.post('lead/stop', { run })).body, { stopped: false });
+  } finally { await close(); }
+});
+
+test('停止 while 领航 is looking into a project: the look is its last step', { timeout: 120_000 }, async () => {
+  const { llm, env, talk, items, close } = await setup((prompt, results) => results ? '看完了。'
+    : [['run_command', { conversation: /- (\w+) 【app】/.exec(prompt)[1], command: 'sleep 2; echo seen' }]]);
+  try {
+    const conversation = await talk('hello');
+    await until(() => lastTurn(env, conversation), value => value.status === 'done', 'turn');
+    await env.post('lead/messages', { text: '去看看' });
+    const looking = await until(() => env.get('lead'), value => value.body.step, 'the look');
+    assert.deepEqual((await env.post('lead/stop', { run: looking.body.run })).body, { stopped: true });
+    const [note] = await until(() => items('note'), value => value.length === 1, 'the stop');
+    assert.equal(note.text, '你让我停下了，这一轮到此为止');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    assert.deepEqual(await items('lead'), []);
+    assert.equal(llm.requests.filter(request => request.results).length, 0);
+    assert.equal((await env.get('lead')).body.working, null);
   } finally { await close(); }
 });
 

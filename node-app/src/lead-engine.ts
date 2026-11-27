@@ -16,6 +16,8 @@ export interface ToolCall { readonly name: string; readonly input: Record<string
 export interface Image { readonly data: string; readonly mimeType: string }
 
 export class EngineError extends Error {}
+/** The run was stopped from outside (`signal`): it ends there and is not carried on. */
+export class StoppedError extends EngineError {}
 
 export interface RunOptions {
   readonly llm: SystemLLMConfig;
@@ -29,6 +31,8 @@ export interface RunOptions {
   /** Performs a call. `end`: the run is over with it, the model is not asked again. */
   call(call: ToolCall): Promise<{ output: string; end?: boolean }>;
   readonly limitMs: number;
+  /** Stops the run the way its time limit does. */
+  readonly signal?: AbortSignal;
   /** What the model has written so far in the message it is on. */
   onText?(text: string): void;
   onTool?(call: ToolCall): void;
@@ -138,10 +142,14 @@ export async function run(options: RunOptions): Promise<{ text: string; ended: b
   });
   let late = false;
   const timer = setTimeout(() => { late = true; void session?.abort(); }, options.limitMs);
+  const stop = (): void => { void session?.abort(); };
+  options.signal?.addEventListener('abort', stop, { once: true });
   try {
+    if (options.signal?.aborted) throw new StoppedError('停下了');
     const images = (options.images ?? []).map(image => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));
     await session.prompt(options.prompt, images.length ? { images } : undefined);
     if (ended) return { text: '', ended: true };
+    if (options.signal?.aborted) throw new StoppedError('停下了');
     if (late) throw new EngineError('看了 ' + Math.round(options.limitMs / 60_000) + ' 分钟还没有定下来');
     const last = session.messages.at(-1);
     if (!last || last.role !== 'assistant') throw new EngineError('模型没有回答');
@@ -153,6 +161,7 @@ export async function run(options: RunOptions): Promise<{ text: string; ended: b
     throw error instanceof EngineError ? error : new EngineError(message(error));
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', stop);
     session.dispose();
   }
 }
