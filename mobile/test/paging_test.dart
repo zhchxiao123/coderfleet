@@ -86,4 +86,16 @@ void main() {
     expect(find.text('回答 26'), findsOneWidget);
     await teardown(tester);
   });
+
+  testWidgets('a conversation shorter than the screen starts at the top', (tester) async {
+    final backend = FakeBackend();
+    final chat = backend.conversation('coderfleet', '短对话')['id'] as String;
+    backend.addTurn(chat, {'prompt': '只有一句', 'answer': '好的', 'blocks': [{'kind': 'text', 'text': '好的'}]});
+    await pumpApp(tester, backend);
+    await tester.tap(find.text('短对话'));
+    await settle(tester);
+    final height = tester.view.physicalSize.height / tester.view.devicePixelRatio;
+    expect(tester.getTopLeft(find.text('只有一句')).dy, lessThan(height / 3));
+    await teardown(tester);
+  });
 }

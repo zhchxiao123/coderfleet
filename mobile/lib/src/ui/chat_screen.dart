@@ -251,15 +251,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   if (feed.error != null)
                     Container(width: double.infinity, color: palette.amber.withValues(alpha: 0.12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                         child: Text('连接中断，正在重连…', style: TextStyle(color: palette.amber, fontSize: 13))),
-                  Expanded(child: ListView.builder(
-                    reverse: true, keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag, padding: const EdgeInsets.only(top: 8),
+                  // A conversation shorter than the screen starts at the top; a longer one stays at its end.
+                  Expanded(child: Align(alignment: Alignment.topCenter, child: ListView.builder(
+                    reverse: true, shrinkWrap: true, keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag, padding: const EdgeInsets.only(top: 8),
                     itemCount: turns.length + (feed.earlier > 0 ? 1 : 0),
                     // Above the oldest turn held: reaching it fetches the ones before.
                     itemBuilder: (context, index) => index == turns.length ? _Earlier(key: ValueKey('earlier-${turns.last.id}'), onShown: feed.loadEarlier) : TurnView(
                       key: ValueKey(turns[index].id), turn: turns[index], client: widget.client, images: images, onChanged: () => feed.poke(),
                       canTranslate: translatable, onFork: _openFork,
                     ),
-                  )),
+                  ))),
                 ]);
               })),
         if (feed != null) ListenableBuilder(listenable: feed, builder: (context, _) => _composer(palette, feed.activeTurn, feed.followUps)) else _composer(palette, null, const []),
