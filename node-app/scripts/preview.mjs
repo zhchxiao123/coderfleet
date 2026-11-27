@@ -1,19 +1,21 @@
 // Development preview: runs a backend against a fake Docker with sample
 // accounts, projects and conversations, and serves the renderer in a normal
 // browser with an HTTP transport in place of Electron's preload.
-//   node scripts/preview.mjs [port]
+//   node scripts/preview.mjs [port] [--lead]
+// --lead: 领航 is started, with a scripted stand-in for the system model.
 import { readFile } from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { fakeAgy, fakeClaude, fakeCodex } from '../test/fakes.mjs';
-import { environment, lastTurn, until } from '../test/helpers.mjs';
+import { environment, lastTurn, systemModel, until } from '../test/helpers.mjs';
 
 const ui = fileURLToPath(new URL('../ui/', import.meta.url));
 
 /** Starts the demo backend and UI server; resolves to { url, close }. */
-export async function startPreview(port = 5173) {
+export async function startPreview(port = 5173, { lead = false } = {}) {
 const env = await environment({
   bins: { agy: fakeAgy, claude: fakeClaude, codex: fakeCodex },
   containers: {},
@@ -52,6 +54,22 @@ process.env.FAKE_USAGE = '{"plan": "max"}\n' + JSON.stringify({ status: 200, bod
 process.env.FAKE_USAGE_CODEX = JSON.stringify({ status: 200, body: JSON.stringify({ plan_type: 'pro', rate_limit: {
   primary_window: { used_percent: 12, reset_at: Math.round(Date.now() / 1000) + 9000 }, secondary_window: { used_percent: 64, reset_at: Math.round(Date.now() / 1000) + 300000 } } }) });
 for (const name of ['claude-work', 'codex-team']) await env.post('accounts/' + name + '/usage');
+
+// 领航 with a scripted system model: it looks before approving, hands a job's merge and any choice to the user.
+let model;
+if (lead) {
+  model = await systemModel((prompt, results, body) => {
+    const names = body.tools.map(tool => tool.name);
+    const event = prompt.split('## 现在要你处理的事\n')[1] ?? '';
+    return names.includes('approve') ? (results ? [['approve', { reason: '只是跑检查，没有删除也没有推送' }]] : [['run_command', { command: 'git status --short | head -5; ls' }]])
+      : names.includes('accept_job') ? [['ask_user', { question: '做完了，复审也过了，要不要收下并合并？', lean: '改动不大，我看可以收下；合并是大事，这次先问你。' }]]
+      : names.includes('start_work') ? '现在这样：\n\n- **请运行检查并修复**（coderfleet）：在做，刚才要跑检查，我批了\n- **给启动流程补上集成测试**：有一条标准拿不准，卡片在上面\n- **端口改成读环境变量**：做完了，等你点头合并\n\n别的都停着，不需要你。'
+      : names.includes('ask_user') ? [['ask_user', { question: '它有一条标准拿不准，要你定', lean: /测试/.test(event) ? '我倾向先只测启动成功这一条。' : '' }]]
+      : '我看一下。';
+  }, { pace: 60 });
+  appendFileSync(join(env.workspace, 'config.conf'), 'SYSTEM_LLM_API_KEY=sk-demo\nSYSTEM_LLM_MODEL=demo-model\nSYSTEM_LLM_BASE_URL=http://127.0.0.1:' + model.port + '\n');
+  await env.put('lead/settings', { enabled: true });
+}
 
 const say = async (projectId, prompts, account) => {
   const conversation = (await env.post('conversations', { projectId, account })).body.id;
@@ -98,6 +116,15 @@ await say('coderfleet', ['请帮我梳理一下服务启动流程', '请修改�
   await env.put('schedules/' + off.id, { enabled: false });
 }
 await say('coderfleet', ['请运行检查并修复'], 'claude-work');
+
+if (lead) {
+  // One approval for it to settle: it looks first, then lets it through.
+  const conversation = (await env.post('conversations', { projectId: 'coderfleet', account: 'claude-work', name: '跑一遍检查' })).body.id;
+  await env.post('conversations/' + conversation + '/turns', { prompt: 'tool' });
+  await until(() => env.get('lead'), value => value.body.items.length >= 3 && value.body.working === null, 'lead demo');
+  await env.post('lead/messages', { text: '现在都在忙什么' });
+  await until(() => env.get('lead'), value => value.body.items.at(-1)?.type === 'lead' && value.body.working === null, 'lead answer');
+}
 
 const token = 'synthetic-node-test-token-0000000';
 const backendPort = JSON.parse(await readFile(join(env.root, 'config.json'), 'utf8')).port;
@@ -158,12 +185,12 @@ const server = createServer(async (request, response) => {
 await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
 return {
   url: 'http://127.0.0.1:' + port + '/', env,
-  close: async () => { await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); await env.close(); },
+  close: async () => { await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); await env.close(); model?.close(); },
 };
 }
 
 if (process.argv[1] && import.meta.url === new URL('file://' + process.argv[1]).href) {
-  const preview = await startPreview(Number(process.argv[2] || 5173));
+  const preview = await startPreview(Number(process.argv.slice(2).find(value => /^\d+$/.test(value)) || 5173), { lead: process.argv.includes('--lead') });
   console.log('Preview on ' + preview.url);
   process.on('SIGINT', async () => { await preview.close(); process.exit(0); });
   await sleep(2 ** 31 - 1);

@@ -123,6 +123,7 @@
       const [overview, projects, accounts, conversations] = await Promise.all(['overview', 'projects', 'accounts', 'conversations'].map(path => CF.get(path)));
       Object.assign(CF.state, { overview, projects, accounts, conversations, connected: true });
       CF.activity.refresh();
+      void CF.lead.watch();
     } catch (error) {
       const profile = CF.state.profiles.find(item => item.id === id);
       const [summary, ...details] = CF.errorText(error).split('\n\n');
@@ -229,7 +230,7 @@
     }
     if ((event.metaKey || event.ctrlKey) && event.key === '\\') { event.preventDefault(); CF.app.toggleSidebar(); }
     if ((event.metaKey || event.ctrlKey) && event.key === ',') { event.preventDefault(); CF.app.go({ name: 'settings' }); }
-    if (event.key === 'Escape' && CF.state.view.name !== 'chat' && !document.querySelector('dialog[open], .menu')
+    if (event.key === 'Escape' && !['chat', 'lead'].includes(CF.state.view.name) && !document.querySelector('dialog[open], .menu')
       && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) CF.app.closeSettings();
   });
 
@@ -238,6 +239,8 @@
     // A job (做完为止) shows its own state: blue working, amber waiting for you, green ready to review.
     const jobDot = item.job && CF.job.dot(item.job);
     if (jobDot) return jobDot;
+    // Followed and at work: what it stops on goes to 领航 first.
+    if (item.lead && ['starting', 'running'].includes(item.status)) return h('span.lead-tag.live', { title: '领航在跟' }, CF.icon('spark', 11), '在跟');
     if (item.status === 'queued') return h('span.dot', { title: '在原服务里排队' });
     if (['starting', 'running'].includes(item.status)) return h('span.dot.busy', { title: '进行中' });
     if (item.status === 'failed') return h('span.dot.failed', { title: '失败' });
@@ -411,7 +414,7 @@
       ]));
     if (!connected) backendButton.append(h('span.dot.failed'));
     rail.replaceChildren(
-      item('home', '对话', view.name === 'chat', () => { if (view.name !== 'chat') CF.app.closeSettings(); }),
+      item('home', '对话', ['chat', 'lead'].includes(view.name), () => { if (!['chat', 'lead'].includes(view.name)) CF.app.closeSettings(); }),
       item('clock', '定时', view.name === 'schedules', () => CF.app.go({ name: 'schedules' })),
       item('folder', '项目', view.name === 'projects', () => CF.app.go({ name: 'projects' })),
       item('user', '账号', view.name === 'accounts', () => CF.app.go({ name: 'accounts' })),
@@ -426,7 +429,13 @@
     const { view, conversations } = CF.state;
     renderWinbar();
     renderRail();
-    const waiting = conversations.filter(item => item.attention);
+    // What waits in a conversation 领航 follows is counted on 领航's row.
+    const waiting = conversations.filter(item => item.attention && !item.lead);
+    const lead = CF.state.lead;
+    const leadRow = lead ? h('button.lead-row' + (view.name === 'lead' ? '.selected' : ''), { on: { click: () => CF.app.go({ name: 'lead' }) } },
+      h('span.mark', CF.icon('spark', 15)),
+      h('span.lines', h('strong', '领航'), h('small', !lead.enabled ? '还没开始' : lead.waiting ? lead.waiting + ' 件等你回' : '都在它手里')),
+      lead.waiting ? h('span.count', String(lead.waiting)) : null) : null;
     const attention = waiting.length ? h('button.attention-row', {
       title: waiting.map(item => item.name).join('\n'),
       on: { click: () => {
@@ -453,6 +462,7 @@
         h('div.workspace-head', CF.brandMark(), h('div.names', h('strong', 'CoderFleet'))),
         newChat,
         h('label.search', CF.icon('search', 14), search, h('span.kbd', CF.transport?.platform === 'darwin' ? '⌘K' : 'Ctrl K'))),
+      leadRow,
       attention,
       h('div.sidebar-scroll',
         conversationsHost),
@@ -479,6 +489,7 @@
     else if (view.name === 'accounts') CF.accounts.mount(container);
     else if (view.name === 'settings') void CF.settings.mount(container);
     else if (view.name === 'schedules') CF.schedules.mount(container);
+    else if (view.name === 'lead') CF.lead.mount(container);
     if (scrollTop) { const page = container.querySelector('.page'); if (page) page.scrollTop = scrollTop; }
   }
 

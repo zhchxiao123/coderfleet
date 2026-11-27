@@ -110,6 +110,7 @@
     }, toolGlyph(tool.status), h('span.label', tool.title),
       detail ? h('span.detail', detail) : null,
       tool.status === 'completed' ? null : h('span.tool-state', state.label),
+      turn.lead?.tools?.includes(tool.id) ? h('span.by-lead', '领航批准') : null,
       h('span.chev', CF.icon('chevron', 11)));
     node.append(row);
     if (open) node.append(toolPanel(turn, tool));
@@ -243,7 +244,7 @@
     blocks.forEach((block, index) => {
       if (block.kind === 'tool') { const tool = byId.get(block.id); if (tool) group.push(tool); return; }
       flush();
-      if (block.kind === 'user') { nodes.push(userBubble(turn.projectId, block.text, block.images, '插话')); return; }
+      if (block.kind === 'user') { nodes.push(userBubble(turn.projectId, block.text, block.images, turn.lead?.messages?.includes(block.text) ? '领航 替你回' : '插话')); return; }
       if (!block.text.trim()) return;
       const key = turn.id + ':' + index;
       let stream = streams?.get(key);
@@ -428,13 +429,17 @@
       h('span.shimmer', '正在翻译成中文' + (state.total > 1 ? '（' + state.done + '/' + state.total + ' 段）' : '') + '…'));
   }
 
+  /** Whether 领航 still has this turn's card: it follows the conversation and has not handed it to the user. */
+  const watched = turn => { const record = CF.findConversation(turn.conversationId); return Boolean(record?.lead && !record.attention); };
+
   function turnNode(turn) {
     const node = h('div.turn' + (turn.inherited ? '.inherited' : ''),
-      turn.checkRound || turn.role ? CF.job.systemLine(turn) : userBubble(turn.projectId, turn.prompt, turn.images),
+      turn.checkRound || turn.role ? CF.job.systemLine(turn) : userBubble(turn.projectId, turn.prompt, turn.images, turn.lead?.prompt ? '领航 替你回' : null),
       translationStatus(turn),
       body(turn),
       turnActions(turn),
       turn.permission ? approvalCard(turn) : null,
+      turn.permission && watched(turn) ? h('div.turn-note', CF.icon('spark', 12), '领航在看这件事；你直接定也行，先到的算数。') : null,
       isActive(turn) && !turn.permission ? h('div.running-status', h('span.orb'), h('span.shimmer', { dataset: { text: STATUS[turn.status] } }, STATUS[turn.status])) : null,
       turn.status === 'cancelled' ? h('div.turn-note', CF.icon('square', 12), '已中断') : null,
       turn.status === 'queued' ? h('div.turn-note', CF.icon('dash', 12), '在原服务里排队，还没有运行') : null,
@@ -444,7 +449,7 @@
   }
 
   /** Everything a turn's node depends on except how much text has arrived. */
-  const shape = turn => [turn.status, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
+  const shape = turn => [turn.status, turn.permission?.id || '', turn.error || '', JSON.stringify(turn.lead ?? ''), watched(turn) ? 1 : 0, (turn.blocks || []).length,
     textBlocks(turn).map(([index]) => translations.get(turn.id + ':' + index)?.showing ? 1 : 0).join(''), translateReady.get(CF.state.backendId) ? 1 : 0,
     JSON.stringify(translating.get(turn.id) ?? null),
     turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
@@ -709,6 +714,10 @@
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';
         const ready = info?.state === 'running';
         const record = CF.findConversation(current.conversationId);
+        followButton.hidden = !(record && CF.state.lead?.enabled && CF.state.lead.configured);
+        followButton.classList.toggle('on', Boolean(record?.lead));
+        followButton.title = record?.lead ? '这个对话停下来等人的时候，先由领航来定。点一下改成我自己来' : '这个对话只找你。点一下交给领航来跟';
+        followButton.replaceChildren(CF.icon('spark', 13), record?.lead ? '领航在跟' : '我自己来');
         // `account` empty: the project no longer holds the account this conversation used.
         // (A backend from before projects held several accounts does not say; there the types are compared.)
         current.readOnly = Boolean(record && info && (record.account === undefined ? record.type && record.type !== info.type : !record.account && record.type));
@@ -1123,7 +1132,13 @@
           say: async text => { textarea.value = text; updateComposer(); await send(); },
         });
       };
-      const topbar = h('div.topbar', title, meta, h('div.spacer'), jobButton, projectId ? filesButton : null, more);
+      // 领航在跟 / 我自己来: who gets what this conversation stops on. Only there once 领航 has been started.
+      const followButton = h('button.follow-toggle', { hidden: true, on: { click: () => CF.busy(followButton, async () => {
+        const record = CF.findConversation(current.conversationId);
+        await CF.api('PUT', 'conversations/' + current.conversationId + '/lead', { follow: !record?.lead });
+        await CF.app.refreshConversations();
+      }) } });
+      const topbar = h('div.topbar', title, meta, h('div.spacer'), followButton, jobButton, projectId ? filesButton : null, more);
       // The title row sits in the window bar, above the sidebar and the page.
       CF.app.setBar(topbar);
       container.replaceChildren(chatRow);

@@ -22,6 +22,11 @@ cpSync(join(root, 'node_modules', '@opencode-ai', 'sdk', 'dist'), join(root, 'di
   recursive: true, filter: source => !/\.d\.ts$|\.map$/.test(source),
 });
 
+// pi's agent loop, which 领航 runs on in the backend: the package's own bundle, which needs nothing from node_modules.
+const pi = join(root, 'dist', 'vendor', 'pi');
+cpSync(join(root, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle'), pi, { recursive: true, filter: source => !/\.map$/.test(source) });
+cpSync(join(root, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json'), join(pi, 'package.json'));
+
 // xterm.js for the in-App terminal (loaded by the renderer as a classic script).
 const ui = join(root, 'ui', 'vendor');
 rmSync(ui, { recursive: true, force: true });

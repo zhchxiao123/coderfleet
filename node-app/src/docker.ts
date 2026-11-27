@@ -79,6 +79,18 @@ export async function execText(dockerPath: string, container: string, argv: stri
   return stdout;
 }
 
+/** Runs a shell command in a directory of the container; answers with everything it printed and, when it failed, how it ended. */
+export async function shellText(dockerPath: string, container: string, directory: string, command: string, timeout = 120_000): Promise<string> {
+  try {
+    const { stdout, stderr } = await run(dockerPath, ['exec', container, 'bash', '-c', 'cd ' + quote(directory) + ' && ' + command], { timeout, maxBuffer: 4_000_000 });
+    return (stdout + (stderr ? '\n' + stderr : '')).trim();
+  } catch (error) {
+    const failed = error as { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown };
+    const output = [failed.stdout, failed.stderr].filter((value): value is string => typeof value === 'string' && value !== '').join('\n').trim();
+    return (output ? output + '\n' : '') + (failed.killed ? '（超过 ' + Math.round(timeout / 1000) + ' 秒，被停下了）' : '（退出码 ' + String(failed.code ?? '未知') + '）');
+  }
+}
+
 /** True when `pid` in the container is still the worker for this Task. */
 export async function workerAlive(dockerPath: string, container: string, pid: number, taskId: string): Promise<boolean> {
   const check = 'tr "\\0" "\\n" < /proc/' + pid + '/environ 2>/dev/null | grep -qx ' + quote('CODERFLEET_TASK_ID=' + taskId);

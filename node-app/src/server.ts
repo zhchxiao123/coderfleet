@@ -12,12 +12,13 @@ import {
   addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type Account, type WorkspaceProject, projectAs, setProjectAccounts, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts, defaultProjectImage, projectImage, readProjectDockerfile, setProjectImage, writeProjectDockerfile,
 } from './conf.js';
 import { projectMounts } from './compose.js';
-import { assertContainer, codexModels, models } from './docker.js';
+import { assertContainer, codexModels, models, shellText } from './docker.js';
 import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
 import { acceptPrompt, CHECK_ROUNDS, closedNote, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { HELPER_ANSWERS, HELPER_CARD, HelperHost, type HelperPending } from './helper-host.js';
+import { Lead, LeadError } from './lead.js';
 import { Lifecycle } from './lifecycle.js';
 import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
@@ -96,6 +97,8 @@ const DEVICE_ROUTES: readonly [string, RegExp][] = [
   ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[^/]+$/],
   ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['GET', /^turns\/[\w-]+\/files$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
   ['GET', /^system-llm$/], ['POST', /^translate$/],
+  // 领航: its thread, the user's words and answers to it, and who keeps a conversation. Its switch stays on the computer.
+  ['GET', /^lead$/], ['GET', /^lead\/changes$/], ['POST', /^lead\/(messages|asks\/[\w-]+|undo\/[\w-]+)$/], ['PUT', /^conversations\/[\w-]+\/lead$/],
 ];
 export function deviceAllowed(method: string, path: string): boolean {
   return DEVICE_ROUTES.some(([allowed, pattern]) => allowed === method && pattern.test(path));
@@ -235,7 +238,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const schedules = new Schedules(config.stateDirectory);
   schedules.recover();
   /** The conversation list (desktop and phone change feed). `latest`, when given, receives each conversation's newest turn. */
-  const conversationList = (archived = false, latest?: Map<string, { id: string; finishedAt: string }>) => {
+  const conversationList = (archived = false, latest?: Map<string, { id: string; finishedAt: string }>, own = false) => {
     // Like the Python service (Conversation.touch at a task's start and end): a conversation's time is
     // its latest activity — the newest turn's finish, or its start while it runs. Status is the newest turn's.
     const time = (value: string): number => Date.parse(value) || 0;
@@ -258,6 +261,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     const jobStates = new Map(jobs.list().map(job => [job.conversationId, job.state]));
     const origins = schedules.origins();
     const projects = new Map(readWorkspace(workspace).projects.map(item => [item.name, item]));
+    const followed = lead.follows();
+    const asked = lead.asking();
     return store.conversations({ archived }).map(item => {
       const summary = summaries.get(item.id);
       const owner = projects.get(item.projectId);
@@ -265,11 +270,16 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         // The account its next turn runs as; '' when the project no longer holds one for it (it can only be read).
         account: (owner && conversationAccount(owner, item)?.name) ?? '',
         forkedFrom: item.fork ? { conversationId: item.fork.source_conversation_id, turnId: item.fork.source_task_id } : null,
-        updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0, attention: summary?.attention ?? false,
+        updatedAt: summary?.updatedAt || item.updatedAt || item.createdAt, status: summary?.status ?? '', turns: summary?.turns ?? 0,
+        // Waiting for the user. What stops in a conversation 领航 follows waits for 领航, until it hands it over as a card
+        // (`own`: 领航's own reading, which sees every stop).
+        attention: !own && followed(item.id) ? asked.has(item.id) : summary?.attention ?? false,
         // 做完为止: the state of the job this conversation works on ('' when it has none).
         job: jobStates.get(item.id) ?? '',
         // 定时: the rule of the schedule that started this conversation ('' when the user did).
-        schedule: origins[item.id] ?? '' };
+        schedule: origins[item.id] ?? '',
+        // 领航在跟: what stops here goes to 领航 first, not to the user.
+        lead: followed(item.id) };
     }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   };
   /** What a finished turn ended on, as one plain line for the phone's list ('' while it runs). Kept per turn: a finished turn's log is read once. */
@@ -297,7 +307,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   };
   const publicTurns = (sequence: { id: string; inherited: boolean }[]): Record<string, unknown>[] => sequence.flatMap(item => {
     const turn = store.turn(item.id);
-    return turn ? [item.inherited ? { ...publicTurn(turn), inherited: true } : publicTurn(turn)] : [];
+    if (!turn) return [];
+    // What 领航 did in the turn (started it, approved a tool, said something) is shown as its own.
+    const marks = lead.marks(turn.id);
+    return [{ ...publicTurn(turn), ...(item.inherited ? { inherited: true } : {}), ...(marks ? { lead: marks } : {}) }];
   });
   const conversationTurns = (id: string): Record<string, unknown>[] => publicTurns(turnSequence(id));
   /** Polls `check` until it returns a value, `wait` ms pass (at most 30 s), or the client goes away. */
@@ -583,6 +596,153 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       throw error;
     }
   };
+
+  /** Whether a job can be closed now; throws what stands in the way. */
+  const closable = (job: Job, verb: string): void => {
+    if (!jobOpen(job)) throw new HttpError(409, '这件事已经' + (job.state === 'accepted' ? '收下' : '丢弃') + '了');
+    if (turnsOf(job.conversationId).some(active) || followUps.list(job.conversationId).length) throw new HttpError(409, '它还在做，先停下再' + verb);
+  };
+  /**
+   * Accepting is a message to the agent: it merges the branch where it belongs (or asks),
+   * and the job is closed once that is seen to be done.
+   */
+  const acceptJob = async (conversationId: string): Promise<Turn> => {
+    const { job } = jobOf(conversationId);
+    closable(job, '收下');
+    const conversation = store.conversation(job.conversationId);
+    if (!conversation) throw new HttpError(404, 'Conversation not found');
+    if (job.state === 'working') throw new HttpError(409, '它还在做，先停下再收下');
+    const model = turnsOf(job.conversationId).findLast(item => item.role !== 'review')?.requestedModel ?? '';
+    return startTurn(conversation, { text: acceptPrompt(job), images: [], model, auto: true }, { role: 'accept' });
+  };
+  /**
+   * A message to a conversation: a new turn when nothing runs; into the running turn when its agent
+   * takes messages mid-turn (Claude); otherwise queued as the next turn.
+   */
+  const sendMessage = async (conversation: Conversation, input: { prompt: string; model: string; images: string[]; auto: boolean; job: boolean }):
+  Promise<{ delivered: 'turn' | 'message'; turn: Record<string, unknown> } | { delivered: 'queued'; followUp: FollowUp }> => {
+    const { prompt, model, images } = input;
+    // Writing in an archived conversation brings it back to the list.
+    if (conversation.archived && (prompt || images.length)) store.setArchived(conversation.id, false);
+    if ((!prompt && !images.length) || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
+    const message_ = { text: prompt, images, auto: input.auto, model };
+    const running = turnsOf(conversation.id).find(active);
+    // { job: true }: 做完为止. This message opens a worktree and branch for the conversation,
+    // new or already going (its agent session is resumed there), also after an earlier job of
+    // it was closed. While a job is open the message just goes to it.
+    const last = jobs.get(conversation.id);
+    if (input.job && !(last && jobOpen(last))) {
+      if (running) throw new HttpError(409, '等这一轮结束，再开「做完为止」');
+      return { delivered: 'turn', turn: publicTurn(await startJob(conversation, message_)) };
+    }
+    if (!running) return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_)) };
+    // A reviewer's turn takes no messages: what the user says waits for the author.
+    if (running.role !== 'review' && running.controlReady && running.capabilities?.includes('message') && !running.cancelRequested) {
+      try {
+        await runner.message(running, { text: prompt, images });
+        titles.observeMessage(running, prompt, randomUUID());
+        return { delivered: 'message', turn: publicTurn(running) };
+      } catch { /* the run is finishing: queue it as the next turn instead */ }
+    }
+    try { return { delivered: 'queued', followUp: followUps.add(conversation.id, message_) }; }
+    catch (error) { throw new HttpError(409, message(error)); }
+  };
+  /** The answer to what a turn waits for: an approval, the agent's question, or the machine helper's card. */
+  const answerPermission = async (turn: Turn, input: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const key = identifier(input.id);
+    if (!turn.permission || turn.permission.id !== key) throw new HttpError(409, 'This approval is no longer available');
+    if (key.startsWith(HELPER_CARD)) {
+      // The machine helper's card: the answer goes to the helper, which holds the call until then.
+      const answer = Object.values(record(input.answers)).map(text)[0] || (input.decision === 'allow' ? HELPER_ANSWERS[0]?.label : input.decision === 'deny' ? '拒绝' : '');
+      if (!answer) throw new HttpError(400, 'Answer the question first');
+      // Anything that is not one of the two ways to allow is a refusal.
+      const decision = HELPER_ANSWERS.find(item => item.label === answer)?.decision ?? 'deny';
+      try { await helper.decide(key.slice(HELPER_CARD.length), decision); }
+      catch (error) { throw new HttpError(409, message(error)); }
+      if (turn.permission?.id === key) { delete turn.permission; store.saveTurn(turn); }
+      return { accepted: true, decision };
+    }
+    if (turn.permission.questions) {
+      const answers = Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)]));
+      if (!Object.keys(answers).length) throw new HttpError(400, 'Answer the question first');
+      try { await runner.decide(turn, key, { answers }); }
+      catch (error) { throw new HttpError(409, message(error)); }
+    } else {
+      const decision = input.decision;
+      if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'Invalid approval decision');
+      if (decision === 'allow' && !turn.permission.allow) throw new HttpError(409, 'This approval is no longer available');
+      try { await runner.decide(turn, key, { decision }); }
+      catch (error) { throw new HttpError(409, message(error)); }
+    }
+    return { accepted: true };
+  };
+
+  // 领航 acts through the functions the App's and the phone's requests call.
+  const leadCall = async <T>(run: () => Promise<T>): Promise<T> => {
+    try { return await run(); } catch (error) {
+      if (error instanceof LeadError) throw new HttpError(409, error.message);
+      throw error;
+    }
+  };
+  const leadConversation = (id: string): Conversation => {
+    const conversation = store.conversation(id);
+    if (!conversation) throw new LeadError('这个对话已经不在了');
+    return conversation;
+  };
+  const lead: Lead = new Lead(config.stateDirectory, {
+    llm: () => systemLLM(workspace),
+    conversations: () => {
+      const latest = new Map<string, { id: string; finishedAt: string }>();
+      return conversationList(false, latest, true).map(item => ({ id: item.id, projectId: item.projectId, name: item.name, status: item.status, attention: item.attention, job: item.job, account: item.account, last: latest.get(item.id) }));
+    },
+    turns: turnsOf,
+    liveTurns: () => store.liveTurns(),
+    job: id => { const job = jobs.get(id); return job && jobOpen(job) ? { job, criteria: criteria(jobTurns(job)) } : undefined; },
+    changes: async id => { const { job, target } = jobOf(id); return jobs.changes(target, job); },
+    answer: async (turnId, input) => {
+      const turn = store.turn(turnId);
+      if (!turn || !active(turn)) throw new LeadError('这一轮已经结束了');
+      await answerPermission(turn, input);
+    },
+    send: async (id, words) => {
+      const conversation = leadConversation(id);
+      // As the conversation's own last message was sent: the same model, tools asked for or not.
+      const last = turnsOf(id).findLast(turn => !turn.checkRound && !turn.role);
+      const sent = await sendMessage(conversation, { prompt: words, model: last?.requestedModel ?? '', images: [], auto: last?.auto === true, job: false });
+      return sent.delivered === 'queued' ? '' : text(sent.turn.id);
+    },
+    accept: async id => (await acceptJob(id)).id,
+    stop: async turnId => {
+      const turn = store.turn(turnId);
+      if (!turn || !active(turn)) throw new LeadError('这一轮已经结束了');
+      if (turn.origin !== 'node') throw new LeadError('这一轮由原 Python 服务运行，请在它的界面里处理');
+      await runner.cancel(turn);
+    },
+    exec: async (id, command) => {
+      const target = conversationProject(leadConversation(id));
+      await assertContainer(config.dockerPath, target);
+      const job = jobs.get(id);
+      return shellText(config.dockerPath, target.container, job && jobOpen(job) ? job.directory : '/workspace', command);
+    },
+    projects: () => readWorkspace(workspace).projects.map(item => ({
+      id: item.name, defaultAccount: defaultAccount(item)?.name ?? '',
+      accounts: item.accounts.filter(chatAccount).map(account => ({ name: account.name, type: account.type, used: usedMost(account) })),
+    })).filter(item => item.accounts.length),
+    start: async (projectId, account, words) => {
+      const target = chatProject(projectId, account);
+      if (!target) throw new LeadError('项目里没有这个账号，或它不支持对话');
+      const job = (await jobs.support(target)).supported;
+      const conversation = newConversation(target, words.split('\n')[0] ?? '');
+      try {
+        const sent = await sendMessage(conversation, { prompt: words, model: '', images: [], auto: false, job });
+        return { conversationId: conversation.id, turnId: sent.delivered === 'queued' ? '' : text(sent.turn.id), job };
+      } catch (error) {
+        // Nothing started: the empty conversation is not left behind.
+        store.deleteConversation(conversation.id);
+        throw error;
+      }
+    },
+  });
 
   // 定时
   /** Whether the item's latest run is still going: starting, a turn running or queued, or its job working. */
@@ -1094,33 +1254,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const conversation = store.conversation(identifier(id));
       if (!conversation) throw new HttpError(404, 'Conversation not found');
       const input = await body(request);
-      const prompt = text(input.prompt).trim();
-      const model = text(input.model).trim();
-      const images = uploads(conversation.projectId, input.images);
-      // Writing in an archived conversation brings it back to the list.
-      if (conversation.archived && (prompt || images.length)) store.setArchived(conversation.id, false);
-      if ((!prompt && !images.length) || prompt.length > 60_000 || model.length > 180) throw new HttpError(400, 'Invalid prompt or model');
-      const message_ = { text: prompt, images, auto: input.auto === true, model };
-      const running = turnsOf(conversation.id).find(active);
-      // { job: true }: 做完为止. This message opens a worktree and branch for the conversation,
-      // new or already going (its agent session is resumed there), also after an earlier job of
-      // it was closed. While a job is open the message just goes to it.
-      const last = jobs.get(conversation.id);
-      if (input.job === true && !(last && jobOpen(last))) {
-        if (running) throw new HttpError(409, '等这一轮结束，再开「做完为止」');
-        return { delivered: 'turn', turn: publicTurn(await startJob(conversation, message_)) };
-      }
-      if (!running) return { delivered: 'turn', turn: publicTurn(await startTurn(conversation, message_)) };
-      // A reviewer's turn takes no messages: what the user says waits for the author.
-      if (running.role !== 'review' && running.controlReady && running.capabilities?.includes('message') && !running.cancelRequested) {
-        try {
-          await runner.message(running, { text: prompt, images });
-          titles.observeMessage(running, prompt, randomUUID());
-          return { delivered: 'message', turn: publicTurn(running) };
-        } catch { /* the run is finishing: queue it as the next turn instead */ }
-      }
-      try { return { delivered: 'queued', followUp: followUps.add(conversation.id, message_) }; }
-      catch (error) { throw new HttpError(409, message(error)); }
+      return sendMessage(conversation, { prompt: text(input.prompt).trim(), model: text(input.model).trim(), images: uploads(conversation.projectId, input.images), auto: input.auto === true, job: input.job === true });
     }],
     // 做完为止: the job of a conversation, what it changed, and its two endings (accept: the agent is asked to merge).
     ['GET', /^jobs$/, async () => jobs.list().map(job => ({ ...job, conversation: store.conversation(job.conversationId)?.name ?? '' }))],
@@ -1139,19 +1273,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return jobCall(() => jobs.changes(target, job));
     }],
     ['POST', /^conversations\/([\w-]+)\/job\/(accept|discard)$/, async (_request, [id, action]) => {
+      if (action === 'accept') { await acceptJob(id as string); return { job: jobs.get(identifier(id)) }; }
       const { job, target } = jobOf(id as string);
-      if (!jobOpen(job)) throw new HttpError(409, '这件事已经' + (job.state === 'accepted' ? '收下' : '丢弃') + '了');
-      if (turnsOf(job.conversationId).some(active) || followUps.list(job.conversationId).length) throw new HttpError(409, '它还在做，先停下再' + (action === 'accept' ? '收下' : '丢弃'));
-      if (action === 'accept') {
-        // Accepting is a message to the agent: it merges the branch where it belongs (or asks),
-        // and the job is closed once that is seen to be done.
-        const conversation = store.conversation(job.conversationId);
-        if (!conversation) throw new HttpError(404, 'Conversation not found');
-        if (job.state === 'working') throw new HttpError(409, '它还在做，先停下再收下');
-        const model = turnsOf(job.conversationId).findLast(item => item.role !== 'review')?.requestedModel ?? '';
-        await startTurn(conversation, { text: acceptPrompt(job), images: [], model, auto: true }, { role: 'accept' });
-        return { job: jobs.get(job.conversationId) };
-      }
+      closable(job, '丢弃');
+
       try { await assertContainer(config.dockerPath, target); }
       catch (error) { throw new HttpError(409, message(error)); }
       return { job: await jobCall(() => jobs.discard(target, job)) };
@@ -1267,33 +1392,40 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         return { accepted: true };
       }
       if (action === 'cancel') { await runner.cancel(turn); return { accepted: true }; }
+      return answerPermission(turn, await body(request));
+    }],
+    // 领航: one thread between the user and every conversation it follows.
+    ['GET', /^lead$/, async () => lead.view()],
+    ['GET', /^lead\/changes$/, async (request, _params, url) => {
+      const since = url.searchParams.get('since') ?? '';
+      const result = await waitFor(request, url, () => {
+        const view = lead.view();
+        const etag = digest(view);
+        return etag === since ? undefined : { etag, ...view };
+      });
+      return result ?? { etag: since, unchanged: true };
+    }],
+    ['POST', /^lead\/messages$/, async request => leadCall(async () => ({ item: lead.say(text((await body(request)).text)) }))],
+    ['POST', /^lead\/asks\/([\w-]+)$/, async (request, [id]) => leadCall(async () => {
       const input = await body(request);
-      const key = identifier(input.id);
-      if (turn.permission?.id !== key) throw new HttpError(409, 'This approval is no longer available');
-      if (key.startsWith(HELPER_CARD)) {
-        // The machine helper's card: the answer goes to the helper, which holds the call until then.
-        const answer = Object.values(record(input.answers)).map(text)[0] || (input.decision === 'allow' ? HELPER_ANSWERS[0]?.label : input.decision === 'deny' ? '拒绝' : '');
-        if (!answer) throw new HttpError(400, 'Answer the question first');
-        // Anything that is not one of the two ways to allow is a refusal.
-        const decision = HELPER_ANSWERS.find(item => item.label === answer)?.decision ?? 'deny';
-        try { await helper.decide(key.slice(HELPER_CARD.length), decision); }
-        catch (error) { throw new HttpError(409, message(error)); }
-        if (turn.permission?.id === key) { delete turn.permission; store.saveTurn(turn); }
-        return { accepted: true, decision };
-      }
-      if (turn.permission.questions) {
-        const answers = Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)]));
-        if (!Object.keys(answers).length) throw new HttpError(400, 'Answer the question first');
-        try { await runner.decide(turn, key, { answers }); }
-        catch (error) { throw new HttpError(409, message(error)); }
-      } else {
-        const decision = input.decision;
-        if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'Invalid approval decision');
-        if (decision === 'allow' && !turn.permission.allow) throw new HttpError(409, 'This approval is no longer available');
-        try { await runner.decide(turn, key, { decision }); }
-        catch (error) { throw new HttpError(409, message(error)); }
-      }
+      await lead.answerAsk(identifier(id), { answer: text(input.answer), answers: Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)])) });
       return { accepted: true };
+    })],
+    ['POST', /^lead\/undo\/([\w-]+)$/, async (_request, [id]) => leadCall(async () => { await lead.undo(identifier(id)); return { accepted: true }; })],
+    // { enabled }: 领航 starts or stops handling things; { follow } on a conversation: 领航在跟 / 我自己来.
+    ['PUT', /^lead\/settings$/, async request => leadCall(async () => {
+      const input = await body(request);
+      if (typeof input.enabled !== 'boolean') throw new HttpError(400, 'Invalid setting');
+      lead.setEnabled(input.enabled);
+      return lead.view();
+    })],
+    ['PUT', /^conversations\/([\w-]+)\/lead$/, async (request, [id]) => {
+      const conversation = store.conversation(identifier(id));
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+      const input = await body(request);
+      if (typeof input.follow !== 'boolean') throw new HttpError(400, 'Invalid setting');
+      lead.setFollow(conversation.id, input.follow);
+      return { follow: input.follow };
     }],
   ];
 
@@ -1349,7 +1481,10 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       schedulesTicked = Date.now();
       try { tickSchedules(); } catch (error) { console.error('Schedules not checked:', message(error)); }
     }
-    if (Date.now() - titlesTicked > 1_000) { titlesTicked = Date.now(); titles.tick(); }
+    if (Date.now() - titlesTicked > 1_000) {
+      titlesTicked = Date.now(); titles.tick();
+      try { lead.scan(); } catch (error) { console.error('Lead scan failed:', message(error)); }
+    }
     if (Date.now() - helperSynced > 1_000) {
       helperSynced = Date.now();
       void syncHelperCards().catch(error => console.error('Helper confirmations not read:', message(error)));

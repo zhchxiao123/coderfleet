@@ -6,10 +6,11 @@
 // is the Python service's translations/<sha256(target\0text)[:32]>.json, shared.
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { loadConfig } from './conf.js';
 import { atomicJSON, record, text } from './state.js';
 
@@ -29,35 +30,27 @@ export function systemLLM(workspace: string): SystemLLMConfig {
 
 export const configured = (llm: SystemLLMConfig): boolean => Boolean(llm.apiKey && llm.model);
 
-/** POSTs JSON, through SYSTEM_LLM_PROXY (an HTTP proxy, CONNECT for HTTPS) when set. */
-function post(llm: SystemLLMConfig, url: string, headers: Record<string, string>, body: unknown): Promise<Record<string, unknown>> {
+/** Sends one request, through `proxy` (an HTTP proxy, CONNECT for HTTPS) when given; answers once the response's head is in. */
+function open(proxy: string, url: string, method: string, headers: Record<string, string>, payload: Buffer | undefined, idle: number, signal?: AbortSignal): Promise<IncomingMessage> {
   const target = new URL(url);
-  const payload = Buffer.from(JSON.stringify(body));
-  const allHeaders = { ...headers, 'content-length': String(payload.length) };
+  const allHeaders = { ...headers, ...(payload ? { 'content-length': String(payload.length) } : {}) };
   const https = target.protocol === 'https:';
   return new Promise((resolve, reject) => {
     const fail = (error: unknown): void => reject(error instanceof SystemLLMError ? error : new SystemLLMError('请求上游失败: ' + (error instanceof Error ? error.message : String(error))));
-    const finish = (response: import('node:http').IncomingMessage): void => {
-      const chunks: Buffer[] = [];
-      response.on('data', chunk => chunks.push(chunk));
-      response.on('error', fail);
-      response.on('end', () => {
-        const raw = Buffer.concat(chunks).toString('utf8');
-        if ((response.statusCode ?? 500) >= 400) { fail(new SystemLLMError('上游返回 ' + response.statusCode + ': ' + raw.slice(0, 300))); return; }
-        try { resolve(record(JSON.parse(raw))); } catch { fail(new SystemLLMError('上游响应非 JSON: ' + raw.slice(0, 200))); }
-      });
-    };
+    if (signal?.aborted) { fail(new SystemLLMError('请求已取消')); return; }
     const send = (options: Record<string, unknown>): void => {
-      const call = (https ? httpsRequest : httpRequest)({ method: 'POST', headers: allHeaders, timeout: 60_000, ...options }, finish);
+      const call = (https ? httpsRequest : httpRequest)({ method, headers: allHeaders, timeout: idle, ...options }, resolve);
       call.on('timeout', () => call.destroy(new SystemLLMError('请求上游超时')));
       call.on('error', fail);
+      // Also ends a response that is still streaming.
+      signal?.addEventListener('abort', () => call.destroy(new SystemLLMError('请求已取消')), { once: true });
       call.end(payload);
     };
     const base = { host: target.hostname, port: Number(target.port) || (https ? 443 : 80), path: target.pathname + target.search };
-    if (!llm.proxy) { send(base); return; }
-    const proxy = new URL(llm.proxy);
-    if (!https) { send({ host: proxy.hostname, port: Number(proxy.port) || 80, path: url, headers: { ...allHeaders, host: target.host } }); return; }
-    const tunnel = httpRequest({ host: proxy.hostname, port: Number(proxy.port) || 80, method: 'CONNECT', path: base.host + ':' + base.port, timeout: 30_000 });
+    if (!proxy) { send(base); return; }
+    const via = new URL(proxy);
+    if (!https) { send({ host: via.hostname, port: Number(via.port) || 80, path: url, headers: { ...allHeaders, host: target.host } }); return; }
+    const tunnel = httpRequest({ host: via.hostname, port: Number(via.port) || 80, method: 'CONNECT', path: base.host + ':' + base.port, timeout: 30_000 });
     tunnel.on('connect', (response, socket) => {
       if (response.statusCode !== 200) { socket.destroy(); fail(new SystemLLMError('代理拒绝连接: ' + response.statusCode)); return; }
       send({ ...base, createConnection: () => tlsConnect({ socket, servername: base.host }), agent: false });
@@ -66,6 +59,35 @@ function post(llm: SystemLLMConfig, url: string, headers: Record<string, string>
     tunnel.on('error', fail);
     tunnel.end();
   });
+}
+
+/** POSTs JSON, through SYSTEM_LLM_PROXY when set. */
+async function post(llm: SystemLLMConfig, url: string, headers: Record<string, string>, body: unknown): Promise<Record<string, unknown>> {
+  const response = await open(llm.proxy, url, 'POST', headers, Buffer.from(JSON.stringify(body)), 60_000);
+  const chunks: Buffer[] = [];
+  try { for await (const chunk of response) chunks.push(chunk as Buffer); }
+  catch (error) { throw error instanceof SystemLLMError ? error : new SystemLLMError('请求上游失败: ' + (error instanceof Error ? error.message : String(error))); }
+  const raw = Buffer.concat(chunks).toString('utf8');
+  if ((response.statusCode ?? 500) >= 400) throw new SystemLLMError('上游返回 ' + response.statusCode + ': ' + raw.slice(0, 300));
+  try { return record(JSON.parse(raw)); } catch { throw new SystemLLMError('上游响应非 JSON: ' + raw.slice(0, 200)); }
+}
+
+/**
+ * `fetch` through SYSTEM_LLM_PROXY, for a caller that reads the answer as it streams. The proxy
+ * is this request's alone: nothing of the process (its environment, its other requests) changes.
+ */
+export function proxyFetch(proxy: string): typeof fetch {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const payload = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+    const sent: Record<string, string> = {};
+    request.headers.forEach((value, name) => { sent[name] = value; });
+    const response = await open(proxy, request.url, request.method, sent, payload, 300_000, request.signal);
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(response.headers)) for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) headers.append(name, item);
+    const status = response.statusCode ?? 502;
+    return new Response(status === 204 || status === 304 ? null : Readable.toWeb(response) as ReadableStream<Uint8Array>, { status, statusText: response.statusMessage ?? '', headers });
+  };
 }
 
 /** One stateless completion (SystemLLM.complete). */

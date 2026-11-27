@@ -440,3 +440,62 @@ createServer(async (request, response) => {
   json(response, 200, { info: { id: 'ma', role: 'assistant' }, parts: [{ id: 'x2', type: 'text', text: answer }] });
 }).listen(port, '127.0.0.1', () => console.log('opencode server listening on http://127.0.0.1:' + port));
 `;
+
+// A Codex for both sides of a job, working in the directory it was started for.
+// As the author it does what the last line of its prompt says and answers with a line of JSON
+// about how it was started, then its criteria: `write <file> <text>` (met), `stall` (never
+// met), `ask` (the user has to decide), `fail`, anything else (no criteria). Told that it
+// listed none it lists one, met; handed a review it writes "good" to state.txt.
+// Told that the user accepted, or to \`merge\`, it commits what it has and merges its branch:
+// into \`side\` when the repository has such a branch, else into what the project has checked
+// out; when that does not merge it leaves everything as it was and asks.
+// As the reviewer it wants changes while state.txt exists and does not say "good".
+export const jobCodex = `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+const args = process.argv.slice(2);
+const cwd = args[args.indexOf('--cd') + 1];
+const sandbox = args[args.indexOf('--sandbox') + 1];
+const resumed = args.includes('resume') ? args[args.indexOf('resume') + 1] : '';
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const git = (directory, ...rest) => execFileSync('git', ['-C', directory, ...rest], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const merge = () => {
+  const root = dirname(dirname(cwd));
+  const branch = git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD');
+  git(cwd, 'add', '-A');
+  if (git(cwd, 'status', '--porcelain')) git(cwd, 'commit', '-q', '-m', 'job');
+  if (git(root, 'branch', '--list', 'side')) { git(root, 'fetch', '-q', '.', branch + ':side'); return '合并进了 side。'; }
+  try { git(root, 'merge', '-q', '--no-edit', branch); return '合并进了 ' + git(root, 'rev-parse', '--abbrev-ref', 'HEAD') + '。'; }
+  catch { git(root, 'merge', '--abort'); return '和那边现在的内容有冲突，没有合并。要合并到哪个分支？'; }
+};
+const block = (...lines) => ['\`\`\`标准', ...lines, '\`\`\`'].join('\\n');
+let prompt = '';
+process.stdin.on('data', chunk => { prompt += chunk; });
+process.stdin.on('end', () => {
+  prompt = prompt.trim();
+  const reviewing = prompt.startsWith('请核对');
+  send({ type: 'thread.started', thread_id: reviewing ? 'review-thread' : resumed || 'author-thread' });
+  send({ type: 'turn.started' });
+  const [verb, file, ...rest] = prompt.split('\\n').at(-1).split(' ');
+  let text;
+  if (reviewing) {
+    const state = join(cwd, 'state.txt');
+    const bad = existsSync(state) && !readFileSync(state, 'utf8').includes('good');
+    text = sandbox + ' ' + (bad ? block('- [ ] 写好了 —— state.txt 第 1 行应该是 good') + '\\n结论：要改' : block('- [x] 写好了 —— 看过了') + '\\n结论：通过');
+  } else {
+    if (verb === 'fail') { send({ type: 'turn.failed', error: { message: 'quota exceeded' } }); process.exit(1); }
+    if (verb === 'slow') { process.on('SIGINT', () => process.exit(130)); setInterval(() => undefined, 1000); return; }
+    let criteria = '';
+    if (prompt.startsWith('我收下') || verb === 'merge') criteria = merge();
+    else if (prompt.includes('核对了你的改动')) { writeFileSync(join(cwd, 'state.txt'), 'good\\n'); criteria = block('- [x] 写好了 —— 改成 good 了'); }
+    else if (prompt.includes('没有列出')) criteria = block('- [x] 写好了 —— 补上了');
+    else if (prompt.includes('还没有做到') || verb === 'stall') criteria = block('- [x] 开了头 —— 有文件了', '- [ ] 没做到');
+    else if (verb === 'ask') criteria = block('- [?] 用哪个端口 —— 8080 还是 8765？');
+    else if (verb === 'write') { writeFileSync(join(cwd, file), rest.join(' ') + '\\n'); criteria = block('- [x] 写好了 —— ' + file + ' 里是 ' + rest.join(' ')); }
+    text = JSON.stringify({ cwd, sandbox, resumed, preamble: prompt.includes('独立的工作目录'), continued: prompt.includes('从现在起'), ...(prompt.includes('已经删除') ? { moved: true } : {}) }) + '\\n' + criteria;
+  }
+  send({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text } });
+  send({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
+});
+`;

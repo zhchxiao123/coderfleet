@@ -69,7 +69,7 @@ Docker 在另一台机器上时，在「通用 → 后端连接 → 通过 SSH �
 ### 从源码运行
 
 ```bash
-# 桌面 App（Node.js 22.18+）
+# 桌面 App（Node.js 22.19+）
 cd node-app && npm ci && npm test && npm run desktop
 npm run package            # 打包当前平台，产物在 out/
 

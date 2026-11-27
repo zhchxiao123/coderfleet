@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -204,4 +204,55 @@ export async function environment({ accounts = '', projects = (project) => '', b
 
 export async function lastTurn(env, conversation) {
   return (await env.get('conversations/' + conversation + '/turns')).body.at(-1);
+}
+
+// A stand-in for the system model (Anthropic Messages). `script(prompt, results, body)`: `prompt`
+// is the run's first message, `results` what the tool calls of the step before printed
+// (undefined on a run's first step). It answers with tool calls ([name, input]) or a sentence;
+// throwing makes the request fail. A streamed request (领航's) gets the answer as events, the
+// sentence in pieces `pace` ms apart; any other gets it whole. Requests without tools (naming
+// a conversation) are put off and not recorded.
+export async function systemModel(script, { pace = 0 } = {}) {
+  const requests = [];
+  const words = content => typeof content === 'string' ? content : content.filter(block => block.type === 'text').map(block => block.text).join('');
+  const server = createHttpServer((request, response) => {
+    let raw = '';
+    request.on('data', chunk => { raw += chunk; });
+    request.on('end', async () => {
+      const body = JSON.parse(raw);
+      if (!body.tools?.length) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ stop_reason: 'end_turn', content: [{ type: 'text', text: '__DEFER__' }] })); return; }
+      const last = body.messages.at(-1).content;
+      const results = Array.isArray(last) && last.some(block => block.type === 'tool_result') ? last.filter(block => block.type === 'tool_result').map(block => words(block.content)) : undefined;
+      const prompt = words(body.messages[0].content);
+      requests.push({ prompt, results, body });
+      let said;
+      try { said = script(prompt, results, body); }
+      catch { response.writeHead(500, { 'content-type': 'application/json' }); response.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'down' } })); return; }
+      const content = typeof said === 'string' ? [{ type: 'text', text: said }]
+        : said.map(([name, input], index) => ({ type: 'tool_use', id: 'call-' + requests.length + '-' + index, name, input }));
+      const stop_reason = typeof said === 'string' ? 'end_turn' : 'tool_use';
+      if (!body.stream) { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ stop_reason, content })); return; }
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const send = (type, data) => response.write('event: ' + type + '\ndata: ' + JSON.stringify({ type, ...data }) + '\n\n');
+      send('message_start', { message: { id: 'msg-' + requests.length, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } });
+      for (const [index, block] of content.entries()) {
+        if (block.type === 'text') {
+          send('content_block_start', { index, content_block: { type: 'text', text: '' } });
+          for (const piece of block.text.match(/[\s\S]{1,6}/g) ?? []) {
+            if (pace) await new Promise(resolve => setTimeout(resolve, pace));
+            send('content_block_delta', { index, delta: { type: 'text_delta', text: piece } });
+          }
+        } else {
+          send('content_block_start', { index, content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} } });
+          send('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } });
+        }
+        send('content_block_stop', { index });
+      }
+      send('message_delta', { delta: { stop_reason }, usage: { output_tokens: 1 } });
+      send('message_stop', {});
+      response.end();
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  return { requests, port: server.address().port, close: () => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }) };
 }
