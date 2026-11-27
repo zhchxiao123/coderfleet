@@ -23,6 +23,8 @@
 
   function link(href, children) {
     // Only web links are clickable; file and other schemes stay plain text. The desktop shell opens them in the system browser.
+    // conv:<id> names a conversation; whoever shows the text decides what it opens (领航 does).
+    if (/^conv:[\w-]+$/.test(href)) return h('span', { dataset: { conv: href.slice(5) } }, children);
     if (!/^https?:\/\//i.test(href)) return h('span', children);
     return h('a', { href, title: href, target: '_blank', rel: 'noopener noreferrer' }, children);
   }

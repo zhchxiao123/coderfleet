@@ -212,6 +212,13 @@ test('领航 reads every answer a turn ends on, and replies a few times in a row
     const [ask] = await until(() => items('ask'), value => value.length === 1, 'card after the streak', 600);
     assert.equal(ask.kind, 'finished');
     assert.match(ask.why, /连续回了 3 次/);
+    // What waits is said in 领航's words; the conversation's own go along as the quote.
+    assert.equal(ask.asked, '它还在等');
+    assert.match(ask.quote, /第3次：要的话我就接着做/);
+    // The list of followed conversations says this one waits for the user.
+    const waiting = (await env.get('lead')).body;
+    assert.deepEqual(waiting.watching.map(item => [item.id, item.projectId, item.status, item.note]), [[conversation, 'app', 'waiting', '等你 · 有事要你定']]);
+    assert.equal(waiting.rest, 0);
     const turns = (await env.get('conversations/' + conversation + '/turns')).body;
     assert.deepEqual(turns.map(turn => turn.prompt), ['要的话我就做', '第1次：要的话我就接着做', '第2次：要的话我就接着做', '第3次：要的话我就接着做']);
     assert.deepEqual(turns.map(turn => turn.lead?.prompt ?? false), [false, true, true, true]);
@@ -231,6 +238,11 @@ test('领航 reads every answer a turn ends on, and replies a few times in a row
     await new Promise(resolve => setTimeout(resolve, 500));
     assert.equal((await items('ask')).length, 1);
     assert.equal(replies, 3);
+    // Reading it and finding nothing is on record; the conversation is at rest, so it leaves the list.
+    const [seen] = await until(() => items('seen'), value => value.length === 1, 'the record of the answer read');
+    assert.deepEqual([seen.conversationId, seen.projectId, seen.turnId], [conversation, 'app', last.id]);
+    const settled = (await env.get('lead')).body;
+    assert.deepEqual([settled.watching, settled.rest], [[], 1]);
   } finally { await close(); }
 });
 

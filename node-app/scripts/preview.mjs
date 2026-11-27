@@ -63,7 +63,11 @@ if (lead) {
     const event = prompt.split('## 现在要你处理的事\n')[1] ?? '';
     return names.includes('approve') ? (results ? [['approve', { reason: '只是跑检查，没有删除也没有推送' }]] : [['run_command', { command: 'git status --short | head -5; ls' }]])
       : names.includes('accept_job') ? [['ask_user', { question: '做完了，复审也过了，要不要收下并合并？', lean: '改动不大，我看可以收下；合并是大事，这次先问你。' }]]
-      : names.includes('start_work') ? '现在这样：\n\n- **请运行检查并修复**（coderfleet）：在做，刚才要跑检查，我批了\n- **给启动流程补上集成测试**：有一条标准拿不准，卡片在上面\n- **端口改成读环境变量**：做完了，等你点头合并\n\n别的都停着，不需要你。'
+      : names.includes('answer_card') && /按你说的办/.test(prompt.split('## 用户刚对你说\n')[1] ?? '') ? (results ? '回了，它接着做了。' : [['answer_card', { card: /卡片 (\w+)，还没回/.exec(prompt)?.[1] ?? '', answer: '先只测启动成功这一条，缺配置的行为不动。' }]])
+      : names.includes('start_work') ? (() => {
+        const link = name => { const found = new RegExp('^- (\\w+) 【[^】]*】' + name, 'm').exec(prompt); return found ? '[' + name + '](conv:' + found[1] + ')' : name; };
+        return '1 个在跑，2 件等你，其余停着。\n\n- ' + link('请运行检查并修复') + ' 在跑，刚才要跑检查，我批了\n- ' + link('给启动流程补上集成测试') + ' 有一条标准要你定，在上面\n- ' + link('端口改成读环境变量 PORT') + ' 做完了，等你点头合并';
+      })()
       : names.includes('nothing') && !/[?？]/.test(event.split('<对话内容>')[1] ?? '') ? [['nothing', {}]]
       : names.includes('ask_user') ? [['ask_user', { question: '它有一条标准拿不准，要你定', lean: /测试/.test(event) ? '我倾向先只测启动成功这一条。' : '' }]]
       : '我看一下。';
@@ -124,7 +128,7 @@ if (lead) {
   await env.post('conversations/' + conversation + '/turns', { prompt: 'tool' });
   await until(() => env.get('lead'), value => value.body.items.length >= 3 && value.body.working === null, 'lead demo');
   await env.post('lead/messages', { text: '现在都在忙什么' });
-  await until(() => env.get('lead'), value => value.body.items.at(-1)?.type === 'lead' && value.body.working === null, 'lead answer');
+  await until(() => env.get('lead'), value => value.body.items.some(item => item.type === 'lead' || item.type === 'note') && value.body.working === null, 'lead answer');
 }
 
 const token = 'synthetic-node-test-token-0000000';

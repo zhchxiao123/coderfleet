@@ -1,6 +1,7 @@
 'use strict';
-// 领航: one chat between the user and every conversation it follows. It shows what 领航 decided
-// (with what it looked at), the cards it hands over, and takes what the user tells it.
+// 领航: one chat between the user and every conversation it follows. Above it, the conversations
+// being followed, by project; in it, what 领航 settled (one faint line each), what it hands to the
+// user (said as a message) and what the user tells it.
 (() => {
   const CF = window.CF;
   const { h } = CF;
@@ -9,10 +10,13 @@
   let host = null;
   let parts = null;
   let shown = '';
-  // Cards the user may be typing into stay the same nodes across redraws.
+  // What waits for the user stays the same node across redraws: options being picked, a quote left open.
   const cards = new Map();
   const opened = new Set();
   let watching = 0;
+  // The project the page is narrowed to ('' for all), and whether the list above is folded.
+  let only = '';
+  let folded = false;
 
   const view = () => CF.state.lead;
   const clip = (text, size) => text.length > size ? text.slice(0, size) + '…' : text;
@@ -24,40 +28,74 @@
   const link = (text, run) => h('button.lead-link', { on: { click: event => CF.busy(event.currentTarget, run) } }, text);
   const evidence = list => list.map(item => h('dd', h('code', item.command), h('pre', item.output || '（没有输出）')));
 
+  // Each project keeps one colour on this page, so a line is placed at a glance.
+  const COLOURS = ['#3b82f6', '#a855f7', '#14b8a6', '#f97316', '#ec4899', '#84cc16', '#eab308', '#64748b'];
+  const dot = projectId => {
+    const ids = [...new Set(CF.state.conversations.map(item => item.projectId))].sort();
+    const node = h('span.lead-pd');
+    node.style.background = COLOURS[Math.max(0, ids.indexOf(projectId)) % COLOURS.length];
+    return node;
+  };
+  const ref = (item, name) => h('button.lead-ref', { title: item.projectId, on: { click: () => openConversation(item) } }, dot(item.projectId), name);
+  /** 领航's own words: a conversation it names opens on a click. */
+  const words = text => {
+    const node = h('div.assistant', CF.markdown(text));
+    for (const span of node.querySelectorAll('[data-conv]')) {
+      const found = CF.findConversation(span.dataset.conv);
+      if (found) span.replaceWith(ref({ conversationId: found.id, projectId: found.projectId }, span.textContent));
+    }
+    return node;
+  };
+
+  const DID = {
+    approve: item => ['「', item.conversation, '」要做的操作我批了：' + clip(item.asked, 80)],
+    answer: item => ['「', item.conversation, '」问的我答了：' + clip(item.said, 80)],
+    reply: item => ['我回了「', item.conversation, '」：' + clip(item.said, 80)],
+    accept: item => ['「', item.conversation, '」我收下了，让它合并'],
+    stop: item => ['我让「', item.conversation, '」停下了'],
+    start: item => ['开了新对话「', item.conversation, '」：' + clip(item.said, 80)],
+  };
+  /** What 领航 settled by itself: one faint line. */
+  function note(item, parts, extra = null) {
+    return h('div.lead-note' + (item.undone ? '.undone' : ''), { dataset: { project: item.projectId } }, dot(item.projectId), h('span.project', item.projectId),
+      h('span.what', parts[0], h('b', parts[1]), parts[2]), extra);
+  }
+
   function didRow(item) {
     const open = opened.has(item.id);
-    const node = h('div.lead-did' + (item.undone ? '.undone' : ''),
-      h('span.mark', CF.icon(item.action === 'stop' ? 'square' : 'check', 12)),
-      h('div.body',
-        h('span.kind', ACTIONS[item.action] || item.action), h('span.conv', item.conversation), ' ',
-        h('span.what', clip(item.action === 'approve' ? item.asked : item.said || item.asked, 80)),
-        item.undone ? h('span.lead-tag', '已撤回') : null,
-        link(open ? '收起' : '依据', () => { open ? opened.delete(item.id) : opened.add(item.id); node.replaceWith(didRow(item)); }),
-        link('打开对话', () => openConversation(item)),
-        item.undo ? link('撤回', async () => { await CF.api('POST', 'lead/undo/' + item.id); await CF.lead.refresh(); }) : null,
-        open ? h('dl.lead-more',
-          item.asked ? [h('dt', '它问'), h('dd', item.asked)] : null,
-          item.evidence.length ? [h('dt', '我进项目里看了'), evidence(item.evidence)] : null,
-          item.said ? [h('dt', item.action === 'start' ? '我交代的' : '我回'), h('dd', item.said)] : null,
-          item.reason ? [h('dt', '依据'), h('dd', item.reason)] : null) : null));
+    const node = note(item, (DID[item.action] || (entry => ['「', entry.conversation, '」' + entry.action]))(item), [
+      item.undone ? h('span.lead-tag', '已撤回') : null,
+      link(open ? '收起' : '依据', () => { open ? opened.delete(item.id) : opened.add(item.id); node.replaceWith(didRow(item)); }),
+      link('打开对话', () => openConversation(item)),
+      item.undo ? link('撤回', async () => { await CF.api('POST', 'lead/undo/' + item.id); await CF.lead.refresh(); }) : null,
+      open ? h('dl.lead-more',
+        item.asked ? [h('dt', '它问'), h('dd', item.asked)] : null,
+        item.evidence.length ? [h('dt', '我进项目里看了'), evidence(item.evidence)] : null,
+        item.said ? [h('dt', item.action === 'start' ? '我交代的' : '我回'), h('dd', item.said)] : null,
+        item.reason ? [h('dt', '依据'), h('dd', item.reason)] : null) : null]);
     return node;
   }
 
-  function askCard(item) {
-    const head = h('div.from', item.conversation + ' · ' + item.projectId, link('打开对话', () => openConversation(item)));
-    const lines = [
-      h('div.q', item.asked),
-      item.why ? h('div.why', '为什么问你：' + item.why) : null,
-      item.lean ? h('div.lean', '我的倾向：' + item.lean) : null,
-      item.evidence.length ? h('details.lead-seen', h('summary', '我进项目里看了 ' + item.evidence.length + ' 处'), h('dl.lead-more', evidence(item.evidence))) : null,
+  const LEADS = { approval: '要做一个操作，等批准：', question: '问你：', finished: '停下来等你：' };
+  /** Something 领航 hands to the user: said as a message, answered by a tap or by a sentence in the box below. */
+  function askNode(item) {
+    // Written before the answer was kept apart from the question.
+    const old = item.kind === 'finished' && item.quote === undefined;
+    const quote = old ? item.asked : item.quote || '';
+    const body = [
+      h('p', ref(item, item.conversation), ' ', (LEADS[item.kind] || '') + (old ? item.why : item.asked)),
+      !old && item.why ? h('p.mine', item.why) : null,
+      item.lean ? h('p.mine', item.lean) : null,
+      quote ? h('details', h('summary', '它的原话'), h('div.quote', CF.markdown(quote))) : null,
+      item.evidence.length ? h('details', h('summary', '我看了项目里 ' + item.evidence.length + ' 处'), h('dl.lead-more', evidence(item.evidence))) : null,
     ];
     if (item.resolved) {
-      return h('div.lead-ask.closed', head, lines,
-        h('div.answer', item.resolved.by === 'user' ? '你说：' + item.resolved.answer : '已经在对话里处理了'));
+      return h('div.lead-say.closed', { dataset: { project: item.projectId } }, body,
+        h('p.answered', item.resolved.by === 'user' ? '你说：' + item.resolved.answer : '已经在对话里处理了'));
     }
     const kept = cards.get(item.id);
     if (kept) return kept;
-    const answer = (button, body) => CF.busy(button, async () => { await CF.api('POST', 'lead/asks/' + item.id, body); await CF.lead.refresh(); });
+    const answer = (button, input) => CF.busy(button, async () => { await CF.api('POST', 'lead/asks/' + item.id, input); await CF.lead.refresh(); });
     let controls;
     if (item.questions?.length) {
       const answers = new Map();
@@ -72,28 +110,54 @@
           submit.disabled = answers.size !== item.questions.length;
         } } }, option.label));
         return h('div.question', h('p', question.question), h('div.options', buttons));
-      }), h('div.replies', submit)];
+      }), h('div.quick', submit)];
     } else {
-      const input = item.free ? h('input', { placeholder: '或者直接写一句回它', 'aria-label': '回答', on: { keydown: event => {
-        if (event.key === 'Enter' && !event.isComposing && input.value.trim()) void answer(input, { answer: input.value.trim() });
-      } } }) : null;
-      controls = h('div.replies', item.options.map((option, index) => {
-        const button = h('button.btn.small' + (index ? '' : '.primary'), { on: { click: () => answer(button, { answer: option }) } }, option);
-        return button;
-      }), input);
+      controls = h('div.quick',
+        // Its own view is carried out by telling it so, like any other sentence to it.
+        item.free && item.lean ? h('button.option', { on: { click: event => CF.busy(event.currentTarget, () => CF.lead.say('「' + item.conversation + '」这件按你说的办')) } }, '按你说的办') : null,
+        item.options.map(option => { const button = h('button.option', { on: { click: () => answer(button, { answer: option }) } }, option); return button; }));
     }
-    const card = h('div.lead-ask', head, lines, controls);
-    cards.set(item.id, card);
-    return card;
+    const node = h('div.lead-say', { dataset: { project: item.projectId } }, body, controls);
+    cards.set(item.id, node);
+    return node;
   }
 
   function itemNode(item) {
     if (item.type === 'user') return h('div.user-msg', h('div.bubble', item.text));
-    if (item.type === 'lead') return h('div.assistant', CF.markdown(item.text));
+    if (item.type === 'lead') return words(item.text);
     if (item.type === 'note') return h('div.turn-note', item.text);
     if (item.type === 'did') return didRow(item);
-    if (item.type === 'ask') return askCard(item);
+    if (item.type === 'seen') return note(item, ['「', item.conversation, '」做完了，我看过，没有留事情给你']);
+    if (item.type === 'ask') return askNode(item);
     return null;
+  }
+
+  /** The conversations 领航 follows, by project; a project's name on the right shows only what is its. */
+  function watchPanel(state) {
+    const list = state.watching;
+    if (!state.enabled || !list) return null;
+    const projects = [...new Set(list.map(item => item.projectId))];
+    if (!projects.includes(only)) only = '';
+    const count = status => list.filter(item => item.status === status).length;
+    const waits = projectId => state.items.filter(item => item.type === 'ask' && !item.resolved && (!projectId || item.projectId === projectId)).length;
+    const pick = projectId => { only = projectId; render(true); };
+    const chip = (projectId, label) => h('button.lead-filter' + (only === projectId ? '.on' : ''), { on: { click: () => pick(projectId) } },
+      projectId ? dot(projectId) : null, label, waits(projectId) ? h('b', String(waits(projectId))) : null);
+    const mark = item => item.status === 'running' ? h('span.spinner') : h('span.dot' + (item.status === 'waiting' ? '.waiting' : item.status === 'failed' ? '.failed' : '.running'));
+    return h('div.lead-watch' + (folded ? '.folded' : ''), h('div.box',
+      h('div.head',
+        h('button.title', { title: folded ? '展开' : '收起', on: { click: () => { folded = !folded; render(true); } } }, '正在跟的对话'),
+        h('span.sum', [count('running') ? count('running') + ' 个在跑' : '', state.waiting ? state.waiting + ' 件等你' : '没有要你管的'].filter(Boolean).join(' · ')),
+        projects.length > 1 ? h('span.filters', chip('', '全部'), projects.map(projectId => chip(projectId, projectId))) : null),
+      folded ? null : h('div.rows',
+        projects.filter(projectId => !only || projectId === only).map(projectId => {
+          const rows = list.filter(item => item.projectId === projectId);
+          return [h('div.group', dot(projectId), projectId, h('small', rows.length + ' 个对话')),
+            rows.map(item => h('button.item', { on: { click: () => openConversation({ conversationId: item.id }) } },
+              h('span.mark', mark(item)), h('span.name', item.name), h('span.account', item.account),
+              h('span.state.' + item.status, item.note), h('span.when', item.at ? CF.relative(item.at) : '')))];
+        }),
+        h('div.rest', list.length ? (state.rest ? '其余 ' + state.rest + ' 个对话停着，有动静我会接。' : '') : '现在没有在跑或等你的对话，有动静我会接。'))));
   }
 
   function rulesSheet() {
@@ -104,7 +168,7 @@
 
   function renderBar() {
     const state = view();
-    const followed = CF.state.conversations.filter(item => item.lead && (item.attention || ['starting', 'running'].includes(item.status) || ['working', 'waiting', 'review'].includes(item.job))).length;
+    const followed = (state.watching ?? []).length + (state.rest ?? 0);
     const toggle = h('button.switch' + (state.enabled ? '.on' : ''), { role: 'switch', 'aria-checked': String(state.enabled),
       title: state.enabled ? '停下：之后的批准和问题都直接找你' : '开始替你跟对话', disabled: !state.configured || null,
       on: { click: () => CF.busy(toggle, async () => {
@@ -129,19 +193,18 @@
     const text = JSON.stringify(state);
     if (!force && text === shown) return;
     shown = text;
-    const { transcript, inner, notice, textarea } = parts;
+    const { transcript, inner, notice, textarea, watch } = parts;
+    watch.replaceChildren(watchPanel(state) ?? '');
     const atEnd = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
     for (const id of cards.keys()) if (!state.items.some(item => item.id === id && !item.resolved)) cards.delete(id);
-    // A card being typed into is moved, not rebuilt: give it back the caret.
-    const typing = inner.contains(document.activeElement) && document.activeElement.tagName === 'INPUT' ? document.activeElement : null;
     inner.replaceChildren(
       state.items.length ? null : h('div.lead-hello', h('span.glyph', CF.icon('spark', 22)), h('h2', '领航'),
-        h('p', '你同时开着好几个对话的时候，它替你盯着：能定的小事它定，拿不准的、删除推送这类要紧的，它拿来问你。它自己不改代码。')),
-      ...state.items.map(itemNode),
-      state.draft ? h('div.assistant', CF.markdown(state.draft)) : null,
+        h('p', state.enabled ? '现在没有要你定的事。哪个对话停下来等你，我先看；我定不了的，会在这里跟你说。'
+          : '你同时开着好几个对话的时候，它替你盯着：能定的小事它定，拿不准的、删除推送这类要紧的，它拿来问你。它自己不改代码。')),
+      ...state.items.filter(item => !only || !item.projectId || item.projectId === only).map(itemNode),
+      state.draft ? words(state.draft) : null,
       state.working !== null && !state.draft ? h('div.running-status', h('span.orb'),
         h('span.shimmer', state.step ? '领航' + state.step + '…' : '领航在看' + (state.working ? '「' + state.working + '」' : '') + '…')) : null);
-    if (typing?.isConnected) typing.focus();
     if (atEnd) transcript.scrollTop = transcript.scrollHeight;
     notice.replaceChildren(!state.configured
       ? h('div.banner', h('span.banner-icon', CF.icon('spark', 16)), h('div.text', h('strong', '领航要用系统模型来判断'), h('span', '先在 通用 里填好系统模型。')),
@@ -161,18 +224,17 @@
       const inner = h('div.transcript-inner');
       const transcript = h('div.transcript', inner);
       const notice = h('div.chat-notice');
-      const textarea = h('textarea', { rows: 1, placeholder: '交代一件事，或者回它的问题…', 'aria-label': '给领航的话' });
+      const watch = h('div.lead-watch-host');
+      const textarea = h('textarea', { rows: 1, placeholder: '直接说就行：交代一件事，或者一句话回它问你的几件事…', 'aria-label': '给领航的话' });
       const sendButton = h('button.send', { title: '发送', disabled: true }, CF.icon('send', 16));
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
-      const send = async words => {
-        const text = (words ?? textarea.value).trim();
+      const send = async said => {
+        const text = (said ?? textarea.value).trim();
         if (!text || sendButton.dataset.busy) return;
         sendButton.dataset.busy = '1';
         try {
-          await CF.api('POST', 'lead/messages', { text });
-          if (words === undefined) { textarea.value = ''; autosize(); sendButton.disabled = true; }
-          await CF.lead.refresh();
-          transcript.scrollTop = transcript.scrollHeight;
+          await CF.lead.say(text);
+          if (said === undefined) { textarea.value = ''; autosize(); sendButton.disabled = true; }
         } catch (error) { CF.fail(error); }
         finally { delete sendButton.dataset.busy; }
       };
@@ -181,16 +243,23 @@
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
       });
       sendButton.addEventListener('click', () => void send());
-      host = h('div.chat.lead-chat', transcript,
+      host = h('div.chat.lead-chat', watch, transcript,
         h('div.composer-wrap', notice, h('div.composer', textarea,
           h('div.composer-bar', HINTS.map(hint => h('button.lead-chip', { on: { click: () => void send(hint) } }, hint)), h('span.hint', 'Enter 发送'), sendButton))));
-      parts = { transcript, inner, notice, textarea };
+      parts = { transcript, inner, notice, textarea, watch };
       container.replaceChildren(h('div.chat-row', host));
       shown = ''; cards.clear();
       render(true);
       transcript.scrollTop = transcript.scrollHeight;
       void CF.lead.refresh();
       textarea.focus();
+    },
+
+    /** Says something to 领航 as the user. */
+    async say(text) {
+      await CF.api('POST', 'lead/messages', { text });
+      await CF.lead.refresh();
+      if (parts?.transcript.isConnected) parts.transcript.scrollTop = parts.transcript.scrollHeight;
     },
 
     /** Reads 领航's state now (after the user did something). */
