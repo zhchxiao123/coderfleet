@@ -212,6 +212,13 @@ export function pickAccount(project: LeadProject): { account: string; note: stri
     : { account: usual.name, note: usual.name + ' 的额度用到 ' + usual.used + '% 了，项目里没有更空的账号，还是用它' };
 }
 
+/** The account named for new work, when it can hold a conversation in the project; otherwise `pickAccount`'s. */
+export function chooseAccount(project: LeadProject, name: string): { account: string; note: string } {
+  if (!name) return pickAccount(project);
+  if (!project.accounts.some(item => item.name === name)) throw new LeadError('项目 ' + project.id + ' 里没有能对话的账号 ' + name + '，可选：' + project.accounts.map(item => item.name).join('、'));
+  return { account: name, note: '' };
+}
+
 const clip = (value: string, size: number): string => value.length > size ? value.slice(0, size) + '…' : value;
 const tail = (value: string, size: number): string => value.length > size ? '…' + value.slice(-size) : value;
 const short = (): string => randomUUID().replaceAll('-', '').slice(0, 12);
@@ -265,6 +272,8 @@ export class Lead {
   private readonly uploads: string;
   private readonly items: LeadItem[] = [];
   private readonly open = new Map<string, Ask>();
+  /** Cards the user closed with 我去看 whose subject still waits: that conversation waits for the user, as if handed over. */
+  private readonly mine = new Map<string, Ask>();
   /** Turns 领航 started, tool calls it approved and messages it sent into a running turn: shown as its own in the conversation. */
   private readonly started = new Set<string>();
   private readonly approved = new Map<string, Set<string>>();
@@ -316,7 +325,11 @@ export class Lead {
   private index(item: LeadItem): void {
     this.items.push(item);
     if (item.type === 'ask') this.open.set(item.id, item);
-    else if (item.type === 'resolved') this.open.delete(item.ask);
+    else if (item.type === 'resolved') {
+      const ask = this.open.get(item.ask);
+      if (ask && item.by === 'user' && item.answer === MINE) this.mine.set(ask.id, ask);
+      this.open.delete(item.ask);
+    }
     else if (item.type === 'undone') this.undone.add(item.did);
     else if (item.type === 'seen') this.touched.set(item.turnId, 'seen');
     else if (item.type === 'did') {
@@ -360,7 +373,10 @@ export class Lead {
   }
 
   /** Conversations with a card the user has not answered yet. */
-  public asking(): Set<string> { return new Set([...this.open.values()].map(ask => ask.conversationId)); }
+  public asking(): Set<string> { return new Set(this.handedOver().map(ask => ask.conversationId)); }
+
+  /** Open cards, and those closed with 我去看 whose subject still waits. */
+  private handedOver(): Ask[] { return [...this.open.values(), ...this.mine.values()]; }
 
   public view(): Record<string, unknown> {
     const state = this.read();
@@ -383,7 +399,7 @@ export class Lead {
   private watched(state: State): { watching: Record<string, unknown>[]; rest: number } {
     if (!state.enabled || !configured(this.host.llm())) return { watching: [], rest: 0 };
     const manual = new Set(state.manual);
-    const asks = new Map([...this.open.values()].map(ask => [ask.conversationId, ask] as const));
+    const asks = new Map(this.handedOver().map(ask => [ask.conversationId, ask] as const));
     const followed = this.host.conversations().filter(item => !manual.has(item.id));
     const rows = followed.flatMap(item => {
       const ask = asks.get(item.id);
@@ -444,7 +460,7 @@ export class Lead {
     if (answer === MINE) { this.resolve(ask, MINE, 'user'); return; }
     try {
       if (ask.kind === 'approval') {
-        if (answer !== ALLOW && answer !== DENY) throw new LeadError('这张卡片只能选「' + ALLOW + '」或「' + DENY + '」');
+        if (answer !== ALLOW && answer !== DENY) throw new LeadError('这张卡片只能选「' + ALLOW + '」「' + DENY + '」或「' + MINE + '」');
         await this.host.answer(ask.turnId, { id: ask.permissionId as string, decision: answer === ALLOW ? 'allow' : 'deny' });
       } else if (ask.kind === 'question') {
         const first = ask.questions?.[0]?.question ?? '';
@@ -503,6 +519,7 @@ export class Lead {
   /** Called every second by the backend's loop: finds what newly waits, closes cards answered elsewhere, and works the queue. */
   public scan(): void {
     for (const ask of [...this.open.values()]) if (!this.waiting(ask)) this.resolve(ask, '', 'elsewhere');
+    for (const ask of [...this.mine.values()]) if (!this.waiting(ask)) this.mine.delete(ask.id);
     if (!this.on()) return;
     const state = this.read();
     const seen = new Set([...state.handled, ...this.queue.map(event => event.key), ...(this.busy ? [this.busy.key] : [])]);
@@ -588,7 +605,7 @@ export class Lead {
     const asked = question ? (permission.questions ?? []).map(item => item.question).join('\n') : helper ? clip(permission.questions?.[0]?.question ?? permission.title, 400) : approvalLine(permission);
     const card = (why: string, lean = '', evidence: readonly Evidence[] = []): void => this.ask(conversation, {
       kind: question || helper ? 'question' : 'approval', key: event.key, turnId: turn.id, permissionId: permission.id, asked, why, lean, evidence, free: question,
-      options: question || helper ? [] : [ALLOW, DENY], ...(permission.questions ? { questions: permission.questions } : {}),
+      options: question || helper ? [] : [ALLOW, DENY, MINE], ...(permission.questions ? { questions: permission.questions } : {}),
     });
     const fixed = mustAsk(permission) || (!question && !permission.allow ? '这个操作没有「批准」这个选项' : '');
     if (fixed) { card(fixed); return; }
@@ -900,12 +917,13 @@ export class Lead {
     const tools = [
       ...LOOK,
       tool('run_command', '在某个对话的项目容器里跑一条命令来查证（看文件、看 diff、跑测试）。只查不改。', { ...conversation, command: { ...str, description: 'bash 命令' } }),
-      tool('answer_card', '用户这句话是在回答一张还没回的卡片：把答案转回那个对话。批准类卡片的答案只能是「' + ALLOW + '」或「' + DENY + '」；收下一件活是「' + ACCEPT + '」。', {
+      tool('answer_card', '用户这句话是在回答一张还没回的卡片：把答案转回那个对话。批准类卡片的答案只能是「' + ALLOW + '」「' + DENY + '」或「' + MINE + '」（用户要自己去那个对话里处理：卡片关掉，什么都不发，那个请求留着等用户）；收下一件活是「' + ACCEPT + '」。', {
         card: { ...str, description: '卡片 ID' }, answer: { ...str, description: '答案；除上面几个固定说法外，原样转给那个对话' }, ...carry }, ['card', 'answer']),
       tool('send', '替用户给某个对话发一句话。', { ...conversation, text: str, ...carry }, ['conversation', 'text']),
       tool('stop', '让某个对话正在跑的这一轮停下。', conversation),
       tool('start_work', '开一个新对话去做一件事。项目对不上就问用户，不要猜。', {
-        project: { ...str, description: '项目名，必须是下面列出的之一' }, text: { ...str, description: '要做的事，写完整：这句话就是那个对话的第一条消息' }, ...carry }, ['project', 'text']),
+        project: { ...str, description: '项目名，必须是下面列出的之一' }, account: { ...str, description: '项目里的账号名；不写就用项目默认' },
+        text: { ...str, description: '要做的事，写完整：这句话就是那个对话的第一条消息' }, ...carry }, ['project', 'text']),
       tool('add_rule', '记下用户的一条新规矩。', { text: str }),
       tool('remove_rule', '去掉一条规矩（固定的去不掉）。', { rule: { ...str, description: '规矩 ID' } }),
       tool('follow', '某个对话以后由领航跟（true）还是用户自己管（false）。', { ...conversation, follow: { type: 'boolean' } }),
@@ -936,9 +954,11 @@ export class Lead {
           if (!project) throw new LeadError('没有这个项目：' + text(input.project));
           const words_ = text(input.text).trim();
           if (!words_) throw new LeadError('text 不能为空');
-          const { account, note } = pickAccount(project);
+          const { account, note } = chooseAccount(project, text(input.account).trim());
           const sent = handed(input.attachments);
-          const started = await this.host.start(project.id, account, words_, sent);
+          let started: Awaited<ReturnType<LeadHost['start']>>;
+          try { started = await this.host.start(project.id, account, words_, sent); }
+          catch (error) { throw new LeadError('用账号 ' + account + ' 开对话没成功：' + message(error)); }
           const opened = this.host.conversations().find(item => item.id === started.conversationId) ?? { id: started.conversationId, projectId: project.id, name: clip(words_, 40), status: '', attention: false, job: '', account };
           this.did(opened, { action: 'start', turnId: started.turnId, asked: '', said: words_, ...(sent.length ? { attachments: sent } : {}), reason: [started.job ? '用「做完为止」开的' : '这个项目用不了「做完为止」，开的是普通对话', '账号 ' + account, note].filter(Boolean).join('；'), evidence: [], undo: 'stop' });
           return true;

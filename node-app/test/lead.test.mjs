@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { dangerous, mergeBlockers, mustAsk, pickAccount } from '../dist/lead.js';
+import { chooseAccount, dangerous, mergeBlockers, mustAsk, pickAccount } from '../dist/lead.js';
 import { run } from '../dist/lead-engine.js';
 import { deviceAllowed } from '../dist/server.js';
 import { environment, lastTurn, systemModel, until } from './helpers.mjs';
@@ -52,6 +52,10 @@ test('new work goes to the project\'s usual account unless it is nearly used up'
   assert.equal(pickAccount(project(['a', 95], ['b', 97], ['c', null])).account, 'a');
   assert.notEqual(pickAccount(project(['a', 95])).note, '');
   assert.throws(() => pickAccount({ id: 'app', defaultAccount: '', accounts: [] }));
+  // Named by the model: used as it is when the project holds it, refused with the choices otherwise.
+  assert.deepEqual(chooseAccount(project(['a', 95], ['b', 20]), 'a'), { account: 'a', note: '' });
+  assert.deepEqual(chooseAccount(project(['a', 95], ['b', 20]), ''), pickAccount(project(['a', 95], ['b', 20])));
+  assert.throws(() => chooseAccount(project(['a', 40], ['b', 5]), 'c'), /没有能对话的账号 c，可选：a、b/);
 });
 
 test('a phone may read and answer 领航, not switch it on or off', () => {
@@ -62,10 +66,10 @@ test('a phone may read and answer 领航, not switch it on or off', () => {
 });
 
 // A turn that ends is read by the model; `finished`: the test's script answers that too, otherwise nothing was left to the user.
-const setup = async (script, { finished = false, ...options } = {}) => {
+const setup = async (script, { finished = false, accounts = 'NAME=claude-a TYPE=claude\n', projects = project => `NAME=app ACCOUNT=claude-a PATH=${project}\n`, ...options } = {}) => {
   const llm = await systemModel((prompt, results, body) => !finished && /这一轮结束了/.test(prompt.split('## 现在要你处理的事\n')[1] ?? '') ? [['nothing', {}]] : script(prompt, results, body), options);
   const env = await environment({
-    accounts: 'NAME=claude-a TYPE=claude\n', projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\n`,
+    accounts, projects,
     containers: { 'claude-app': 'running' }, bins: { claude: fakeClaude },
   });
   appendFileSync(join(env.workspace, 'config.conf'), 'SYSTEM_LLM_API_KEY=sk-ant-test-secret-000\nSYSTEM_LLM_MODEL=m\nSYSTEM_LLM_BASE_URL=http://127.0.0.1:' + llm.port + '\n');
@@ -173,7 +177,7 @@ test('what 领航 cannot settle becomes a card, and the user\'s answer goes back
     const [, card] = await until(() => items('ask'), value => value.length === 2, 'second card');
     assert.equal(card.kind, 'approval');
     assert.equal(card.lean, '说不好');
-    assert.deepEqual(card.options, ['批准', '拒绝']);
+    assert.deepEqual(card.options, ['批准', '拒绝', '我去看']);
     assert.equal((await env.post('lead/asks/' + card.id, { answer: '随便' })).status, 409);
     const waiting = await lastTurn(env, second);
     await env.post('turns/' + waiting.id + '/permission', { id: waiting.permission.id, decision: 'allow' });
@@ -190,6 +194,93 @@ test('what 领航 cannot settle becomes a card, and the user\'s answer goes back
     assert.equal((await until(() => lastTurn(env, third), value => value.status === 'done', 'approved by the user')).answer, 'ran');
     assert.equal((await items('did')).length, 0);
     assert.ok(llm.requests.length >= 3);
+  } finally { await close(); }
+});
+
+test('我去看 on an approval card: the card closes, nothing reaches the conversation, and the approval waits for the user', { timeout: 120_000 }, async () => {
+  const { llm, env, talk, items, close } = await setup(prompt => /这一轮结束了/.test(event(prompt)) ? [['nothing', {}]] : '说不好');
+  try {
+    await env.put('lead/settings', { enabled: true });
+    const conversation = await talk('tool');
+    const [card] = await until(() => items('ask'), value => value.length === 1, 'card');
+    assert.equal(card.kind, 'approval');
+    assert.deepEqual(card.options, ['批准', '拒绝', '我去看']);
+    const waiting = await lastTurn(env, conversation);
+    const calls = llm.requests.length;
+    assert.deepEqual((await env.post('lead/asks/' + card.id, { answer: '我去看' })).body, { accepted: true });
+    const [closed] = await items('ask');
+    assert.deepEqual([closed.resolved.by, closed.resolved.answer], ['user', '我去看']);
+    assert.equal((await env.get('lead')).body.waiting, 0);
+    assert.equal((await env.post('lead/asks/' + card.id, { answer: '批准' })).status, 409);
+    // Scans go on: the same approval is neither answered, nor messaged about, nor asked again.
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    const turns = (await env.get('conversations/' + conversation + '/turns')).body;
+    assert.equal(turns.length, 1);
+    const still = turns[0];
+    assert.equal(still.id, waiting.id);
+    assert.equal(still.status, waiting.status);
+    assert.equal(still.permission.id, waiting.permission.id);
+    assert.equal(still.lead, undefined);
+    assert.equal((await items('ask')).length, 1);
+    assert.equal((await items('did')).length, 0);
+    assert.equal(llm.requests.length, calls);
+    // It is the user's now: the conversation shows as waiting for them, and in 领航's list too.
+    assert.equal((await env.get('conversations')).body.find(item => item.id === conversation).attention, true);
+    assert.deepEqual((await env.get('lead')).body.watching.map(item => [item.id, item.status]), [[conversation, 'waiting']]);
+    // Approved in the conversation itself, it waits no more.
+    await env.post('turns/' + waiting.id + '/permission', { id: waiting.permission.id, decision: 'allow' });
+    await until(() => lastTurn(env, conversation), value => value.status === 'done', 'approved in the conversation');
+    await until(async () => (await env.get('conversations')).body.find(item => item.id === conversation).attention, value => value === false, 'no longer waiting');
+    assert.equal((await items('ask')).length, 1);
+  } finally { await close(); }
+});
+
+test('领航 starts new work as the account it is told, and says which one when that fails', { timeout: 120_000 }, async () => {
+  const { env, items, close } = await setup((prompt, results) => {
+    const said = prompt.split('## 用户刚对你说\n')[1] ?? '';
+    if (results) return /没做成|不能|没有|没成功/.test(results.join()) ? '没办成：' + results.join() : '办好了。';
+    if (/用 b 开/.test(said)) return [['start_work', { project: 'app', account: 'claude-b', text: 'long' }]];
+    if (/用 c 开/.test(said)) return [['start_work', { project: 'app', account: 'claude-c', text: 'x' }]];
+    if (/用本地开/.test(said)) return [['start_work', { project: 'app', account: 'local-c', text: 'x' }]];
+    if (/开不起来/.test(said)) return [['start_work', { project: 'app', account: 'claude-b', text: 'x' }]];
+    return [['start_work', { project: 'app', text: 'long' }]];
+  }, {
+    accounts: 'NAME=claude-a TYPE=claude\nNAME=claude-b TYPE=claude\nNAME=local-c TYPE=claude RUNTIME=local\n',
+    projects: project => `NAME=app ACCOUNT=claude-a PATH=${project} SECONDARY_ACCOUNTS=claude-b,local-c\n`,
+  });
+  const say = async text => {
+    const before = (await items('lead')).length;
+    assert.equal((await env.post('lead/messages', { text })).status, 200);
+    return (await until(() => items('lead'), value => value.length > before, 'reply to ' + text)).at(-1).text;
+  };
+  const conversations = async () => (await env.get('conversations')).body;
+  try {
+    await env.put('lead/settings', { enabled: true });
+    // The conversation does not start (claude-b came after the container): the error says which account it was, and nothing is left behind.
+    assert.match(await say('开不起来'), /用账号 claude-b 开对话没成功：.*重启这个项目后才能用/);
+    assert.equal((await conversations()).length, 0);
+    assert.equal((await items('did')).length, 0);
+
+    writeFileSync(join(env.root, 'mounts.json'), JSON.stringify({ 'claude-app': ['/workspace', '/home/byclaw/.claude'] }));
+    // Not named: the project's default account, as before (claude-a: no conversation picked another yet).
+    assert.equal(await say('随便开一个'), '办好了。');
+    const [usual] = await items('did');
+    assert.equal(usual.action, 'start');
+    assert.match(usual.reason, /账号 claude-a/);
+    assert.equal((await conversations()).find(item => item.id === usual.conversationId).account, 'claude-a');
+
+    // Named: that account.
+    assert.equal(await say('用 b 开'), '办好了。');
+    const named = (await items('did'))[1];
+    assert.equal(named.action, 'start');
+    assert.match(named.reason, /账号 claude-b/);
+    assert.equal((await conversations()).find(item => item.id === named.conversationId).account, 'claude-b');
+
+    // Not in the project, or not one that can chat: refused, with the accounts to choose from.
+    assert.match(await say('用 c 开'), /没有能对话的账号 claude-c，可选：claude-a、claude-b/);
+    assert.match(await say('用本地开'), /没有能对话的账号 local-c，可选：claude-a、claude-b/);
+    assert.equal((await conversations()).length, 2);
+    assert.equal((await items('did')).length, 2);
   } finally { await close(); }
 });
 
