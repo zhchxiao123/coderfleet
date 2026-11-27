@@ -518,15 +518,19 @@ class _ToolRowState extends State<ToolRow> {
       ToolStatus.failed => palette.red,
       _ => palette.text3,
     };
+    final title = Text(tool.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: struck ? palette.text3 : palette.text2, fontWeight: FontWeight.w500, decoration: struck ? TextDecoration.lineThrough : null));
     final row = InkWell(
       borderRadius: BorderRadius.circular(8),
       onTap: () => showModalBottomSheet<void>(context: context, isScrollControlled: true, builder: (_) => ToolSheet(tool: tool, turn: widget.turn, client: widget.client)),
       child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(children: [
         ToolGlyph(status: tool.status),
         const SizedBox(width: 8),
-        Text(tool.title, style: TextStyle(color: struck ? palette.text3 : palette.text2, fontWeight: FontWeight.w500, decoration: struck ? TextDecoration.lineThrough : null)),
-        const SizedBox(width: 8),
-        Expanded(child: Text(tool.detail.replaceFirst(RegExp(r'^/workspace/'), ''), maxLines: 1, overflow: TextOverflow.ellipsis, style: mono.copyWith(color: palette.text3, fontSize: 12))),
+        // Some agents put the whole command in the title: it is cut to the row, and next to a detail it keeps most of the row.
+        if (tool.detail.isEmpty) Expanded(child: title) else ...[
+          ConstrainedBox(constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.5), child: title),
+          const SizedBox(width: 8),
+          Expanded(child: Text(tool.detail.replaceFirst(RegExp(r'^/workspace/'), ''), maxLines: 1, overflow: TextOverflow.ellipsis, style: mono.copyWith(color: palette.text3, fontSize: 12))),
+        ],
         if (tool.status != ToolStatus.completed) Padding(padding: const EdgeInsets.only(left: 6), child: _Pill(text: _toolLabels[tool.status]!, color: pillColor)),
       ])),
     );
@@ -582,7 +586,7 @@ class ToolSheet extends StatelessWidget {
             _ => tool.outputUnreported ? '这一步的结果 CLI 没有传出来，只有它自己看得到。' : '没有输出。',
           };
           return ListView(controller: scroll, padding: const EdgeInsets.fromLTRB(20, 0, 20, 32), children: [
-            Row(children: [ToolGlyph(status: tool.status), const SizedBox(width: 8), Text(tool.title, style: Theme.of(context).textTheme.titleMedium)]),
+            Row(children: [ToolGlyph(status: tool.status), const SizedBox(width: 8), Expanded(child: Text(tool.title, maxLines: 3, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium))]),
             const SizedBox(height: 16),
             if (snapshot.hasError) Text('读取失败：${snapshot.error}', style: TextStyle(color: palette.red)),
             if (detail == null && !snapshot.hasError) const Center(child: CircularProgressIndicator.adaptive()),
