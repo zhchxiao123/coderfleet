@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { applyEvent, toolDetail } from '../dist/tasks.js';
+import { toolOutput } from '../dist/acp-worker.js';
 
 const turn = () => ({ id: 't', status: 'running', answer: '', tools: [] });
 const system = (subtype, fields) => ({ type: 'system', subtype, task_id: 't', ...fields });
@@ -78,4 +79,24 @@ test('a tool call keeps its input and output for the detail panel', () => {
   applyEvent(value, use('b', 'Read', { file_path: 'big' }));
   applyEvent(value, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', content: 'x'.repeat(200_000) }] } });
   assert.ok(value.tools[1].output.length < 70_000, 'long output is capped');
+});
+
+// The shapes are the ones `agy acp` 1.5.15 sends.
+test('an ACP tool reports its text, and says so when the agent passed no result on', () => {
+  const text = 'Command exited with code 0.\n\nCommand output:\nhello\r\n';
+  assert.equal(toolOutput({ status: 'completed', rawOutput: { output: text, exit_code: 0 }, content: [{ type: 'content', content: { type: 'text', text } }] }), text);
+  assert.equal(toolOutput({ status: 'completed', rawOutput: { output: text, exit_code: 0 } }), text);
+  assert.equal(toolOutput({ status: 'completed', rawOutput: '' }), '');
+  assert.equal(toolOutput({ status: 'completed', rawOutput: { matches: 2 } }), '{"matches":2}');
+  // Web search and file reads end with no output at all.
+  assert.equal(toolOutput({ status: 'completed', kind: 'search', rawInput: { query: 'x' } }), undefined);
+
+  const value = turn();
+  applyEvent(value, use('s', '"x" on Web', { query: 'x' }));
+  applyEvent(value, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 's', content: '', is_error: false, output_unreported: true }] } });
+  assert.equal(value.tools[0].outputUnreported, true);
+  assert.equal(value.tools[0].output, undefined);
+  applyEvent(value, use('e', 'true', { CommandLine: 'true' }));
+  applyEvent(value, result('e', false));
+  assert.equal(value.tools[1].outputUnreported, undefined);
 });

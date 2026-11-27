@@ -259,9 +259,9 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
       } else if (item.type === 'tool_result') {
         const current = turn.tools.find(tool => tool.id === item.tool_use_id);
         const output = resultText(item.content);
-        if (current && output) {
+        if (current && (output || item.output_unreported === true)) {
           const index = turn.tools.indexOf(current);
-          turn.tools[index] = { ...current, output };
+          turn.tools[index] = { ...current, ...(output ? { output } : { outputUnreported: true }) };
           changed = true;
         }
         // A rejected call reports an error result; it stays "denied", not "failed".

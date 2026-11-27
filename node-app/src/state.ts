@@ -104,6 +104,8 @@ export interface Tool {
   /** Full input and output, served on demand (GET /v1/turns/:id/tools/:toolId), capped in size. */
   readonly input?: unknown;
   readonly output?: string;
+  /** The CLI finished this step without passing its result on (not the same as an empty result). */
+  readonly outputUnreported?: boolean;
   /** The Agent (Task) call this step ran inside: a sub-agent's own tool calls. */
   readonly parent?: string;
 }

@@ -70,7 +70,8 @@
       const output = typeof data.output === 'string' ? data.output : JSON.stringify(data.output, null, 2);
       const empty = tool.status === 'running' ? '还在运行，结束后显示输出。'
         : tool.status === 'waiting' ? '等你确认后才会运行。'
-          : tool.status === 'denied' ? '已拒绝，没有运行。' : '没有输出。';
+          : tool.status === 'denied' ? '已拒绝，没有运行。'
+            : tool.outputUnreported ? '这一步的结果 CLI 没有传出来，只有它自己看得到。' : '没有输出。';
       // Images the tool returned (e.g. Read of a picture); clicking opens one full size.
       const images = (data.images || []).map(image => {
         const url = 'data:' + image.mime + ';base64,' + image.data;

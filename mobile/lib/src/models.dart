@@ -41,14 +41,15 @@ enum ToolStatus { running, waiting, completed, failed, denied, interrupted, unkn
 ToolStatus _toolStatus(String value) => ToolStatus.values.firstWhere((item) => item.name == value, orElse: () => ToolStatus.running);
 
 class Tool {
-  Tool({required this.id, required this.title, required this.status, required this.detail, required this.hasDetail, this.parent = ''});
+  Tool({required this.id, required this.title, required this.status, required this.detail, required this.hasDetail, this.parent = '', this.outputUnreported = false});
   factory Tool.fromJson(Map<String, dynamic> json) => Tool(
         id: _text(json['id']), title: _text(json['title']), status: _toolStatus(_text(json['status'])), detail: _text(json['detail']), hasDetail: json['hasDetail'] == true,
-        parent: _text(json['parent']));
+        parent: _text(json['parent']), outputUnreported: json['outputUnreported'] == true);
   /// `parent`: the Agent call this step ran inside (empty for the turn's own steps).
   final String id, title, detail, parent;
   final ToolStatus status;
-  final bool hasDetail;
+  /// `outputUnreported`: the CLI finished this step without passing its result on.
+  final bool hasDetail, outputUnreported;
   bool get settled => status != ToolStatus.running && status != ToolStatus.waiting;
 }
 

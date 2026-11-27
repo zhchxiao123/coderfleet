@@ -164,10 +164,10 @@ export class Turn {
       }
       if ((tool.status === 'completed' || tool.status === 'failed') && !tool._settled) {
         tool._settled = true;
-        const output = tool.rawOutput ?? tool.content ?? '';
+        const output = toolOutput(tool);
         emit('user', { message: { content: [{
-          type: 'tool_result', tool_use_id: id,
-          content: typeof output === 'string' ? output : JSON.stringify(output), is_error: tool.status === 'failed',
+          type: 'tool_result', tool_use_id: id, content: output ?? '', is_error: tool.status === 'failed',
+          ...(output === undefined ? { output_unreported: true } : {}),
         }] } });
       }
     }
@@ -394,6 +394,21 @@ export class Turn {
       }
     }
   }
+}
+
+/**
+ * What a settled tool call reported: the text of its content blocks, else its raw output.
+ * `undefined` when the agent sent neither (Antigravity's web search and file reads end that
+ * way), which is not the same as a tool that ran and printed nothing.
+ */
+export function toolOutput(tool: Json): string | undefined {
+  const blocks = list(tool.content);
+  const texts = blocks.map(block => object(block.content).text).filter((item): item is string => typeof item === 'string');
+  if (texts.length) return texts.join('\n');
+  const raw = tool.rawOutput;
+  if (typeof raw === 'string') return raw;
+  if (raw !== null && raw !== undefined) return typeof object(raw).output === 'string' ? object(raw).output as string : JSON.stringify(raw);
+  return blocks.length ? JSON.stringify(tool.content) : undefined;
 }
 
 function cliVersion(command: readonly string[], env: NodeJS.ProcessEnv): Promise<string> {

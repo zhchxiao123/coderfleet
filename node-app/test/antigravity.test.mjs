@@ -48,6 +48,8 @@ test('Antigravity turns run in the persistent project container and survive a se
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'approved turn');
     assert.equal(turn.answer, 'written');
     assert.equal(turn.tools[0].status, 'completed');
+    // The agent finished the call without sending its result.
+    assert.equal(turn.tools[0].outputUnreported, true);
     assert.equal(turn.permission, undefined);
 
     // Deny.

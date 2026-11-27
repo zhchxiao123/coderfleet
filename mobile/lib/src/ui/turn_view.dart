@@ -491,7 +491,7 @@ class ToolSheet extends StatelessWidget {
             ToolStatus.running => '还在运行，结束后显示输出。',
             ToolStatus.waiting => '等你确认后才会运行。',
             ToolStatus.denied => '已拒绝，没有运行。',
-            _ => '没有输出。',
+            _ => tool.outputUnreported ? '这一步的结果 CLI 没有传出来，只有它自己看得到。' : '没有输出。',
           };
           return ListView(controller: scroll, padding: const EdgeInsets.fromLTRB(20, 0, 20, 32), children: [
             Row(children: [ToolGlyph(status: tool.status), const SizedBox(width: 8), Text(tool.title, style: Theme.of(context).textTheme.titleMedium)]),
