@@ -7,11 +7,12 @@ import 'dart:math';
 
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
 // ignore: deprecated_member_use
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Thumb;
 
 import '../backend.dart';
 import '../models.dart';
 import '../state.dart';
+import 'attachments.dart';
 import 'chat_screen.dart';
 import 'theme.dart';
 import 'turn_view.dart';
@@ -25,11 +26,12 @@ const _colours = [Color(0xFF3B82F6), Color(0xFFA855F7), Color(0xFF14B8A6), Color
 String _clip(String text, int size) => text.length > size ? '${text.substring(0, size)}…' : text;
 
 class LeadScreen extends StatefulWidget {
-  const LeadScreen({super.key, required this.client, required this.feed, this.wait = const Duration(seconds: 25)});
+  const LeadScreen({super.key, required this.client, required this.feed, this.wait = const Duration(seconds: 25), this.attachmentSource = pickAttachments});
   final BackendClient client;
   /// The conversation list: a conversation opened from here is looked up in it, and the chat page reads its projects.
   final ConversationFeed feed;
   final Duration wait;
+  final AttachmentSource attachmentSource;
   @override
   State<LeadScreen> createState() => _LeadScreenState();
 }
@@ -38,6 +40,10 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
   late final LeadFeed lead = LeadFeed(widget.client, wait: widget.wait)..start();
   final input = TextEditingController();
   final scroller = ScrollController();
+  /// 领航's uploads: it belongs to no project, so its files live with it on the backend.
+  late final images = UploadCache(widget.client, null);
+  late final attachments = Attachments(upload: (name, data, size) => widget.client.upload(null, name, data, size), cache: images)
+    ..addListener(() => setState(() {}));
   bool sending = false, folded = false, _chatOpen = false;
   /// The project the page is narrowed to ('' for all).
   String only = '';
@@ -63,6 +69,7 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     lead.dispose();
     input.dispose();
+    attachments.dispose();
     scroller.dispose();
     super.dispose();
   }
@@ -113,15 +120,19 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Says [text] to 领航; [typed]: it is what the box holds, emptied once sent.
+  /// Says [text] to 领航; [typed]: it is what the box holds, sent with the attachments and emptied once sent.
+  /// A hint or 按你说的办 says only its words.
   Future<void> say(String text, {bool typed = false}) async {
-    final words = text.trim();
-    if (words.isEmpty || sending) return;
+    final words = text.trim(), files = typed ? attachments.paths : const <String>[];
+    if ((words.isEmpty && files.isEmpty) || sending || (typed && attachments.uploading)) return;
     setState(() => sending = true);
-    final sent = await act(() => widget.client.leadSay(words));
+    final sent = await act(() => widget.client.leadSay(words, attachments: files));
     if (!mounted) return;
     setState(() => sending = false);
-    if (sent && typed) input.clear();
+    if (sent && typed) {
+      input.clear();
+      attachments.clear();
+    }
     // What was just said is at the end.
     if (sent && scroller.hasClients) scroller.jumpTo(0);
   }
@@ -237,10 +248,10 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
   Widget _item(LeadItem item) {
     final key = ValueKey(item.id);
     return switch (item.type) {
-      'user' => Align(key: key, alignment: Alignment.centerRight, child: _Bubble(text: item.text)),
+      'user' => Padding(key: key, padding: const EdgeInsets.only(top: 4), child: UserMessage(text: item.text, images: item.attachments, cache: images)),
       'lead' => Answer(key: key, text: item.text, onConversation: openConversation),
       'note' => Padding(key: key, padding: const EdgeInsets.symmetric(vertical: 6), child: Center(child: Text(item.text, textAlign: TextAlign.center, style: TextStyle(color: context.palette.text3, fontSize: 12.5)))),
-      'did' => _DidRow(key: key, item: item, colour: _colour(item.projectId), onOpen: () => openConversation(item.conversationId),
+      'did' => _DidRow(key: key, item: item, images: images, colour: _colour(item.projectId), onOpen: () => openConversation(item.conversationId),
           onUndo: () => act(() => widget.client.leadUndo(item.id))),
       'seen' => _NoteLine(key: key, item: item, colour: _colour(item.projectId), before: '「', after: '」做完了，我看过，没有留事情给你'),
       'ask' => _AskCard(key: key, item: item, colour: _colour(item.projectId), onOpen: () => openConversation(item.conversationId),
@@ -319,6 +330,7 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
             ? ('领航还没开始', '在电脑上的领航页打开它：之后对话里的批准和问题先到它这里。')
             : null;
     final ready = view.configured && !sending;
+    final canSend = ready && !attachments.uploading && (input.text.trim().isNotEmpty || !attachments.isEmpty);
     return SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(10, 4, 10, 8), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       if (notice != null)
         Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(12),
@@ -332,6 +344,7 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
         decoration: BoxDecoration(color: palette.surface, borderRadius: BorderRadius.circular(22),
             boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.07), blurRadius: 20, offset: const Offset(0, 4))]),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if (!attachments.isEmpty) AttachmentRow(attachments: attachments),
           TextField(
             controller: input, minLines: 1, maxLines: 6, enabled: view.configured, textInputAction: TextInputAction.newline,
             decoration: const InputDecoration(
@@ -341,6 +354,9 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
             ),
           ),
           Row(children: [
+            IconButton(icon: Icon(Icons.attach_file, color: palette.text2), tooltip: '添加附件', visualDensity: VisualDensity.compact,
+                onPressed: view.configured ? () => showAttachMenu(context, (from) => attachments.add(context, from, widget.attachmentSource)) : null),
+            const SizedBox(width: 2),
             Expanded(child: SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
               for (final hint in _hints)
                 Padding(padding: const EdgeInsets.only(right: 6), child: GestureDetector(
@@ -352,9 +368,9 @@ class _LeadScreenState extends State<LeadScreen> with WidgetsBindingObserver {
             ]))),
             const SizedBox(width: 6),
             Tooltip(message: '发送', child: Material(
-              color: ready && input.text.trim().isNotEmpty ? palette.ink : palette.fill, shape: const CircleBorder(),
-              child: InkWell(customBorder: const CircleBorder(), onTap: ready && input.text.trim().isNotEmpty ? () => say(input.text, typed: true) : null,
-                  child: SizedBox(width: 36, height: 36, child: Icon(Icons.arrow_upward_rounded, size: 20, color: ready && input.text.trim().isNotEmpty ? palette.inkText : palette.text3))),
+              color: canSend ? palette.ink : palette.fill, shape: const CircleBorder(),
+              child: InkWell(customBorder: const CircleBorder(), onTap: canSend ? () => say(input.text, typed: true) : null,
+                  child: SizedBox(width: 36, height: 36, child: Icon(Icons.arrow_upward_rounded, size: 20, color: canSend ? palette.inkText : palette.text3))),
             )),
           ]),
         ]),
@@ -368,27 +384,6 @@ class _Dot extends StatelessWidget {
   final Color colour;
   @override
   Widget build(BuildContext context) => Container(width: 8, height: 8, decoration: BoxDecoration(color: colour, shape: BoxShape.circle));
-}
-
-/// The user's words to 领航.
-class _Bubble extends StatelessWidget {
-  const _Bubble({required this.text});
-  final String text;
-  @override
-  Widget build(BuildContext context) {
-    final palette = context.palette;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10, top: 4),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-          decoration: BoxDecoration(color: palette.fill, borderRadius: BorderRadius.circular(18)),
-          child: SelectableText(text, style: TextStyle(fontSize: 15.5, height: 1.5, color: palette.text)),
-        ),
-      ),
-    );
-  }
 }
 
 /// What 领航 is doing right now: writing its answer, or which conversation it is looking at.
@@ -459,8 +454,9 @@ class _NoteLine extends StatelessWidget {
 
 /// What 领航 settled by itself: one faint line; its grounds open below, and what can be taken back has 撤回.
 class _DidRow extends StatefulWidget {
-  const _DidRow({super.key, required this.item, required this.colour, required this.onOpen, required this.onUndo});
+  const _DidRow({super.key, required this.item, required this.images, required this.colour, required this.onOpen, required this.onUndo});
   final LeadItem item;
+  final UploadCache images;
   final Color colour;
   final VoidCallback onOpen;
   final Future<bool> Function() onUndo;
@@ -477,7 +473,7 @@ class _DidRowState extends State<_DidRow> {
         'reply' => ('我回了「', '」：${_clip(item.said, 80)}'),
         'accept' => ('「', '」我收下了，让它合并'),
         'stop' => ('我让「', '」停下了'),
-        'start' => ('开了新对话「', '」：${_clip(item.said, 80)}'),
+        'start' => ('开了新对话「', '」：${_clip(item.said, 80)}${item.attachments.isEmpty ? '' : '（带了 ${item.attachments.length} 个附件）'}'),
         _ => ('「', '」${item.action}'),
       };
 
@@ -515,11 +511,23 @@ class _DidRowState extends State<_DidRow> {
             if (item.asked.isNotEmpty) part('它问', SelectableText(item.asked, style: small)),
             if (item.evidence.isNotEmpty) part('我进项目里看了', _Evidence(list: item.evidence)),
             if (item.said.isNotEmpty) part(item.action == 'start' ? '我交代的' : '我回', SelectableText(item.said, style: small)),
+            if (item.attachments.isNotEmpty) part('一起交过去的附件', _Files(paths: item.attachments, images: widget.images)),
             if (item.reason.isNotEmpty) part('依据', SelectableText(item.reason, style: small)),
           ]),
         ),
     ]);
   }
+}
+
+/// Files 领航 handed over: images open full screen, other files show their name.
+class _Files extends StatelessWidget {
+  const _Files({required this.paths, required this.images});
+  final List<String> paths;
+  final UploadCache images;
+  @override
+  Widget build(BuildContext context) => Wrap(spacing: 6, runSpacing: 6, children: [
+        for (final path in paths) isImageUpload(path) ? Thumb(path: path, cache: images, size: 72) : FileChip(name: uploadName(path), height: 44),
+      ]);
 }
 
 class _Evidence extends StatelessWidget {

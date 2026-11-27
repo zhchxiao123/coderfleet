@@ -175,11 +175,14 @@ class BackendClient {
 
   Future<void> withdraw(String conversationId, String followUpId) => _call('DELETE', 'conversations/$conversationId/follow-ups/$followUpId');
 
-  /// Uploads a file (up to 500 MB) into the project (.coderfleet-uploads); returns its container path.
+  /// Where uploads for a message go: a project's (.coderfleet-uploads), or 领航's when [projectId] is null.
+  String _uploads(String? projectId) => projectId == null ? 'lead/uploads' : 'projects/${Uri.encodeComponent(projectId)}/uploads';
+
+  /// Uploads a file (up to 500 MB) for a message in the project, or to 领航 when [projectId] is null; returns its path.
   /// The file is the request body, sent as it is read.
-  Future<String> upload(String projectId, String name, Stream<List<int>> data, int size) async {
+  Future<String> upload(String? projectId, String name, Stream<List<int>> data, int size) async {
     final base = _base ?? await connect();
-    final request = http.StreamedRequest('POST', Uri.parse('$base/v1/projects/${Uri.encodeComponent(projectId)}/uploads').replace(queryParameters: {'name': name}))
+    final request = http.StreamedRequest('POST', Uri.parse('$base/v1/${_uploads(projectId)}').replace(queryParameters: {'name': name}))
       ..headers.addAll(_headers)
       ..headers['Content-Type'] = 'application/octet-stream'
       ..contentLength = size;
@@ -197,8 +200,9 @@ class BackendClient {
     return asMap(_decoded(response))['path'] as String? ?? '';
   }
 
-  Future<List<int>> image(String projectId, String path) async {
-    final data = asMap(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/uploads/${path.split('/').last}', timeout: const Duration(seconds: 60)));
+  /// An uploaded image of the project's, or of 领航's when [projectId] is null.
+  Future<List<int>> image(String? projectId, String path) async {
+    final data = asMap(await _call('GET', '${_uploads(projectId)}/${path.split('/').last}', timeout: const Duration(seconds: 60)));
     return base64Decode(data['data'] as String? ?? '');
   }
 
@@ -235,8 +239,9 @@ class BackendClient {
     return (etag: data['etag'] as String? ?? '', view: LeadView.fromJson(data));
   }
 
-  /// Says something to 领航 as the user.
-  Future<void> leadSay(String text) => _call('POST', 'lead/messages', body: {'text': text});
+  /// Says something to 领航 as the user, maybe with files uploaded to it (`upload(null, …)`).
+  Future<void> leadSay(String text, {List<String> attachments = const []}) =>
+      _call('POST', 'lead/messages', body: {'text': text, if (attachments.isNotEmpty) 'attachments': attachments});
 
   /// Answers a card: [answer] is one of its options or free text; [answers] holds a question card's picks (question → labels).
   Future<void> leadAnswer(String askId, {String? answer, Map<String, String>? answers}) =>

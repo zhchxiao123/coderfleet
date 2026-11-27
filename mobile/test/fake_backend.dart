@@ -170,6 +170,13 @@ class FakeBackend {
         followUps[id]?.removeWhere((entry) => entry['id'] == item);
         _touch();
         return _json({'removed': true});
+      case ('POST', ['lead', 'uploads']) when lead != null:
+        final path = '/lead/uploads/${_id()}a1b2-${request.url.queryParameters['name']}';
+        uploads[path] = base64Encode(request.bodyBytes);
+        return _json({'path': path});
+      case ('GET', ['lead', 'uploads', final file]) when lead != null:
+        final data = uploads.entries.where((entry) => entry.key.startsWith('/lead/uploads/') && entry.key.endsWith(Uri.decodeComponent(file))).firstOrNull?.value;
+        return data == null ? _json({'error': '图片不存在'}, 404) : _json({'mime': 'image/png', 'data': data});
       case ('POST', ['projects', _, 'uploads']):
         final path = '/workspace/.coderfleet-uploads/${_id()}a1b2-${request.url.queryParameters['name']}';
         uploads[path] = base64Encode(request.bodyBytes);
@@ -213,7 +220,11 @@ class FakeBackend {
         final open = leadItems.where((item) => item['type'] == 'ask' && item['resolved'] == null).length;
         return _json({'etag': etag, ...lead!, 'waiting': open, 'items': leadItems});
       case ('POST', ['lead', 'messages']) when lead != null:
-        final item = {'id': _id(), 'at': DateTime.now().toUtc().toIso8601String(), 'type': 'user', 'text': body['text']};
+        final files = (body['attachments'] as List? ?? const []).cast<String>();
+        // Like the backend: only files uploaded to 领航 go with its messages.
+        if (files.any((path) => !uploads.containsKey(path) || !path.startsWith('/lead/uploads/'))) return _json({'error': '附件不在领航里'}, 400);
+        if ('${body['text']}'.trim().isEmpty && files.isEmpty) return _json({'error': '写点什么再发'}, 409);
+        final item = {'id': _id(), 'at': DateTime.now().toUtc().toIso8601String(), 'type': 'user', 'text': '${body['text']}'.trim(), if (files.isNotEmpty) 'attachments': files};
         leadItems.add(item);
         _touch();
         return _json({'item': item});
@@ -251,6 +262,10 @@ class FakeBackend {
     final port = conversation('coderfleet', '端口读环境变量', attention: true, updatedAt: now.subtract(const Duration(minutes: 1)));
     final docs = conversation('coderfleet', '补文档', status: 'failed', updatedAt: now.subtract(const Duration(minutes: 30)));
     final at = now.toUtc().toIso8601String();
+    // Files the user gave 领航 earlier: a picture and a document.
+    const shot = '/lead/uploads/00000000000aa1b2-登录页.png', spec = '/lead/uploads/00000000000ba1b2-设计说明.pdf';
+    uploads[shot] = tinyPng;
+    uploads[spec] = base64Encode(utf8.encode('%PDF-1.4 demo'));
     Map<String, dynamic> about(Map<String, dynamic> conversation) =>
         {'conversationId': conversation['id'], 'conversation': conversation['name'], 'projectId': conversation['projectId'], 'turnId': 't-${conversation['id']}', 'at': at};
     lead = {
@@ -264,7 +279,10 @@ class FakeBackend {
     };
     leadItems.addAll([
       {'id': 'u1', 'at': at, 'type': 'user', 'text': '现在都在忙什么'},
+      {'id': 'u2', 'at': at, 'type': 'user', 'text': '按这张图改登录页', 'attachments': [shot, spec]},
       {'id': 'l1', 'at': at, 'type': 'lead', 'text': '[修登录页](conv:${login['id']})'},
+      {'id': 'd2', 'type': 'did', 'action': 'reply', ...about(login), 'asked': '', 'said': '按图改', 'reason': '用户给了设计图', 'undo': '', 'undone': false,
+        'evidence': <Map<String, dynamic>>[], 'attachments': [shot, spec]},
       {'id': 'd1', 'type': 'did', 'action': 'approve', ...about(login), 'asked': 'npm test', 'said': '', 'reason': '只是跑测试', 'undo': 'stop', 'undone': false,
         'evidence': [{'command': 'git status --short', 'output': ' M src/login.ts'}]},
       {'id': 's1', 'type': 'seen', ...about(docs)},

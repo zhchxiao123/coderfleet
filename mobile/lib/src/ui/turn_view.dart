@@ -16,11 +16,11 @@ import '../models.dart';
 import 'streaming_answer.dart';
 import 'theme.dart';
 
-/// Fetches project uploads once per path for the conversation view.
+/// Fetches uploaded images once per path: a project's for the conversation view, 领航's when [projectId] is null.
 class UploadCache {
   UploadCache(this.client, this.projectId);
   final BackendClient client;
-  final String projectId;
+  final String? projectId;
   final Map<String, Future<Uint8List>> _cache = {};
   Future<Uint8List> load(String path) => _cache.putIfAbsent(path, () => client.image(projectId, path).then(Uint8List.fromList));
   void seed(String path, Uint8List bytes) => _cache[path] = Future.value(bytes);

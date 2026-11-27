@@ -231,6 +231,7 @@ class LeadItem {
     required this.id, required this.type, this.text = '', this.conversationId = '', this.conversation = '', this.projectId = '',
     this.action = '', this.asked = '', this.said = '', this.reason = '', this.evidence = const [], this.undo = '', this.undone = false,
     this.kind = '', this.quote, this.why = '', this.lean = '', this.options = const [], this.questions = const [], this.free = false, this.resolved,
+    this.attachments = const [],
   });
   factory LeadItem.fromJson(Map<String, dynamic> json) => LeadItem(
         id: _text(json['id']), type: _text(json['type']), text: _text(json['text']), conversationId: _text(json['conversationId']),
@@ -240,7 +241,8 @@ class LeadItem {
         undo: _text(json['undo']), undone: json['undone'] == true, kind: _text(json['kind']), quote: json['quote'] is String ? json['quote'] as String : null,
         why: _text(json['why']), lean: _text(json['lean']), options: _strings(json['options']),
         questions: _maps(json['questions']).map(Question.fromJson).toList(), free: json['free'] == true,
-        resolved: json['resolved'] is Map ? LeadResolved(answer: _text(_map(json['resolved'])['answer']), by: _text(_map(json['resolved'])['by'])) : null);
+        resolved: json['resolved'] is Map ? LeadResolved(answer: _text(_map(json['resolved'])['answer']), by: _text(_map(json['resolved'])['by'])) : null,
+        attachments: _strings(json['attachments']));
   final String id, type, text, conversationId, conversation, projectId;
   /// `did`: approve / answer / reply / accept / stop / start, and whether it can still be taken back (`undo` = 'stop').
   final String action, asked, said, reason, undo;
@@ -255,6 +257,8 @@ class LeadItem {
   /// The answer may be any text (it goes to the conversation as a message).
   final bool free;
   final LeadResolved? resolved;
+  /// `user`: the files sent with the words (paths under /lead/uploads/); `did`: the ones it handed over to the conversation.
+  final List<String> attachments;
   bool get canUndo => undo.isNotEmpty && !undone;
   bool get open => type == 'ask' && resolved == null;
 }
