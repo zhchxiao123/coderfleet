@@ -446,17 +446,13 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       } finally { reviewing.delete(id); }
     })();
   };
-  /** Who else can work on the same directory: the project's other accounts, then other accounts' projects on it. The first reviews the job. */
-  const reviewers = (target: WorkspaceProject): WorkspaceProject[] => [
-    ...target.accounts.filter(item => item.name !== target.account.name && chatAccount(item)).map(item => ({ ...target, account: item })),
-    ...readWorkspace(workspace).projects.filter(item =>
-      item.name !== target.name && item.path === target.path && item.account.name !== target.account.name && chatAccount(item.account)),
-  ];
   /**
    * The author says every criterion is met. A reviewer now checks each against the changes in
-   * a turn of its own (a fresh session, read-only) shown in the same conversation: another
-   * account of the project or on this directory when there is one, else the same account. When it
-   * cannot start, the job goes to the user.
+   * a read-only turn of its own shown in the same conversation, always on the conversation's own
+   * project and account. Claude takes it in the author's session and hands it to a sub-agent
+   * (its Task/Agent tool), which starts without the author's context. The other engines have no
+   * such tool, and reviewing in the author's session would be the author checking itself, so
+   * theirs is a fresh session that resumes nothing. When it cannot start, the job goes to the user.
    */
   const reviewing = new Set<string>();
   const review = async (job: Job): Promise<void> => {
@@ -471,18 +467,19 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     try {
       const authored = store.conversation(id);
       const target = authored ? conversationProject(authored) : project(job.projectId);
-      const reviewer = reviewers(target)[0] ?? target;
-      account = reviewer.account.name;
-      await assertContainer(config.dockerPath, reviewer);
+      account = target.account.name;
+      await assertContainer(config.dockerPath, target);
       const turns = turnsOf(id);
       // Re-read after the await: a message of the user's may have started a turn meanwhile.
       if (turns.some(active) || followUps.list(id).length || jobs.get(id)?.state !== 'working') return;
+      // Only Claude has a sub-agent tool: it reviews in the author's session, every other engine in a fresh one.
+      const subagent = target.account.type === 'claude';
       const turn: Turn = {
-        id: turnId, origin: 'node', conversationId: id, projectId: reviewer.name, account, type: reviewer.account.type,
-        prompt: reviewPrompt(job, turns.find(item => !item.role && !item.checkRound && item.createdAt >= job.createdAt)?.prompt || job.title, criteria(jobTurns(job))), images: [], auto: true,
-        requestedModel: '', createdAt: new Date().toISOString(), resumeId: '', status: 'starting', answer: '', tools: [], blocks: [], role: 'review',
+        id: turnId, origin: 'node', conversationId: id, projectId: target.name, account, type: target.account.type,
+        prompt: reviewPrompt(job, turns.find(item => !item.role && !item.checkRound && item.createdAt >= job.createdAt)?.prompt || job.title, criteria(jobTurns(job)), subagent), images: [], auto: true,
+        requestedModel: '', createdAt: new Date().toISOString(), resumeId: subagent && authored ? authorSession(authored, turns) : '', status: 'starting', answer: '', tools: [], blocks: [], role: 'review',
       };
-      store.createTurn(turn, reviewer.path);
+      store.createTurn(turn, target.path);
       jobs.patch(id, ['working'], { phase: 'reviewing' });
       await runner.launch(turn, { cwd: job.directory, readOnly: true });
     } catch (error) {
@@ -508,7 +505,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const conversation = store.conversation(id);
       if (!conversation) return;
       const model = turnsOf(id).findLast(item => item.role !== 'review')?.requestedModel ?? '';
-      await startTurn(conversation, { text: reviewFeedback(turn.account ?? '', turn.answer), images: [], model, auto: true }, { role: 'review-feedback' });
+      await startTurn(conversation, { text: reviewFeedback(turn.answer), images: [], model, auto: true }, { role: 'review-feedback' });
     } catch (error) {
       jobs.patch(id, ['working'], { state: 'waiting', phase: undefined, reason: 'failed', error: message(error) });
     } finally { reviewing.delete(id); }
@@ -576,6 +573,9 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     return images;
   };
 
+  /** The agent session later turns resume (Python: native_session_id): never a fresh-session reviewer's. */
+  const authorSession = (conversation: Conversation, turns: readonly Turn[]): string =>
+    conversation.nativeSessionId || turns.findLast(turn => turn.sessionId && turn.role !== 'review')?.sessionId || '';
   /** Starts a new turn in a conversation that has none running. */
   const startTurn = async (conversation: Conversation, input: Omit<FollowUp, 'id' | 'createdAt'>, by: { checkRound?: number; role?: 'review-feedback' | 'accept'; jobStart?: boolean } = {}): Promise<Turn> => {
     const system = Boolean(by.checkRound || by.role);
@@ -592,8 +592,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     const moved = last && !job && !turns.some(turn => turn.createdAt > (last.closedAt ?? '')) ? closedNote(last) : '';
     if (turns.some(active)) throw new HttpError(409, 'A turn in this conversation is still active');
     if (turns.some(turn => turn.status === 'queued')) throw new HttpError(409, '这个对话还有原服务排队中的任务');
-    // Later turns resume the conversation's agent session (Python: native_session_id).
-    let resume = conversation.nativeSessionId || turns.findLast(turn => turn.sessionId && turn.role !== 'review')?.sessionId || '';
+    let resume = authorSession(conversation, turns);
     // A fork's first turn resumes the source at the fork point under the chosen session ID;
     // if that session already exists (the service stopped before recording it), resume it instead.
     const fork = conversation.fork;

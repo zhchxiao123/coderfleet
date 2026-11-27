@@ -396,7 +396,8 @@ export class TaskRunner {
       this.store.appendLog(turn.id, buffer.subarray(0, end + 1));
       // The offset moved, so the record is saved even when no event changed it.
       turn.logOffset = offset + end + 1;
-      // A reviewer's session is its own: the conversation keeps resuming the author's.
+      // A fresh-session reviewer's session is its own: the conversation keeps resuming the author's.
+      // (Claude reviews in the author's session, so there it is the same ID anyway.)
       if (turn.sessionId && turn.sessionId !== session && turn.role !== 'review') this.store.setNativeSession(turn.conversationId, turn.sessionId, turn.id);
       return true;
     } finally { closeSync(descriptor); }

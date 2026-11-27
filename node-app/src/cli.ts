@@ -83,7 +83,7 @@ async function jobCommand(verb: string | undefined, args: string[]): Promise<voi
     if (job.reason === 'question') console.log('有标准要你来定（上面标 ? 的）');
     else if (job.reason === 'checks') console.log('改了几轮，还有标准没做到');
     if (job.phase === 'reviewing') console.log('审查中…');
-    else if (job.review) console.log('审查（' + job.review.account + '）：' + ({ pass: '通过', changes: '要改', unclear: '没给出结论', failed: '没跑成' }[job.review.verdict] ?? job.review.verdict) + (job.review.error ? '，' + job.review.error : ''));
+    else if (job.review) console.log('审查：' + ({ pass: '通过', changes: '要改', unclear: '没给出结论', failed: '没跑成' }[job.review.verdict] ?? job.review.verdict) + (job.review.error ? '，' + job.review.error : ''));
     if (job.reason === 'merge') console.log('收下了，还没有合并：它在对话里说了原因，回它一句它就接着合并');
     if (job.mergeError) console.log(job.mergeError);
     if (job.state === 'accepted') console.log(job.mergedInto ? '合并进了 ' + job.mergedInto : '没有要合并的改动');

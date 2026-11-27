@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { criteriaIn, reviewVerdict } from '../dist/jobs.js';
 import { environment, lastTurn, until } from './helpers.mjs';
-import { jobCodex } from './fakes.mjs';
+import { fakeClaude, jobCodex } from './fakes.mjs';
 
 // The service runs in this process: the command line must not block it.
 const cli = async (...args) => (await promisify(execFile)(process.execPath, ['dist/cli.js', ...args], { encoding: 'utf8' })).stdout;
@@ -303,30 +303,36 @@ test('a job goes back to the agent until its criteria are met, and to the user w
   } finally { await env.close(); }
 });
 
-test('another account checks a job before the user does', { timeout: 120_000 }, async () => {
+test('a job is checked on its own account and container, even with others on the directory', { timeout: 120_000 }, async () => {
   const env = await environment({
     accounts: 'NAME=codex-a TYPE=codex\nNAME=codex-b TYPE=codex\n',
     projects: project => `NAME=web ACCOUNT=codex-a PATH=${project}\nNAME=web-same ACCOUNT=codex-a PATH=${project}\nNAME=web-review ACCOUNT=codex-b PATH=${project}\n`,
-    containers: { 'codex-web': 'running', 'codex-web-review': 'running', 'codex-web-same': 'running' }, bins: { codex: jobCodex },
+    containers: { 'codex-web': 'running', 'codex-web-review': 'exited', 'codex-web-same': 'exited' }, bins: { codex: jobCodex },
   });
   try {
     repository(env);
     const conversation = (await env.post('conversations', { projectId: 'web' })).body.id;
     await env.post('conversations/' + conversation + '/turns', { prompt: 'write state.txt bad', job: true });
     let job = await settled(env, conversation, 'review');
-    // The other account's project on this directory reviewed, not the same account's second
-    // one. It wanted changes once; the author got them, and the second review passed.
+    // Other accounts and projects on this directory are not used: the conversation's own account
+    // reviews, in a fresh session (Codex has no sub-agent). It wanted changes once; the author got
+    // them, and the second review passed.
     let turns = await turnsOf(env, conversation);
     assert.deepEqual(turns.map(turn => [turn.role, turn.account, turn.projectId, turn.status]), [
-      [undefined, 'codex-a', 'web', 'done'], ['review', 'codex-b', 'web-review', 'done'],
-      ['review-feedback', 'codex-a', 'web', 'done'], ['review', 'codex-b', 'web-review', 'done']]);
+      [undefined, 'codex-a', 'web', 'done'], ['review', 'codex-a', 'web', 'done'],
+      ['review-feedback', 'codex-a', 'web', 'done'], ['review', 'codex-a', 'web', 'done']]);
+    // No other container was started or used for it.
+    assert.deepEqual(JSON.parse(readFileSync(join(env.root, 'containers.json'), 'utf8')), { 'codex-web': 'running', 'codex-web-review': 'exited', 'codex-web-same': 'exited' });
+    assert.equal(readFileSync(join(env.root, 'docker.log'), 'utf8').split('\n').filter(line => /codex-web-(review|same)/.test(line)).length, 0);
+    assert.doesNotMatch(turns[1].prompt, /子 agent/);
     assert.match(turns[1].prompt, /^请核对[\s\S]*只读[\s\S]*- \[x\] 写好了 —— state.txt 里是 bad[\s\S]*write state.txt bad$/);
     assert.match(turns[1].answer, /^danger-full-access [\s\S]*结论：要改$/);
-    assert.match(turns[2].prompt, /codex-b[\s\S]*核对了你的改动[\s\S]*state.txt 第 1 行应该是 good/);
-    // The author keeps its own session: the reviewer's is never resumed.
+    assert.match(turns[2].prompt, /独立的复审人核对了你的改动[\s\S]*state.txt 第 1 行应该是 good/);
+    // The reviewer's session is its own (it resumed nothing); the author keeps resuming its own.
+    assert.doesNotMatch(turns[1].answer, /resumed=/);
     assert.deepEqual(started(turns[2]), { cwd: join(env.project, '.coderfleet-work', job.id), sandbox: 'danger-full-access', resumed: 'author-thread', preamble: false, continued: false });
-    assert.deepEqual([job.review.account, job.review.verdict, job.review.turnId, job.round, job.phase], ['codex-b', 'pass', turns[3].id, 1, undefined]);
-    assert.match(await cli('job', 'show', conversation, '--config', join(env.root, 'config.json')), /codex-b[\s\S]*通过/);
+    assert.deepEqual([job.review.account, job.review.verdict, job.review.turnId, job.round, job.phase], ['codex-a', 'pass', turns[3].id, 1, undefined]);
+    assert.match(await cli('job', 'show', conversation, '--config', join(env.root, 'config.json')), /审查：通过/);
 
     // What the user asks for next is checked again, and counts its rounds from zero.
     writeFileSync(join(env.project, '.coderfleet-work', job.id, 'state.txt'), 'bad\n');
@@ -335,5 +341,32 @@ test('another account checks a job before the user does', { timeout: 120_000 }, 
     job = await settled(env, conversation, 'review');
     assert.deepEqual([job.review.verdict, job.round], ['pass', 1]);
     assert.deepEqual(turns.slice(4).map(turn => turn.role), [undefined, 'review', 'review-feedback', 'review']);
+  } finally { await env.close(); }
+});
+
+test('Claude checks a job in its own session, through a sub-agent', { timeout: 120_000 }, async () => {
+  const env = await environment({
+    accounts: 'NAME=claude-a TYPE=claude\nNAME=claude-b TYPE=claude\n',
+    projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\nNAME=app-b ACCOUNT=claude-b PATH=${project}\n`,
+    containers: { 'claude-app': 'running', 'claude-app-b': 'exited' }, bins: { claude: fakeClaude },
+  });
+  try {
+    repository(env);
+    const conversation = (await env.post('conversations', { projectId: 'app' })).body.id;
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'job-done', job: true });
+    const job = await settled(env, conversation, 'review');
+    const turns = await ended(env, conversation, 2);
+    assert.deepEqual(turns.map(turn => [turn.role, turn.account, turn.projectId, turn.sessionId]), [
+      [undefined, 'claude-a', 'app', 'claude-session-1'], ['review', 'claude-a', 'app', 'claude-session-1']]);
+    // The author's session is resumed, and the review handed to a sub-agent with the whole request.
+    assert.match(turns[1].answer, /^resume:claude-session-1$/m);
+    assert.match(turns[1].prompt, /^请核对你在[\s\S]*Task 工具[\s\S]*----\n请核对另一个 AI[\s\S]*独立复审人[\s\S]*结论：通过[\s\S]*- \[x\] 写好了 —— 加了 a.txt[\s\S]*----$/);
+    assert.deepEqual(turns[1].tools.map(tool => [tool.id, tool.parent]), [['review-agent', undefined], ['v1', 'review-agent']]);
+    // Read-only still forbids editing files, and leaves the sub-agent's tool alone.
+    const disallowed = /^disallowed:(.*)$/m.exec(turns[1].answer)[1];
+    assert.match(disallowed, /Edit/);
+    assert.doesNotMatch(disallowed, /Task|Agent/);
+    assert.deepEqual([job.review.account, job.review.verdict, job.review.turnId], ['claude-a', 'pass', turns[1].id]);
+    assert.equal(JSON.parse(readFileSync(join(env.root, 'containers.json'), 'utf8'))['claude-app-b'], 'exited');
   } finally { await env.close(); }
 });

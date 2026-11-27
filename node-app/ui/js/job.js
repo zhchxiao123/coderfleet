@@ -148,7 +148,7 @@
         const review = job.review;
         const VERDICTS = { pass: h('span.add', '通过'), changes: h('span.del', '要改'), unclear: '没给出结论', failed: '没跑成' };
         const reviewRow = job.phase === 'reviewing' || review ? h('div.job-row.static', { title: review?.error || '' },
-          CF.icon('eye', 14), '核对', h('span.v', job.phase === 'reviewing' ? [h('span.spinner'), '逐条核对中…'] : [review.account + ' · ', VERDICTS[review.verdict] || review.verdict])) : null;
+          CF.icon('eye', 14), '核对', h('span.v', job.phase === 'reviewing' ? [h('span.spinner'), '逐条核对中…'] : VERDICTS[review.verdict] || review.verdict)) : null;
         node.replaceChildren(...[
           h('div.job-head',
             h('span.job-state', info.dot ? h('span.dot.' + info.dot) : null, job.state === 'working' && job.accepting ? '合并中' : info.label),
