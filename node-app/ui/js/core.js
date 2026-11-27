@@ -162,7 +162,9 @@
     const key = projectId + ':' + path;
     if (!uploadCache.has(key)) {
       const file = String(path).split('/').pop();
-      uploadCache.set(key, CF.get('projects/' + encodeURIComponent(projectId) + '/uploads/' + encodeURIComponent(file))
+      // Files given to 领航 are kept by the backend, not in a project.
+      const route = String(path).startsWith('/lead/uploads/') ? 'lead/uploads/' : 'projects/' + encodeURIComponent(projectId) + '/uploads/';
+      uploadCache.set(key, CF.get(route + encodeURIComponent(file))
         .then(image => 'data:' + image.mime + ';base64,' + image.data)
         .catch(error => { uploadCache.delete(key); throw error; }));
     }
@@ -183,6 +185,78 @@
     return h('span.file-chip', { title: name },
       h('span.file-icon', CF.icon('file', 18), extension ? h('small', extension) : null),
       h('span.file-meta', h('span.file-name', name), size !== undefined ? h('small', humanSize(size)) : null));
+  };
+
+  const IMAGES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+  /**
+   * A composer's attachments: picked, pasted or dropped files, uploaded right away; any file up to
+   * 500 MB, an image up to 20 MB also gets a preview. `upload(name, file)` saves one and answers its
+   * `{ path }`; `projectId` is where the preview is fetched from later (null for 领航); `alive()` is
+   * false once the composer is gone; `onChange()` follows every change.
+   */
+  CF.attachments = ({ upload, projectId, alive = () => true, onChange = () => {} }) => {
+    const row = h('div.attach-row', { hidden: true });
+    const input = h('input', { type: 'file', multiple: true, hidden: true });
+    let items = [];
+    const render = () => {
+      row.hidden = !items.length;
+      row.replaceChildren(...items.map(item => h('div.attach' + (item.path ? '' : '.uploading') + (item.image ? '' : '.file'), { title: item.name },
+        item.image ? h('img', { src: item.url, alt: item.name }) : CF.fileChip(item.name, item.size),
+        item.path ? null : h('span.spinner'),
+        h('button.remove', { title: '移除', on: { click: () => { items = items.filter(other => other !== item); render(); } } }, CF.icon('x', 11)))));
+      onChange();
+    };
+    const add = files => {
+      for (const file of files) {
+        if (!file.size) { CF.toast((file.name || '这个文件') + ' 是空的'); continue; }
+        if (file.size > 500 * 1024 * 1024) { CF.toast(file.name + ' 超过 500 MB'); continue; }
+        if (items.length >= 20) { CF.toast('一次最多 20 个附件'); break; }
+        const image = IMAGES.includes(file.type) && file.size <= 20 * 1024 * 1024;
+        const name = file.name || (image ? 'image.' + file.type.split('/')[1].replace('jpeg', 'jpg') : 'file');
+        const item = { name, size: file.size, image, url: '', path: '' };
+        items.push(item);
+        const preview = !image ? Promise.resolve('') : new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => { item.url = String(reader.result); if (alive()) render(); resolve(item.url); };
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(file);
+        });
+        (async () => {
+          try {
+            const saved = await upload(name, file);
+            item.path = saved.path;
+            CF.rememberUpload(saved.path, name, file.size);
+            const url = await preview;
+            if (url) CF.seedUpload(projectId, saved.path, url);
+          } catch (error) {
+            items = items.filter(other => other !== item);
+            CF.fail(error);
+          }
+          if (alive()) render();
+        })();
+      }
+      render();
+    };
+    input.addEventListener('change', () => { add([...input.files]); input.value = ''; });
+    return {
+      row, input, add,
+      pick: () => input.click(),
+      count: () => items.length,
+      uploading: () => items.some(item => !item.path),
+      paths: () => items.map(item => item.path),
+      clear: () => { items = []; render(); },
+      /** For the text box: pasted files are attached instead of typed. */
+      paste: event => {
+        const files = [...(event.clipboardData?.files || [])];
+        if (files.length) { event.preventDefault(); add(files); }
+      },
+      /** For the composer: files dragged onto it are attached. */
+      drop: {
+        dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
+        dragleave: event => event.currentTarget.classList.remove('dragging'),
+        drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); add([...event.dataTransfer.files]); },
+      },
+    };
   };
 
   /** A thumbnail of a project upload; clicking opens it full size. */

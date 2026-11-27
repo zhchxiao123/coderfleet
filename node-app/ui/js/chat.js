@@ -581,13 +581,13 @@
       };
       const sendButton = h('button.send', { title: '发送' }, CF.icon('send', 16));
       const hint = h('span.hint');
-      // Images: picked, pasted or dropped; uploaded into the project right away.
-      const attachRow = h('div.attach-row', { hidden: true });
-      const fileInput = h('input', { type: 'file', multiple: true, hidden: true });
+      // Files: picked, pasted or dropped; uploaded into the project right away.
+      const attach = CF.attachments({ projectId, upload: (name, file) => CF.transport.upload(CF.state.backendId, projectId, name, file),
+        alive: () => session === current, onChange: () => updateComposer() });
       // One "+" holds the attachment and the two switches, so the bar stays short. A switch that is
       // on shows in the bar as a chip; a click there turns it off.
       const attachButton = h('button.composer-icon', { title: '附件、自动模式、做完为止', 'aria-label': '附件、自动模式、做完为止', on: { click: () => CF.menu(attachButton, [
-        { icon: 'clip', label: '添加附件', hint: '图片、PDF 或任意文件，也可以粘贴或拖进来', run: () => fileInput.click() },
+        { icon: 'clip', label: '添加附件', hint: '图片、PDF 或任意文件，也可以粘贴或拖进来', run: attach.pick },
         autoOffered() || jobOffered ? '-' : null,
         autoOffered() ? { icon: 'bolt', label: '自动模式', hint: '工具直接执行，不再逐个确认', checked: autoOn(), run: toggleAuto } : null,
         jobOffered ? { icon: 'check', label: '做完为止', checked: jobWanted,
@@ -667,7 +667,7 @@
       const title = h('div.title');
       const meta = h('div.meta');
       const welcome = h('div.welcome-chat', h('div.hero', CF.brandMark(), h('h2'), h('p', '对话在项目容器里运行，可以读写这个项目的文件。')));
-      session = { key, conversationId: conversation?.id || '', projectId, turns: [], followUps: [], attachments: [], timer: 0, textarea, sending: false,
+      session = { key, conversationId: conversation?.id || '', projectId, turns: [], followUps: [], timer: 0, textarea, sending: false,
         etag: '', round: 0, jobAt: 0, streams: new Map(), written: new Set() };
       if (projectId) { try { localStorage.setItem(lastKey(), projectId); } catch { /* storage unavailable */ } }
       const current = session;
@@ -681,8 +681,8 @@
         const running = activeTurn();
         const info = project();
         const containerReady = info?.state === 'running';
-        const uploading = current.attachments.some(item => !item.path);
-        const content = Boolean(textarea.value.trim()) || current.attachments.length > 0;
+        const uploading = attach.uploading();
+        const content = Boolean(textarea.value.trim()) || attach.count() > 0;
         // One button: with something typed it sends (into the running answer, or queued after it);
         // with an empty box while an answer runs it stops.
         const stopping = Boolean(running) && !content;
@@ -927,55 +927,7 @@
         renderRail();
         trackCurrent();
       };
-      const renderAttachments = () => {
-        attachRow.hidden = !current.attachments.length;
-        attachRow.replaceChildren(...current.attachments.map(item => h('div.attach' + (item.path ? '' : '.uploading') + (item.image ? '' : '.file'), { title: item.name },
-          item.image ? h('img', { src: item.url, alt: item.name }) : CF.fileChip(item.name, item.size),
-          item.path ? null : h('span.spinner'),
-          h('button.remove', { title: '移除', on: { click: () => {
-            current.attachments = current.attachments.filter(other => other !== item);
-            renderAttachments();
-          } } }, CF.icon('x', 11)))));
-        updateComposer();
-      };
-      const IMAGES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-      // Any file up to 500 MB, uploaded into the project right away; an image up to 20 MB also gets a preview.
-      const addFiles = files => {
-        for (const file of files) {
-          if (!file.size) { CF.toast((file.name || '这个文件') + ' 是空的'); continue; }
-          if (file.size > 500 * 1024 * 1024) { CF.toast(file.name + ' 超过 500 MB'); continue; }
-          if (current.attachments.length >= 20) { CF.toast('一次最多 20 个附件'); break; }
-          const image = IMAGES.includes(file.type) && file.size <= 20 * 1024 * 1024;
-          const name = file.name || (image ? 'image.' + file.type.split('/')[1].replace('jpeg', 'jpg') : 'file');
-          const item = { name, size: file.size, image, url: '', path: '' };
-          current.attachments.push(item);
-          const preview = !image ? Promise.resolve('') : new Promise(resolve => {
-            const reader = new FileReader();
-            reader.onload = () => { item.url = String(reader.result); renderAttachments(); resolve(item.url); };
-            reader.onerror = () => resolve('');
-            reader.readAsDataURL(file);
-          });
-          (async () => {
-            try {
-              const saved = await CF.transport.upload(CF.state.backendId, projectId, name, file);
-              item.path = saved.path;
-              CF.rememberUpload(saved.path, name, file.size);
-              const url = await preview;
-              if (url) CF.seedUpload(projectId, saved.path, url);
-            } catch (error) {
-              current.attachments = current.attachments.filter(other => other !== item);
-              CF.fail(error);
-            }
-            if (session === current) renderAttachments();
-          })();
-        }
-        renderAttachments();
-      };
-      fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = ''; });
-      textarea.addEventListener('paste', event => {
-        const files = [...(event.clipboardData?.files || [])];
-        if (files.length) { event.preventDefault(); addFiles(files); }
-      });
+      textarea.addEventListener('paste', attach.paste);
       const renderFollowUps = () => {
         followHost.replaceChildren(...current.followUps.map(item => h('div.follow-up',
           h('span.badge', '排队中'),
@@ -1045,8 +997,8 @@
       // running turn; other agents get it as the next turn.
       const send = async () => {
         const prompt = textarea.value.trim();
-        if (sendButton.disabled || current.sending || (!prompt && !current.attachments.length)) return;
-        const images = current.attachments.map(item => item.path);
+        if (sendButton.disabled || current.sending || (!prompt && !attach.count())) return;
+        const images = attach.paths();
         current.sending = true;
         updateComposer();
         try {
@@ -1066,8 +1018,7 @@
           try { localStorage.setItem(modelKey(), modelSelect.value); } catch { /* storage unavailable */ }
           if (result?.delivered === 'queued') CF.toast('已排队，这一轮结束后自动发出');
           textarea.value = '';
-          current.attachments = [];
-          renderAttachments();
+          attach.clear();
           drafts.delete(current.key);
           autosize();
           await CF.app.refreshConversations();
@@ -1144,13 +1095,7 @@
       container.replaceChildren(chatRow);
       chatRow.append(
         (chatColumn.append(rail, current.conversationId ? transcript : welcome,
-          h('div.composer-wrap', toEnd, notice, followHost, h('div.composer', {
-            on: {
-              dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
-              dragleave: event => event.currentTarget.classList.remove('dragging'),
-              drop: event => { event.preventDefault(); event.currentTarget.classList.remove('dragging'); addFiles([...event.dataTransfer.files]); },
-            },
-          }, attachRow, textarea, fileInput,
+          h('div.composer-wrap', toEnd, notice, followHost, h('div.composer', { on: attach.drop }, attach.row, textarea, attach.input,
             h('div.composer-bar', attachButton, chip, accountChip, modelSelect, autoButton, jobToggle, hint, sendButton)))), chatColumn),
       );
       let filesOpen = false;
