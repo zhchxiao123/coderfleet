@@ -145,6 +145,35 @@ void main() {
     await teardown(tester);
   });
 
+  testWidgets('a file the answer sends shows as a card with a download button that saves it', (tester) async {
+    final backend = FakeBackend()..seedDemo();
+    final conversation = backend.conversation('coderfleet', '导出报告');
+    const answer = '报告好了。\n\n<!-- CF_SEND: /workspace/out/report.pdf -->\n\n标记的写法是 `<!-- CF_SEND: path -->`。';
+    final turn = backend.addTurn(conversation['id'] as String, {'prompt': '导出', 'answer': answer, 'blocks': [{'kind': 'text', 'text': answer}]});
+    final saved = <(String, List<int>)>[];
+    final picker = saveSentFile;
+    saveSentFile = (name, bytes) async { saved.add((name, bytes)); return true; };
+    addTearDown(() => saveSentFile = picker);
+    await pumpApp(tester, backend);
+    await openChat(tester, '导出报告');
+    expect(find.text('report.pdf'), findsOneWidget);
+    expect(find.text('out/report.pdf'), findsOneWidget);
+    expect(find.textContaining('CF_SEND: /workspace', findRichText: true), findsNothing);
+    await tester.tap(find.byTooltip('下载'));
+    await settle(tester, 3);
+    expect(backend.queries.singleWhere((url) => url.path.endsWith('turns/${turn['id']}/files')).queryParameters['path'], 'out/report.pdf');
+    expect([saved.single.$1, utf8.decode(saved.single.$2)], ['report.pdf', 'file']);
+    await teardown(tester);
+  });
+
+  test('answer text is cut at file markers; quoted and unfinished ones are not files', () {
+    expect(answerParts('plain'), [(text: 'plain', file: '')]);
+    expect(answerParts('a\n<!-- CF_SEND: ./x.txt -->\nb `<!-- CF_SEND: y -->`'),
+        [(text: 'a\n', file: ''), (text: '', file: 'x.txt'), (text: '\nb `<!-- CF_SEND: y -->`', file: '')]);
+    expect(answerParts('<!-- CF_SEND: a.zip -->'), [(text: '', file: 'a.zip')]);
+    expect(answerParts('<!--CF_SEND:a.zip-->\ndone <!-- CF_SEND: b', live: true), [(text: '', file: 'a.zip'), (text: '\ndone ', file: '')]);
+  });
+
   test('times: today as a clock, this year with the date, older with the year', () {
     final now = DateTime(2026, 11, 24, 18);
     expect(shortTime(DateTime(2026, 11, 24, 9, 5), now: now), '09:05');

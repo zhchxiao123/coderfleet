@@ -79,3 +79,24 @@ export function rawFile(root: string, rel: string): { name: string; size: number
   if (stat.size > RAW_LIMIT) throw new FileAccessError(413, '文件超过 50 MB，请在项目目录里直接打开');
   return { name: basename(target), size: stat.size, data: readFileSync(target).toString('base64') };
 }
+
+/** A path as an agent names it (/workspace/a.txt, ./a.txt), relative to the project. */
+const sentPath = (raw: string): string => raw.trim().replace(/^\/workspace\//, '').replace(/^\.\//, '');
+
+/**
+ * The files an answer offers: its <!-- CF_SEND: path --> markers, relative to the
+ * project. A marker quoted in code is text, not a file (as the App shows it).
+ */
+export function sentFiles(answer: string): string[] {
+  const code = [...answer.matchAll(/```[\s\S]*?(?:```|$)|`[^`\n]*`/g)].map(match => [match.index, match.index + match[0].length] as const);
+  return [...answer.matchAll(/<!--\s*CF_SEND:\s*([^>]+?)\s*-->/g)]
+    .filter(match => !code.some(([start, end]) => match.index >= start && match.index < end))
+    .map(match => sentPath(match[1] as string));
+}
+
+/** A file an answer offered, whole, for the phone to save: only what `sentFiles` names. */
+export function sentFile(root: string, answer: string, raw: string): { name: string; size: number; data: string } {
+  const path = sentPath(raw);
+  if (!path || !sentFiles(answer).includes(path)) throw new FileAccessError(404, '这轮回答没有发送这个文件');
+  return rawFile(root, path);
+}

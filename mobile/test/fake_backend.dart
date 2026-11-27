@@ -178,6 +178,9 @@ class FakeBackend {
         final turn = turns.values.expand((list) => list).firstWhere((item) => item['id'] == turnId);
         final tool = (turn['tools'] as List).cast<Map<String, dynamic>>().firstWhere((item) => item['id'] == Uri.decodeComponent(toolId));
         return _json({'id': tool['id'], 'title': tool['title'], 'status': tool['status'], 'input': tool['input'] ?? {}, 'output': tool['output'] ?? '', 'images': tool['images'] ?? []});
+      case ('GET', ['turns', _, 'files']):
+        final path = request.url.queryParameters['path'] ?? '';
+        return _json({'name': path.split('/').last, 'size': 4, 'data': base64Encode(utf8.encode('file'))});
       case ('GET', ['system-llm']):
         return _json({'configured': translation, 'provider': 'openai', 'model': 'demo'});
       case ('POST', ['translate']):

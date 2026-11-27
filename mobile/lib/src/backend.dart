@@ -3,6 +3,7 @@
 // https anywhere, plain http only to private and mesh addresses.
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -199,6 +200,12 @@ class BackendClient {
   Future<List<int>> image(String projectId, String path) async {
     final data = asMap(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/uploads/${path.split('/').last}', timeout: const Duration(seconds: 60)));
     return base64Decode(data['data'] as String? ?? '');
+  }
+
+  /// A file the answer of [turnId] offered with a CF_SEND marker (up to 50 MB), to save on the phone.
+  Future<({String name, Uint8List bytes})> sentFile(String turnId, String path) async {
+    final data = asMap(await _call('GET', 'turns/$turnId/files?path=${Uri.encodeQueryComponent(path)}', timeout: const Duration(seconds: 300)));
+    return (name: data['name'] as String? ?? path.split('/').last, bytes: base64Decode(data['data'] as String? ?? ''));
   }
 
   /// Branches a new conversation off a finished Claude answer.

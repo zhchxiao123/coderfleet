@@ -6,6 +6,7 @@ import 'dart:convert';
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -100,8 +101,13 @@ class _TurnViewState extends State<TurnView> {
           flush();
           if (text.trim().isNotEmpty) {
             // The block being written is the last one of a turn that still runs.
-            children.add(StreamingAnswer(key: ValueKey('answer-$index'), text: showing ? translations[text] ?? text : text,
-                live: turn.active && index == turn.blocks.length - 1));
+            final live = turn.active && index == turn.blocks.length - 1;
+            final parts = answerParts(showing ? translations[text] ?? text : text, live: live);
+            for (final (part, (text: piece, :file)) in parts.indexed) {
+              children.add(file.isNotEmpty
+                  ? SentFile(key: ValueKey('file-$index-$part'), path: file, turnId: turn.id, client: widget.client)
+                  : StreamingAnswer(key: ValueKey(part == 0 ? 'answer-$index' : 'answer-$index-$part'), text: piece, live: live && part == parts.length - 1));
+            }
           }
         case UserBlock(:final text, images: final paths):
           flush();
@@ -186,18 +192,98 @@ String shortTime(DateTime time, {DateTime? now}) {
   return '${local.year}年${local.month}月${local.day}日';
 }
 
-/// A non-image attachment: an icon with the extension, the name and the size.
+final _sendMarker = RegExp(r'<!--\s*CF_SEND:\s*([^>]+?)\s*-->');
+final _quotedCode = RegExp(r'```[\s\S]*?(?:```|$)|`[^`\n]*`');
+
+/// Answer text cut at the agent's file markers, <!-- CF_SEND: path -->, as the desktop App
+/// shows them: each piece is Markdown (`text`) or a file to save (`file`, relative to the
+/// project). A marker quoted in code is text. While [live], a marker still being written is held back.
+List<({String text, String file})> answerParts(String text, {bool live = false}) {
+  if (!text.contains('CF_SEND')) return [(text: text, file: '')];
+  final code = _quotedCode.allMatches(text).toList();
+  bool quoted(int index) => code.any((match) => index >= match.start && index < match.end);
+  final parts = <({String text, String file})>[];
+  var last = 0;
+  for (final match in _sendMarker.allMatches(text)) {
+    if (quoted(match.start)) continue;
+    final before = text.substring(last, match.start);
+    if (before.trim().isNotEmpty) parts.add((text: before, file: ''));
+    parts.add((text: '', file: match.group(1)!.trim().replaceFirst(RegExp(r'^/workspace/'), '').replaceFirst(RegExp(r'^\./'), '')));
+    last = match.end;
+  }
+  var rest = text.substring(last);
+  final open = rest.lastIndexOf('<!--');
+  if (live && open >= 0 && !rest.substring(open).contains('-->') && !quoted(last + open)) rest = rest.substring(0, open);
+  if (rest.trim().isNotEmpty || parts.isEmpty) parts.add((text: rest, file: ''));
+  return parts;
+}
+
+/// Saves a downloaded file where the user chooses; false when they cancelled. Tests replace it.
+Future<bool> Function(String name, Uint8List bytes) saveSentFile =
+    (name, bytes) async => await FilePicker.saveFile(fileName: name, bytes: bytes) != null;
+
+/// A file the agent sent in its answer: its name and path, and a button that saves it on the phone.
+class SentFile extends StatefulWidget {
+  const SentFile({super.key, required this.path, required this.turnId, required this.client});
+  final String path, turnId;
+  final BackendClient client;
+  @override
+  State<SentFile> createState() => _SentFileState();
+}
+
+class _SentFileState extends State<SentFile> {
+  bool busy = false;
+
+  Future<void> _save() async {
+    setState(() => busy = true);
+    try {
+      final file = await widget.client.sentFile(widget.turnId, widget.path);
+      final saved = await saveSentFile(file.name, file.bytes);
+      if (mounted && saved) showMessage(context, '已保存 ${file.name}');
+    } on BackendError catch (error) {
+      if (mounted) showMessage(context, error.message);
+    } catch (_) {
+      if (mounted) showMessage(context, '保存失败');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FileChip(
+          name: widget.path.split('/').last, detail: widget.path, maxWidth: 320,
+          trailing: IconButton(
+            tooltip: '下载', onPressed: busy ? null : _save, visualDensity: VisualDensity.compact,
+            icon: busy
+                ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: palette.text3))
+                : Icon(Icons.download_rounded, size: 20, color: palette.accent),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A non-image attachment: an icon with the extension, the name and the size (or [detail]); [trailing] is its action.
 class FileChip extends StatelessWidget {
-  const FileChip({super.key, required this.name, this.size, this.height = 52, this.maxWidth = 240});
+  const FileChip({super.key, required this.name, this.size, this.detail, this.trailing, this.height = 52, this.maxWidth = 240});
   final String name;
   final int? size;
+  final String? detail;
+  final Widget? trailing;
   final double height, maxWidth;
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     final extension = RegExp(r'\.([A-Za-z0-9]{1,6})$').firstMatch(name)?.group(1)?.toUpperCase() ?? '';
     return Container(
-      height: height, constraints: BoxConstraints(maxWidth: maxWidth), padding: const EdgeInsets.symmetric(horizontal: 10),
+      height: height, constraints: BoxConstraints(maxWidth: maxWidth), padding: EdgeInsets.only(left: 10, right: trailing == null ? 10 : 2),
       decoration: BoxDecoration(color: palette.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: palette.line)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Container(width: 30, height: 34, alignment: Alignment.center,
@@ -206,8 +292,10 @@ class FileChip extends StatelessWidget {
         const SizedBox(width: 8),
         Flexible(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text, fontSize: 13, fontWeight: FontWeight.w500)),
-          if (size != null) Text(humanSize(size!), style: TextStyle(color: palette.text3, fontSize: 11.5)),
+          if (size != null || detail != null)
+            Text(detail ?? humanSize(size!), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text3, fontSize: 11.5)),
         ])),
+        if (trailing != null) Padding(padding: const EdgeInsets.only(left: 4), child: trailing),
       ]),
     );
   }

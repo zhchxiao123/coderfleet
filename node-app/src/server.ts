@@ -22,7 +22,7 @@ import { Lifecycle } from './lifecycle.js';
 import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
 import { Titles } from './titles.js';
-import { FileAccessError, listFiles, previewFile, rawFile } from './files.js';
+import { FileAccessError, listFiles, previewFile, rawFile, sentFile } from './files.js';
 import { configured, SystemLLMError, systemLLM, TranslationCache, translateText } from './translate.js';
 import { findPythonService, stopPythonTask, type PythonService } from './python-service.js';
 import { active, identifier, message, readConfig, record, text, type Conversation, type Turn } from './state.js';
@@ -94,7 +94,7 @@ const DEVICE_ROUTES: readonly [string, RegExp][] = [
   ['GET', /^conversations\/[\w-]+\/(turns|changes|follow-ups)$/], ['POST', /^conversations\/[\w-]+\/(turns|fork)$/],
   ['DELETE', /^conversations\/[\w-]+\/follow-ups\/[\w-]+$/],
   ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[^/]+$/],
-  ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
+  ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['GET', /^turns\/[\w-]+\/files$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
   ['GET', /^system-llm$/], ['POST', /^translate$/],
 ];
 export function deviceAllowed(method: string, path: string): boolean {
@@ -1229,6 +1229,13 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const tool = turn?.tools.find(item => item.id === decodeURIComponent(toolId as string));
       if (!tool) throw new HttpError(404, '找不到这次工具调用');
       return { id: tool.id, title: tool.title, status: tool.status, input: tool.input ?? {}, output: tool.output ?? '', images: toolImages(turn?.id as string, tool.id) };
+    }],
+    // A file the answer offered with a CF_SEND marker; a phone reaches no other project file.
+    ['GET', /^turns\/([\w-]+)\/files$/, async (_request, [id], url) => {
+      const turn = store.turn(identifier(id));
+      if (!turn) throw new HttpError(404, '找不到这一轮');
+      const answer = [turn.answer, ...(turn.blocks ?? []).map(block => block.kind === 'text' ? block.text : '')].join('\n');
+      return fileCall(() => sentFile(project(turn.projectId).path, answer, url.searchParams.get('path') ?? ''));
     }],
     ['POST', /^turns\/([\w-]+)\/(permission|cancel)$/, async (request, [id, action]) => {
       const turn = store.turn(identifier(id));

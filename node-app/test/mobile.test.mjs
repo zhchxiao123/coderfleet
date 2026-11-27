@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { deviceAllowed } from '../dist/server.js';
 import { interfaceAddresses, pairingLink, phoneUrl, privateHost } from '../dist/mobile.js';
@@ -29,6 +31,18 @@ test('a paired phone gets a chat-only token that can be revoked', { timeout: 120
     const conversation = (await env.as(phone, 'POST', 'conversations', { projectId: 'app' })).body.id;
     assert.equal((await env.as(phone, 'POST', 'conversations/' + conversation + '/turns', { prompt: 'hello' })).status, 200);
     await until(async () => (await env.as(phone, 'GET', 'conversations/' + conversation + '/turns')).body.at(-1), turn => turn?.status === 'done', 'phone turn');
+    // A file the answer offers (a CF_SEND marker outside code) can be saved on the phone; no other project file can.
+    mkdirSync(join(env.project, 'out'));
+    writeFileSync(join(env.project, 'out', 'report.txt'), 'done');
+    writeFileSync(join(env.project, 'notes.txt'), 'private');
+    await env.as(phone, 'POST', 'conversations/' + conversation + '/turns', { prompt: 'file <!-- CF_SEND: ./out/report.txt --> not `<!-- CF_SEND: notes.txt -->`' });
+    const sent = await until(async () => (await env.as(phone, 'GET', 'conversations/' + conversation + '/turns')).body.at(-1), turn => turn?.status === 'done' && turn.answer.includes('CF_SEND'), 'turn with a file');
+    const file = (await env.as(phone, 'GET', 'turns/' + sent.id + '/files?path=' + encodeURIComponent('out/report.txt'))).body;
+    assert.deepEqual([file.name, Buffer.from(file.data, 'base64').toString()], ['report.txt', 'done']);
+    assert.equal((await env.as(phone, 'GET', 'turns/' + sent.id + '/files?path=' + encodeURIComponent('/workspace/out/report.txt'))).status, 200);
+    assert.equal((await env.as(phone, 'GET', 'turns/' + sent.id + '/files?path=notes.txt')).status, 404, 'a marker quoted in code offers nothing');
+    assert.equal((await env.as(phone, 'GET', 'turns/' + sent.id + '/files?path=')).status, 404);
+    assert.equal((await env.as(phone, 'GET', 'projects/app/files/raw?path=notes.txt')).status, 403);
     // ...but not manage the computer.
     for (const [method, path] of [['GET', 'accounts'], ['GET', 'settings'], ['POST', 'projects/app/terminal'], ['GET', 'mobile'], ['POST', 'devices'], ['DELETE', 'projects/app'], ['POST', 'containers/stop']]) {
       assert.equal((await env.as(phone, method, path, {})).status, 403, method + ' ' + path);
