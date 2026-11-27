@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 · 领航的处理过程</title>
+<style>
+/* Tokens copied from node-app/ui/theme.css so the prototype looks like the App; nothing here is loaded by the App. */
+:root {
+  color-scheme: light dark;
+  --canvas: #fff; --sidebar: #f7f8fa; --surface: #fff; --surface-2: #f6f7f9;
+  --hover: rgba(38,49,72,.06); --active: rgba(38,49,72,.09);
+  --line: rgba(20,28,45,.08); --line-strong: rgba(20,28,45,.14);
+  --text: #141820; --text-2: #4f5666; --text-3: #8a91a0; --ink: #141820; --ink-text: #fff;
+  --accent: #4a63e7; --accent-soft: rgba(74,99,231,.1);
+  --green: #1f9d55; --green-soft: rgba(31,157,85,.12); --amber: #d97706; --amber-soft: rgba(217,119,6,.12);
+  --red: #e5484d; --red-soft: rgba(229,72,77,.09);
+  --shadow-card: 0 0 0 .5px rgba(20,28,45,.07), 0 1px 3px rgba(20,28,45,.05);
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #0f1115; --sidebar: #16181e; --surface: #1c1f26; --surface-2: #22252d;
+    --hover: rgba(220,228,245,.06); --active: rgba(220,228,245,.1);
+    --line: rgba(220,228,245,.08); --line-strong: rgba(220,228,245,.15);
+    --text: #eceef3; --text-2: #a7adba; --text-3: #6f7686; --ink: #eceef3; --ink-text: #111318;
+    --accent: #8da0ff; --accent-soft: rgba(141,160,255,.14);
+    --green: #4cc38a; --green-soft: rgba(76,195,138,.14); --amber: #f0a43a; --amber-soft: rgba(240,164,58,.14);
+    --red: #ff6b6f; --red-soft: rgba(255,107,111,.12);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font: 14px/1.55 var(--font); color: var(--text); background: var(--canvas); display: flex; flex-direction: column; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+/* Prototype chrome: which variant is shown. */
+.proto-bar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--sidebar); flex-wrap: wrap; }
+.proto-bar .label { font-weight: 600; margin-right: 8px; }
+.proto-bar .tab { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 999px; padding: 4px 12px; font-size: 13px; }
+.proto-bar .tab.on { background: var(--ink); color: var(--ink-text); border-color: var(--ink); }
+.proto-bar .hint { margin-left: auto; color: var(--text-3); font-size: 12px; }
+.view { flex: 1; min-height: 0; display: none; }
+.view.on { display: flex; }
+
+/* A fake App window: sidebar + the 领航 page. */
+.app { display: flex; flex: 1; min-height: 0; }
+.side { width: 210px; background: var(--sidebar); border-right: 1px solid var(--line); padding: 14px 10px; font-size: 13px; color: var(--text-2); flex: none; }
+.side .item { padding: 6px 10px; border-radius: 8px; display: flex; justify-content: space-between; }
+.side .item.on { background: var(--active); color: var(--text); font-weight: 600; }
+.side .group { margin: 14px 10px 4px; font-size: 11.5px; color: var(--text-3); }
+.side b { background: var(--amber-soft); color: var(--amber); border-radius: 999px; padding: 0 7px; font-size: 11.5px; }
+.page { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 12px 22px; border-bottom: 1px solid var(--line); }
+.topbar .title { font-weight: 650; font-size: 15px; }
+.topbar .meta { color: var(--text-3); font-size: 12.5px; }
+.topbar .spacer { flex: 1; }
+.btn { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 4px 10px; font-size: 12.5px; }
+.btn.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.pill { font-size: 11.5px; color: var(--text-3); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; margin-left: 8px; }
+
+/* The 领航 thread, as node-app/ui/js/lead.js draws it. */
+.transcript { flex: 1; overflow: auto; }
+.inner { max-width: 760px; margin: 0 auto; padding: 22px 24px 40px; display: flex; flex-direction: column; gap: 16px; }
+.user-msg { align-self: flex-end; background: var(--surface-2); border-radius: 16px; padding: 8px 14px; max-width: 80%; }
+.assistant { color: var(--text); }
+.assistant a, .ref { color: var(--accent); text-decoration: none; border: 0; background: none; padding: 0; font: inherit; }
+.pd { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+.lead-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; color: var(--text-3); font-size: 12.5px; }
+.lead-note b { color: var(--text-2); font-weight: 600; }
+.lead-note .project { color: var(--text-3); }
+.lead-link { border: 0; background: none; padding: 0; margin-left: 10px; color: var(--text-3); font-size: 12.5px; white-space: nowrap; }
+.lead-link:hover { color: var(--accent); }
+.lead-link.new { color: var(--accent); }
+.lead-say { border: 1px solid var(--line-strong); border-radius: 14px; padding: 12px 16px; box-shadow: var(--shadow-card); background: var(--surface); }
+.lead-say p { margin: 0 0 6px; }
+.lead-say .mine { color: var(--text-2); font-size: 13px; }
+.lead-say .quick { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.option { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 999px; padding: 3px 12px; font-size: 13px; }
+.composer { border-top: 1px solid var(--line); padding: 12px 24px; }
+.composer .box { max-width: 760px; margin: 0 auto; border: 1px solid var(--line-strong); border-radius: 14px; padding: 10px 14px; color: var(--text-3); font-size: 13px; }
+
+/* ── New: the process of one run, folded by default ── */
+.why-row { margin-top: -10px; }
+.why-toggle { border: 0; background: none; padding: 0; color: var(--text-3); font-size: 12px; display: inline-flex; align-items: center; gap: 5px; }
+.why-toggle:hover { color: var(--accent); }
+.why-toggle .chev { display: inline-block; transition: transform .15s; font-size: 10px; }
+.why-toggle.open .chev { transform: rotate(90deg); }
+.why-toggle .stat { color: var(--text-3); opacity: .85; }
+.process { margin-top: 6px; padding: 10px 14px 8px; border-radius: 12px; background: var(--surface-2); font-size: 13px; }
+.process .foot { display: flex; gap: 14px; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line-strong); font-size: 12px; color: var(--text-3); }
+.process .foot button { border: 0; background: none; padding: 0; color: var(--accent); font-size: 12px; }
+
+.tl { list-style: none; margin: 0; padding: 0; position: relative; }
+.tl::before { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 1.5px; background: var(--line-strong); }
+.st { position: relative; padding: 3px 0 3px 24px; }
+.st .ic { position: absolute; left: 0; top: 7px; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 9.5px; background: var(--surface); border: 1.5px solid var(--line-strong); color: var(--text-3); }
+.st.event .ic { border-color: var(--text-3); }
+.st.look .ic { border-color: var(--accent); color: var(--accent); }
+.st.think .ic { border-color: var(--text-3); border-style: dashed; }
+.st.blocked .ic { border-color: var(--red); color: var(--red); }
+.st.action .ic { background: var(--green); border-color: var(--green); color: #fff; }
+.st.action.ask .ic { background: var(--amber); border-color: var(--amber); }
+.st.action.error .ic { background: var(--red); border-color: var(--red); }
+.st .line { display: flex; gap: 8px; align-items: baseline; }
+.st .what { flex: 1; min-width: 0; color: var(--text-2); }
+.st .what .k { color: var(--text-3); margin-right: 4px; }
+.st .what code { font: 12px var(--mono); color: var(--text); background: var(--hover); padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere; }
+.st .when { color: var(--text-3); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.st .sum { color: var(--text-3); font-size: 12.5px; margin-top: 1px; }
+.st.think .what { font-style: italic; color: var(--text-2); }
+.st.action .what { color: var(--text); font-weight: 550; }
+.st .reason { color: var(--text-2); font-size: 12.5px; margin-top: 2px; }
+.st .reason::before { content: '理由：'; color: var(--text-3); }
+.st .more { border: 0; background: none; padding: 0; margin-left: 6px; color: var(--text-3); font-size: 11.5px; }
+.st .more:hover { color: var(--accent); }
+.st pre { margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); font: 11.5px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.badge { white-space: nowrap; font-size: 10.5px; border-radius: 999px; padding: 0 6px; margin-left: 4px; vertical-align: 1px; }
+.badge.gap { background: var(--amber-soft); color: var(--amber); }
+.badge.ok { background: var(--green-soft); color: var(--green); }
+.legend-gap .badge { margin: 0 2px; }
+
+/* ── B: the workbench ── */
+.wb { display: flex; flex: 1; min-height: 0; }
+.wb-list { width: 330px; flex: none; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.wb-filters { display: flex; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.chip { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--text-2); }
+.chip.on { background: var(--ink); color: var(--ink-text); border-color: var(--ink); }
+.wb-rows { overflow: auto; flex: 1; }
+.wb-day { padding: 10px 14px 4px; font-size: 11.5px; color: var(--text-3); }
+.wb-row { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 9px 14px; border-left: 3px solid transparent; }
+.wb-row:hover { background: var(--hover); }
+.wb-row.on { background: var(--active); border-left-color: var(--accent); }
+.wb-row .top { display: flex; gap: 6px; align-items: baseline; font-size: 13px; }
+.wb-row .top .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+.wb-row .top .t { color: var(--text-3); font-size: 11.5px; }
+.wb-row .sub { color: var(--text-3); font-size: 12px; margin-top: 2px; display: flex; gap: 8px; }
+.oc { font-size: 11px; border-radius: 6px; padding: 0 6px; }
+.oc.acted { background: var(--green-soft); color: var(--green); }
+.oc.ask { background: var(--amber-soft); color: var(--amber); }
+.oc.seen { background: var(--hover); color: var(--text-3); }
+.oc.error { background: var(--red-soft); color: var(--red); }
+.wb-detail { flex: 1; overflow: auto; min-width: 0; }
+.wb-detail .inner { gap: 14px; }
+.wb-head h2 { margin: 0 0 4px; font-size: 17px; }
+.wb-head .facts { display: flex; gap: 16px; flex-wrap: wrap; color: var(--text-3); font-size: 12.5px; }
+.wb-head .facts b { color: var(--text-2); font-weight: 600; }
+.panel { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
+.panel h3 { margin: 0 0 8px; font-size: 13px; color: var(--text-2); font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.panel h3 .r { margin-left: auto; font-weight: 400; color: var(--text-3); font-size: 12px; }
+details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; }
+details.raw pre { font: 11.5px/1.5 var(--mono); white-space: pre-wrap; color: var(--text-2); max-height: 300px; overflow: auto; background: var(--surface-2); padding: 10px; border-radius: 8px; }
+
+/* ── C & notes: plain document pages ── */
+.doc { flex: 1; overflow: auto; }
+.doc .inner { max-width: 860px; gap: 4px; }
+.doc h2 { margin: 18px 0 6px; font-size: 18px; }
+.doc h3 { margin: 16px 0 4px; font-size: 15px; }
+.doc p, .doc li { color: var(--text-2); }
+.doc code { font: 12.5px var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+.doc table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 6px 0; }
+.doc th, .doc td { border: 1px solid var(--line-strong); padding: 6px 8px; text-align: left; vertical-align: top; }
+.doc th { background: var(--surface-2); font-weight: 600; }
+.yes, .part, .no { font-weight: 600; white-space: nowrap; } .yes { color: var(--green); } .part { color: var(--amber); } .no { color: var(--red); }
+.reco { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 10px 10px 0; color: var(--text); margin: 8px 0; }
+.phones { display: flex; gap: 22px; flex-wrap: wrap; margin: 10px 0; }
+.phone { width: 300px; height: 600px; border: 10px solid #111; border-radius: 38px; overflow: hidden; display: flex; flex-direction: column; background: var(--canvas); position: relative; font-size: 13px; }
+.phone .ptop { padding: 12px 16px 8px; font-weight: 650; border-bottom: 1px solid var(--line); }
+.phone .pbody { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.phone .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: 68%; background: var(--surface); border-radius: 18px 18px 0 0; box-shadow: 0 -8px 28px rgba(0,0,0,.18); padding: 8px 14px 14px; overflow: auto; }
+.phone .grab { width: 36px; height: 4px; background: var(--line-strong); border-radius: 2px; margin: 0 auto 10px; }
+.phone .cap { text-align: center; color: var(--text-3); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div class="proto-bar">
+  <span class="label">原型 · 领航的处理过程</span>
+  <button class="tab on" data-view="a">A 每条下面「怎么判断的」</button>
+  <button class="tab" data-view="b">B 工作台</button>
+  <button class="tab" data-view="c">C 手机端（方案）</button>
+  <button class="tab" data-view="notes">现状与后端缺口</button>
+  <span class="hint">全部是假数据；<span class="badge gap">现在没记</span> 标的是后端目前不落盘、要新增记录才有的内容</span>
+</div>
+
+<!-- A: the 领航 page as it is, with a folded process under each line it wrote -->
+<section class="view on" id="view-a">
+  <div class="app">
+    <nav class="side">
+      <div class="item on">领航 <b>1</b></div>
+      <div class="group">coderfleet</div>
+      <div class="item">修登录页样式</div><div class="item">给启动流程补集成测试</div><div class="item">重构 jobs 模块</div>
+      <div class="group">reminis-app</div>
+      <div class="item">端口改成读 PORT</div><div class="item">修 iOS 分享扩展</div>
+    </nav>
+    <div class="page">
+      <div class="topbar">
+        <div class="title">领航</div>
+        <div class="meta">在替你跟 7 个对话 · 1 件等你 <span class="pill">只做决定，不干活</span></div>
+        <div class="spacer"></div>
+        <button class="btn" data-go="b">工作台</button>
+        <button class="btn">规矩</button>
+      </div>
+      <div class="transcript"><div class="inner" id="thread"></div></div>
+      <div class="composer"><div class="box">直接说就行：交代一件事，或者一句话回它问你的几件事…</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- B: every run, full process -->
+<section class="view" id="view-b">
+  <div class="app">
+    <nav class="side">
+      <div class="item">领航 <b>1</b></div>
+      <div class="item on" style="margin-left:12px">└ 工作台</div>
+      <div class="group">coderfleet</div>
+      <div class="item">修登录页样式</div><div class="item">给启动流程补集成测试</div>
+    </nav>
+    <div class="page">
+      <div class="topbar">
+        <button class="btn" data-go="a">← 回到领航</button>
+        <div class="title">工作台</div>
+        <div class="meta">领航每处理一件事是一次「判断」，这里能看全过程</div>
+        <div class="spacer"></div>
+        <span class="meta" id="wb-sum"></span>
+      </div>
+      <div class="wb">
+        <div class="wb-list">
+          <div class="wb-filters" id="wb-filters"></div>
+          <div class="wb-rows" id="wb-rows"></div>
+        </div>
+        <div class="wb-detail"><div class="inner" id="wb-detail"></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- C: phone, proposal only -->
+<section class="view" id="view-c">
+  <div class="doc"><div class="inner">
+    <h2>C 手机端：只写方案，这次不动 mobile/</h2>
+    <p>手机屏幕窄，不做工作台；只做 A 的那一层：每条领航写的行下面一个「怎么判断的 · 查了 2 处 · 21 秒」，点开是<strong>底部弹层</strong>，内容就是 A 里的那条时间线，命令输出再点一层才展开。数据和桌面同一个接口，手机不用另算。</p>
+    <div class="phones">
+      <div>
+        <div class="phone">
+          <div class="ptop">领航</div>
+          <div class="pbody">
+            <div class="lead-note"><span class="pd" style="background:#3b82f6"></span><span>「<b>修登录页样式</b>」要做的操作我批了：Bash：npm test -- auth</span></div>
+            <div class="why-row"><span class="why-toggle"><span class="chev">›</span> 怎么判断的 <span class="stat">· 查了 2 处 · 21 秒</span></span></div>
+            <div class="lead-say"><p><span class="ref">端口改成读 PORT</span> 做完了（3 个文件，+8 −1），可以合并吗？</p><p class="mine">npm test 有 1 条没过，我倾向先让它修。</p><div class="quick"><span class="option">收下并合并</span><span class="option">我去看</span></div></div>
+            <div class="why-row"><span class="why-toggle"><span class="chev">›</span> 怎么判断的 <span class="stat">· 查了 3 处 · 48 秒</span></span></div>
+          </div>
+        </div>
+        <div class="cap">① 线程里：默认收起，一行小字</div>
+      </div>
+      <div>
+        <div class="phone">
+          <div class="ptop">领航</div>
+          <div class="pbody" style="opacity:.35">
+            <div class="lead-note"><span>「<b>修登录页样式</b>」要做的操作我批了</span></div>
+          </div>
+          <div class="sheet"><div class="grab"></div><div style="font-weight:600;margin-bottom:8px">怎么判断的</div><ol class="tl" id="phone-tl"></ol></div>
+        </div>
+        <div class="cap">② 点开：底部弹层，下拉关掉</div>
+      </div>
+    </div>
+    <h3>实现时手机要做的</h3>
+    <ul>
+      <li><code>lead_screen.dart</code> 里 did / ask / 领航回复 三种行下加一行入口，替换现在 did 行上的「依据」。</li>
+      <li>点开时按需请求 <code>GET lead/runs/&lt;id&gt;</code>（见「现状与后端缺口」），不随线程一起下发，线程接口不变大。</li>
+      <li>不做筛选、不做列表；想看全部回桌面工作台。</li>
+    </ul>
+  </div></div>
+</section>
+
+<!-- Notes: what is recorded today, and what the backend would have to add -->
+<section class="view" id="view-notes">
+  <div class="doc"><div class="inner" id="notes"></div></div>
+</section>
+
+<template id="notes-src">
+  <h2>现状：领航一轮的过程，今天落盘了多少</h2>
+  <p>结论：<strong>大部分没有落盘，这个功能不能纯前端做，后端要先记一份。</strong>具体依据（node-app 当前提交）：</p>
+  <table>
+    <tr><th>过程里的东西</th><th>现在</th><th>依据</th></tr>
+    <tr><td>engine 会话（模型每条消息、每次工具调用的完整记录）</td><td class="no">不落盘</td><td><code>lead-engine.ts:130</code> 用 <code>SessionManager.inMemory(...)</code>，<code>:156</code> 跑完 <code>session.dispose()</code>。<code>lead/engine/</code> 目录里只有 pi 的空凭据 <code>auth.json</code>（测试留下的状态目录里也只有这一个文件）。「session 落盘」这个说法不成立。</td></tr>
+    <tr><td>思考（reasoning）</td><td class="no">根本没有</td><td><code>lead-engine.ts:123</code> <code>thinkingLevel: 'off'</code>，<code>:93</code> 注册模型时 <code>reasoning: false</code>。模型不产出思考，没东西可存。能拿到的只是它在两次工具调用之间写的话（pi 的 assistant 消息），现在只用来拼 <code>draft</code>（<code>lead-engine.ts:136</code>），且只在「用户的话」那种运行里显示（<code>lead.ts:822</code> <code>if (live)</code>），不存。</td></tr>
+    <tr><td><code>run_command</code>（命令 + 输出）</td><td class="part">部分</td><td><code>lead.ts:795</code> 把命令（截 500 字）和输出（截 1500 字）推进 <code>evidence</code>，随 <code>did</code>/<code>ask</code> 写进 <code>thread.jsonl</code>。App 和手机的「依据」「我看了项目里 N 处」就是它。<br>但：被固定规矩挡下的命令不记（<code>lead.ts:790-791</code> 在 push 之前就返回）；<strong>用户的话那种运行收集的 evidence 直接丢了</strong>（<code>lead.ts:931</code> 建了，<code>:989</code> 只写一条 <code>lead</code> 文字）；没有时间、耗时、顺序之外的信息。</td></tr>
+    <tr><td><code>read_conversation</code> / <code>job_status</code></td><td class="no">不记</td><td><code>lead.ts:779-785</code> 结果只回给模型，不进 evidence。</td></tr>
+    <tr><td>动作：<code>approve</code> / <code>answer_question</code> / <code>reply</code> / <code>accept_job</code> / <code>start_work</code></td><td class="yes">记了</td><td>写 <code>did</code>，带 <code>reason</code>（模型给的一句理由）和 <code>evidence</code>。</td></tr>
+    <tr><td>动作：<code>nothing</code></td><td class="part">只记结果</td><td><code>lead.ts:663</code> 写 <code>seen</code>，没有理由、没有 evidence。</td></tr>
+    <tr><td>动作：<code>ask_user</code></td><td class="yes">记了</td><td>写 <code>ask</code>，带 <code>why</code>/<code>lean</code>/<code>evidence</code>。</td></tr>
+    <tr><td>用户运行里的 <code>send</code> / <code>stop</code> / <code>answer_card</code> / <code>add_rule</code> / <code>remove_rule</code> / <code>follow</code></td><td class="no">不记成动作</td><td><code>lead.ts:938-982</code> 里只有 <code>start_work</code>（<code>:963</code>）写 <code>did</code>；其余只改了状态（<code>answer_card</code> 会留一条 <code>resolved</code>），线程里只能看到最后那句 <code>lead</code> 回复。</td></tr>
+    <tr><td>当时的材料（规矩、所有对话状态、最近 30 条、这件事）</td><td class="no">不记</td><td><code>lead.ts:748</code> <code>material()</code> 每次现拼，喂给模型后就没了。</td></tr>
+    <tr><td>正在看什么（step）、正在写的回复（draft）</td><td class="part">只在内存</td><td><code>lead.ts:394</code> <code>view()</code> 里的 <code>step</code>/<code>draft</code>（<code>:822-823</code> 赋值），下一轮就被覆盖；App 显示的「领航在项目里查：…」就是它。</td></tr>
+    <tr><td>一条线程记录是哪次运行写的</td><td class="no">没有关联</td><td><code>lead.ts:343</code> <code>append()</code> 写的 <code>LeadItem</code> 没有 run id；一次运行开头、结尾、用时都没有记。</td></tr>
+  </table>
+  <p class="legend-gap">原型里标了 <span class="badge gap">现在没记</span> 的就是上表红/黄的部分；没标的（run_command 命令和输出、动作和理由、问你的卡片）今天已经能从 <code>thread.jsonl</code> 读到，只是挂在单条记录上，不成过程。时间线上每步的时刻和耗时（+2.1s、26 秒）今天也都没记。</p>
+
+  <h2>入口形态和推荐</h2>
+  <table>
+    <tr><th></th><th>A 每条下面「怎么判断的」</th><th>B 工作台</th><th>C 手机</th></tr>
+    <tr><td>回答的问题</td><td>「它这一条为什么这么做？」</td><td>「它今天都在干什么、哪次判断出了问题？」</td><td>同 A</td></tr>
+    <tr><td>占地方</td><td>默认一行小字，点开才有</td><td>独立页，不占领航线程</td><td>一行小字 + 底部弹层</td></tr>
+    <tr><td>能看到没写进线程的运行</td><td>看不到（没有线程行就没有入口）</td><td>能：超时、出错、预算用完的都在</td><td>看不到</td></tr>
+    <tr><td>实现量</td><td>小：现有「依据」换成时间线</td><td>中：列表 + 筛选 + 详情</td><td>小：复用 A 的数据</td></tr>
+  </table>
+  <div class="reco"><strong>推荐：A 为主，B 做二级入口，C 照 A 做。</strong>日常就是在线程里对某一条起疑，就地展开最顺手，也符合「侧栏别塞满」；A 直接替换掉现在 did 行上的「依据」，不多一个按钮。B 留给排查：A 底部「在工作台看完整过程」和顶栏「工作台」两个入口进去，能看到没留下线程记录的运行。B 可以晚于 A 做。</div>
+
+  <h2>后端要加什么（还没动，等拍板）</h2>
+  <h3>要记什么</h3>
+  <ul>
+    <li>每次 <code>run()</code> 一条运行记录：<code>id</code>、开始/结束时间、触发它的事件（类型、对话、key 或用户那句话的线程 id）、结果（acted / ask / seen / none / error + 错误）、它写进线程的记录 id 列表。</li>
+    <li>按顺序的步骤：模型在工具调用之间写的话（从 pi 的 <code>message_end</code> 取 assistant 文本，不开 reasoning）；每次工具调用的名字、输入、输出（截断）、耗时、是否被挡下。</li>
+    <li>线程里的 <code>did</code>/<code>ask</code>/<code>seen</code>/<code>lead</code>/<code>note</code> 加一个 <code>run</code> 字段指回去（旧行没有，前端就不显示入口）。</li>
+    <li>可选、默认不存：当时的材料全文（每次 5–40 KB，主要是对话列表和最近 30 条）。想看可以只存它的长度或哈希，要排查时再打开开关。</li>
+    <li>不加：思考（reasoning）。要有就得把 <code>thinkingLevel</code> 打开，多花 token、也会变慢，是单独一件事。</li>
+  </ul>
+  <h3>存在哪、多大</h3>
+  <ul>
+    <li><code>lead/runs/&lt;日期&gt;.jsonl</code>，一行一次运行，只追加，和 <code>thread.jsonl</code> 一个写法；线程接口不变，前端按 id 另取 <code>GET lead/runs/&lt;id&gt;</code>（B 的列表用 <code>GET lead/runs?before=…</code>）。</li>
+    <li>单次估算：通常 2–8 次工具调用；每次输入 ≤ 500 字、输出截到 2 KB，中间的话每段 ≤ 1 KB → <strong>一次约 3–15 KB</strong>，<code>npm test</code> 这种长输出被截断后也不超过 20 KB。</li>
+    <li>总量：<code>RUNS_PER_HOUR = 120</code> 是硬上限，最坏 120 × 15 KB ≈ <strong>1.8 MB/小时</strong>；正常一天几十次，<strong>每天 &lt; 1 MB</strong>。按天分文件，保留 30 天（或最多 50 MB）后删最老的那天，最坏也就几十 MB。</li>
+    <li>若打开材料全文：每次再加 5–40 KB，大约 ×3，所以默认关。</li>
+    <li>敏感性：命令输出可能含项目里的内容，和 <code>thread.jsonl</code> 同级别（0600、不出 state 目录），手机按需取、不缓存。</li>
+  </ul>
+  <h3>改动面（估计）</h3>
+  <ul>
+    <li><code>lead-engine.ts</code>：<code>RunOptions</code> 加一个 <code>onStep</code>（或把 <code>onTool</code> 扩成带结果/耗时），订阅 <code>message_end</code> 拿中间的话。</li>
+    <li><code>lead.ts</code>：<code>loop()</code> 里攒步骤，结束时追加一行；<code>append()</code> 带上当前 run id；补上用户运行里 send/stop/answer_card/规矩变更的记录；固定规矩挡下的命令也记一步。</li>
+    <li><code>server.ts</code>：两个只读路由。App <code>lead.js</code>、手机 <code>lead_screen.dart</code> 各加入口。</li>
+  </ul>
+</template>
+
+<script>
+'use strict';
+// ───────────────────────── Mock data ─────────────────────────
+// A "run" is one call of lead-engine.run(): one event (or one message of the user's) handled.
+// Its shape is the proposed backend record (see 现状与后端缺口), so this file doubles as its spec.
+// `gap: true` marks what the backend does not keep today.
+const PROJECTS = { coderfleet: '#3b82f6', 'reminis-app': '#a855f7' };
+const RUNS = [
+  {
+    id: 'r1', at: '10:02', ms: 21400, conversation: '修登录页样式', project: 'coderfleet', outcome: 'acted', label: '批准了一个操作',
+    trigger: { kind: '等批准', text: 'Bash：npm test -- auth', detail: '{"command":"npm test -- auth","description":"Run auth tests"}' },
+    steps: [
+      { kind: 'look', tool: 'read_conversation', t: 1800, ms: 40, what: '读了这个对话最近 6 轮', sum: '用户让它改登录页按钮样式；它改了 LoginForm.css，现在要跑测试确认。', gap: true,
+        out: '用户：登录页的按钮和输入框对不齐，修一下\n  工具 Read：src/ui/LoginForm.tsx [done]\n  工具 Edit：src/ui/LoginForm.css [done]\nAI（running）：样式改好了，我跑一下 auth 相关测试确认没坏。' },
+      { kind: 'think', t: 6100, what: '只是跑测试，命令里没有删除、推送、密钥。看一眼 package.json 里 test 脚本是不是在跑别的东西。', gap: true },
+      { kind: 'look', tool: 'run_command', t: 7200, ms: 900, cmd: 'cat package.json | grep -A3 \'"scripts"\'', sum: 'test = vitest run，没有前置脚本', out: '"scripts": {\n    "test": "vitest run",\n    "build": "tsc -p ."' },
+      { kind: 'action', tool: 'approve', t: 21400, what: '批准', reason: '只是跑测试，test 脚本就是 vitest，没有删除也没有推送；符合规矩 r1「跑测试：直接批」' },
+    ],
+  },
+  {
+    id: 'r2', at: '10:09', ms: 48200, conversation: '端口改成读 PORT', project: 'reminis-app', outcome: 'ask', label: '问了你：要不要合并',
+    trigger: { kind: '「做完为止」做完了，等收下', text: '3 个文件，+8 −1；复审：通过；标准 3/3' },
+    steps: [
+      { kind: 'look', tool: 'job_status', t: 2100, ms: 310, what: '看了这件活的状态', sum: '复审通过；3 条标准都打了勾；改了 server.ts、config.ts、README.md', gap: true,
+        out: '{"title":"端口改成读环境变量 PORT，默认 8765","state":"review","review":{"verdict":"pass"},"criteria":[{"text":"不设 PORT 时监听 8765","state":"done"},…],"changes":{"files":3,"added":8,"removed":1}}' },
+      { kind: 'look', tool: 'run_command', t: 9800, ms: 2200, cmd: 'git diff main --stat', sum: '3 个文件，和 job_status 一致', out: ' README.md     | 2 +-\n src/config.ts | 6 +++++-\n src/server.ts | 1 +\n 3 files changed, 8 insertions(+), 1 deletion(-)' },
+      { kind: 'look', tool: 'run_command', t: 14500, ms: 26400, cmd: 'npm test', sum: '1 条失败：config.test.ts「PORT 非数字时报错」', bad: true,
+        out: ' ✓ server.test.ts (4)\n ✗ config.test.ts (3)\n   × PORT 非数字时报错\n     expected to throw but returned 8765\n\n Test Files  1 failed | 1 passed (2)' },
+      { kind: 'think', t: 41800, what: '复审说通过，但我自己跑测试有一条红。合并是大事，规矩 r2 要求标准全部做到；这条红可能是复审没跑测试。我不该自己收，问用户，倾向先让它修。', gap: true },
+      { kind: 'action', tool: 'ask_user', ask: true, t: 48200, what: '问你：做完了（3 个文件，+8 −1），可以合并吗？', reason: 'npm test 有 1 条没过（PORT 非数字时没报错），我倾向先让它修再合并' },
+    ],
+  },
+  {
+    id: 'r3', at: '10:15', ms: 33900, conversation: '给启动流程补集成测试', project: 'coderfleet', outcome: 'acted', label: '回了它一句',
+    trigger: { kind: '这一轮结束了', text: '…我列了两个方案：A 用真实端口起服务测；B 用 supertest 不占端口。你选哪个？' },
+    steps: [
+      { kind: 'think', t: 3200, what: '它在等用户选方案。领航对话里用户前天说过「测试别占端口，CI 上会撞」。先确认 supertest 已经是依赖。', gap: true },
+      { kind: 'look', tool: 'run_command', t: 4100, ms: 600, cmd: 'grep supertest package.json', sum: '已经在 devDependencies 里', out: '    "supertest": "^7.0.0",' },
+      { kind: 'blocked', tool: 'run_command', t: 9800, cmd: 'rm -rf node_modules/.cache && npm test', what: '这条命令没跑：要删除文件（固定规矩）', gap: true },
+      { kind: 'action', tool: 'reply', t: 33900, what: '回「给启动流程补集成测试」：用方案 B，supertest，别占端口。', reason: '你之前说过测试别占端口，supertest 已经是依赖' },
+    ],
+  },
+  {
+    id: 'r4', at: '10:21', ms: 12700, conversation: '你的话', project: '', outcome: 'acted', label: '开了新对话',
+    trigger: { kind: '你对领航说', text: '把 reminis 的 iOS 分享扩展崩溃交给 codex 那个账号修，做完为止' },
+    steps: [
+      { kind: 'think', t: 2400, what: '项目 reminis-app，账号 codex-2 用了 41%，能用。', gap: true },
+      { kind: 'action', tool: 'start_work', t: 11900, what: '开了新对话「修 iOS 分享扩展崩溃」（reminis-app · codex-2 · 做完为止）', reason: '用「做完为止」开的；账号 codex-2' },
+      { kind: 'think', t: 12700, what: '好了，开了「修 iOS 分享扩展崩溃」，用 codex-2，做完为止；做完了我来问你要不要合并。', final: true },
+    ],
+  },
+  {
+    id: 'r5', at: '10:24', ms: 6900, conversation: '重构 jobs 模块', project: 'coderfleet', outcome: 'seen', label: '看过，没留事给你',
+    trigger: { kind: '这一轮结束了', text: '重构完了，测试全过，改动在 jobs.ts 和 jobs.test.ts。' },
+    steps: [
+      { kind: 'think', t: 5200, what: '只是汇报做完了，没有问题、没有方案要选。', gap: true },
+      { kind: 'action', tool: 'nothing', t: 6900, what: '没有留事情给你', reason: '它只是汇报做完了', gap: true },
+    ],
+  },
+  {
+    id: 'r6', at: '10:31', ms: 600000, conversation: '修 iOS 分享扩展', project: 'reminis-app', outcome: 'error', label: '没处理成，交给你',
+    trigger: { kind: '等批准', text: 'Bash：xcodebuild -scheme Share test' },
+    steps: [
+      { kind: 'look', tool: 'run_command', t: 3000, ms: 590000, cmd: 'xcodebuild -scheme Share test', sum: '跑了快 10 分钟没出结果', bad: true, out: '（输出被截断）\n…CompileSwift normal arm64 …' },
+      { kind: 'action', tool: 'card', error: true, t: 600000, what: '我没处理成（看了 10 分钟还没有定下来），这件你来', reason: '超过单次 10 分钟上限' },
+    ],
+  },
+];
+// The thread as lead/thread.jsonl has it, each line tied to the run that wrote it (`run` is the new field).
+const THREAD = [
+  { type: 'did', run: 'r1', project: 'coderfleet', parts: ['「', '修登录页样式', '」要做的操作我批了：Bash：npm test -- auth'] },
+  { type: 'ask', run: 'r2', project: 'reminis-app', conv: '端口改成读 PORT', asked: '做完了（3 个文件，+8 −1），可以合并吗？', lean: 'npm test 有 1 条没过（PORT 非数字时没报错），我倾向先让它修再合并。', options: ['收下并合并', '我去看'] },
+  { type: 'did', run: 'r3', project: 'coderfleet', parts: ['我回了「', '给启动流程补集成测试', '」：用方案 B，supertest，别占端口。'] },
+  { type: 'user', text: '把 reminis 的 iOS 分享扩展崩溃交给 codex 那个账号修，做完为止' },
+  { type: 'lead', run: 'r4', text: '好了，开了「修 iOS 分享扩展崩溃」，用 codex-2，做完为止；做完了我来问你要不要合并。' },
+  { type: 'did', run: 'r5', project: 'coderfleet', parts: ['「', '重构 jobs 模块', '」做完了，我看过，没有留事情给你'] },
+  { type: 'ask', run: 'r6', project: 'reminis-app', conv: '修 iOS 分享扩展', asked: '要做一个操作，等批准：Bash：xcodebuild -scheme Share test', lean: '我没处理成（看了 10 分钟还没有定下来），这件你来', options: ['批准', '拒绝', '我去看'] },
+];
+
+// ───────────────────────── Helpers ─────────────────────────
+const $ = selector => document.querySelector(selector);
+function h(tag, attrs, ...kids) {
+  const [name, ...classes] = tag.split('.');
+  const node = document.createElement(name || 'div');
+  if (classes.length) node.className = classes.join(' ');
+  if (attrs && (typeof attrs !== 'object' || attrs instanceof Node || Array.isArray(attrs))) { kids.unshift(attrs); attrs = null; }
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (key === 'on') for (const [type, run] of Object.entries(value)) node.addEventListener(type, run);
+    else if (key === 'style') node.style.cssText = value;
+    else if (value !== null && value !== undefined) node.setAttribute(key, value);
+  }
+  const add = kid => { if (kid === null || kid === undefined || kid === false) return; if (Array.isArray(kid)) kid.forEach(add); else node.append(kid instanceof Node ? kid : String(kid)); };
+  kids.forEach(add);
+  return node;
+}
+const run = id => RUNS.find(item => item.id === id);
+const secs = ms => ms >= 60000 ? Math.round(ms / 60000) + ' 分钟' : ms >= 10000 ? Math.round(ms / 1000) + ' 秒' : (ms / 1000).toFixed(1) + ' 秒';
+const offset = ms => '+' + (ms >= 60000 ? Math.floor(ms / 60000) + ':' + String(Math.round(ms % 60000 / 1000)).padStart(2, '0') : (ms / 1000).toFixed(1) + 's');
+const dot = project => h('span.pd', { style: 'background:' + (PROJECTS[project] || '#64748b') });
+const gap = step => step.gap ? h('span.badge.gap', { title: '后端现在不记这一步' }, '现在没记') : null;
+const TOOL = { read_conversation: '读对话', job_status: '看活', run_command: '查', approve: '批了', reply: '回了', ask_user: '问你', start_work: '开对话', nothing: '没事', card: '交给你', answer_card: '转答案' };
+const looks = r => r.steps.filter(step => step.kind === 'look').length;
+
+// ───────────────────────── The timeline (shared by A, B, C) ─────────────────────────
+/** One run's process. `compact`: A's inline version (outputs folded, no raw material). */
+function timeline(r, compact) {
+  const icon = { event: '↓', look: '⌕', think: '…', blocked: '✕', action: '✓' };
+  /** The step's output, folded behind a toggle (open by default in B for a failed look). */
+  const output = step => {
+    if (!step.out) return [null, null];
+    const pre = h('pre', step.out);
+    const button = h('button.more');
+    const set = open => { pre.style.display = open ? '' : 'none'; button.textContent = open ? '收起输出' : '看输出'; };
+    button.addEventListener('click', () => set(pre.style.display === 'none'));
+    set(!compact && Boolean(step.bad));
+    return [button, pre];
+  };
+  const rows = [h('li.st.event', h('span.ic', icon.event), h('div.line', h('div.what', h('span.k', '收到'), r.trigger.kind + '：', h('span', { style: 'color:var(--text)' }, r.trigger.text)), h('span.when', '0s')))];
+  for (const step of r.steps) {
+    if (step.final && compact) continue;
+    const cls = 'li.st.' + step.kind + (step.ask ? '.ask' : '') + (step.error ? '.error' : '');
+    let what;
+    if (step.kind === 'look' && step.cmd) what = [h('span.k', '查'), h('code', step.cmd)];
+    else if (step.kind === 'look') what = [h('span.k', TOOL[step.tool] || step.tool), step.what];
+    else if (step.kind === 'blocked') what = [h('code', step.cmd), ' ', h('span', { style: 'color:var(--red)' }, step.what)];
+    else if (step.kind === 'think') what = [step.final ? h('span.k', { style: 'font-style:normal' }, '最后说') : null, step.what];
+    else what = step.what;
+    const [button, pre] = output(step);
+    rows.push(h(cls, h('span.ic', step.kind === 'action' && step.ask ? '?' : step.kind === 'action' && step.error ? '!' : icon[step.kind]),
+      h('div.line', h('div.what', what, gap(step), button), h('span.when', offset(step.t) + (step.ms && !compact ? ' · ' + secs(step.ms) : ''))),
+      step.sum ? h('div.sum', (step.bad ? '⚠ ' : '→ ') + step.sum) : null,
+      pre,
+      step.reason ? h('div.reason', step.reason) : null));
+  }
+  return h('ol.tl', rows);
+}
+
+// ───────────────────────── A ─────────────────────────
+const opened = new Set();
+function why(r) {
+  const open = opened.has(r.id);
+  const wrap = h('div.why-row');
+  const toggle = h('button.why-toggle' + (open ? '.open' : ''), { on: { click: () => { open ? opened.delete(r.id) : opened.add(r.id); wrap.replaceWith(why(r)); } } },
+    h('span.chev', '›'), '怎么判断的', h('span.stat', '· 查了 ' + looks(r) + ' 处 · ' + secs(r.ms)));
+  wrap.append(toggle);
+  if (open) wrap.append(h('div.process', timeline(r, true),
+    h('div.foot', h('span', '共 ' + (r.steps.length + 1) + ' 步，' + secs(r.ms)), h('button', { on: { click: () => go('b', r.id) } }, '在工作台看完整过程 →'))));
+  return wrap;
+}
+function renderThread() {
+  const box = $('#thread');
+  box.replaceChildren(...THREAD.flatMap(item => {
+    let node;
+    if (item.type === 'user') node = h('div.user-msg', item.text);
+    else if (item.type === 'lead') node = h('div.assistant', item.text);
+    else if (item.type === 'did') node = h('div.lead-note', dot(item.project), h('span.project', item.project), h('span', item.parts[0], h('b', item.parts[1]), item.parts[2]),
+      h('button.lead-link', '打开对话'), item.run === 'r1' || item.run === 'r3' ? h('button.lead-link', '撤回') : null);
+    else node = h('div.lead-say', h('p', h('button.ref', dot(item.project), item.conv), ' ', item.asked), h('p.mine', item.lean),
+      h('div.quick', item.options.map(option => h('button.option', option))));
+    return item.run ? [node, why(run(item.run))] : [node];
+  }));
+}
+
+// ───────────────────────── B ─────────────────────────
+let filter = 'all'; let selected = 'r2';
+const FILTERS = [['all', '全部'], ['acted', '自己定的'], ['ask', '问了你的'], ['seen', '看过没事'], ['error', '没成的']];
+const OUTCOME = { acted: '自己定了', ask: '问了你', seen: '看过', error: '没成' };
+function renderBench() {
+  $('#wb-sum').textContent = '今天 ' + RUNS.length + ' 次判断 · 自己定 ' + RUNS.filter(r => r.outcome === 'acted').length + ' · 问你 ' + RUNS.filter(r => r.outcome === 'ask').length + ' · 本小时额度 6/120';
+  $('#wb-filters').replaceChildren(...FILTERS.map(([key, label]) => h('button.chip' + (filter === key ? '.on' : ''), { on: { click: () => { filter = key; renderBench(); } } }, label)));
+  const list = RUNS.filter(r => filter === 'all' || r.outcome === filter).slice().reverse();
+  $('#wb-rows').replaceChildren(h('div.wb-day', '今天'), ...list.map(r => h('button.wb-row' + (r.id === selected ? '.on' : ''), { on: { click: () => { selected = r.id; renderBench(); } } },
+    h('div.top', r.project ? dot(r.project) : null, h('span.name', r.conversation), h('span.t', r.at)),
+    h('div.sub', h('span.oc.' + r.outcome, OUTCOME[r.outcome]), h('span', r.label), h('span', '· 查 ' + looks(r) + ' 处 · ' + secs(r.ms))))));
+  const r = run(selected);
+  $('#wb-detail').replaceChildren(
+    h('div.wb-head', h('h2', r.label + ' · ' + r.conversation),
+      h('div.facts', h('span', '开始 ', h('b', '今天 ' + r.at)), h('span', '用时 ', h('b', secs(r.ms))), h('span', '模型 ', h('b', 'deepseek-v4')),
+        h('span', '调用 ', h('b', r.steps.filter(s => s.tool).length + ' 次工具')), h('span', '消耗 ', h('b', '≈ 18k tokens'), h('span.badge.gap', '现在没记')))),
+    h('div.panel', h('h3', '过程', h('span.r', '默认展开失败的输出；其余点「看输出」')), timeline(r, false)),
+    h('div.panel', h('h3', '它当时看到的材料', h('span.badge.gap', '现在没记'), h('span.r', '约 9 KB，按需存')),
+      h('details.raw', h('summary', '展开：规矩 + 所有对话状态 + 领航最近 30 条 + 这件事'),
+        h('pre', '## 用户的规矩\n- (r1) 读文件、改文件、跑测试：直接批\n- (r2) 合并：复审通过、标准全部完成、改动不大（最多 10 个文件、400 行、不删文件）的，你来定\n- (fixed) 删除、推送、发布、动密钥、花钱的事…：一定问我【固定】\n\n## 所有对话现在的状态\n- 9f86… 【reminis-app】端口改成读 PORT · 停下了 · 做完为止：…\n…\n\n## 现在要你处理的事\n' + r.trigger.kind + '：' + r.trigger.text + (r.trigger.detail ? '\n' + r.trigger.detail : '')))),
+    h('div.panel', h('h3', '它写进线程的'), h('div', { style: 'color:var(--text-2);font-size:13px' }, (THREAD.find(item => item.run === r.id) || {}).asked || (THREAD.find(item => item.run === r.id)?.parts || []).join('') || THREAD.find(item => item.run === r.id)?.text || '（没写）'),
+      h('div', { style: 'margin-top:8px' }, h('button.btn', { on: { click: () => go('a') } }, '在领航里定位这一条'), ' ', r.conversation !== '你的话' ? h('button.btn', '打开对话「' + r.conversation + '」') : null)));
+}
+
+// ───────────────────────── C (just the sheet's timeline) ─────────────────────────
+function renderPhone() { $('#phone-tl').replaceWith(Object.assign(timeline(run('r1'), true), { id: 'phone-tl' })); }
+
+// ───────────────────────── Notes ─────────────────────────
+function renderNotes() {
+  $('#notes').innerHTML = document.getElementById('notes-src').innerHTML;
+}
+
+// ───────────────────────── Switching ─────────────────────────
+function go(view, runId) {
+  if (runId) { selected = runId; filter = 'all'; }
+  for (const tab of document.querySelectorAll('.tab')) tab.classList.toggle('on', tab.dataset.view === view);
+  for (const section of document.querySelectorAll('.view')) section.classList.toggle('on', section.id === 'view-' + view);
+  if (view === 'b') renderBench();
+  location.hash = view + (runId ? ':' + runId : '');
+}
+for (const tab of document.querySelectorAll('.tab')) tab.addEventListener('click', () => go(tab.dataset.view));
+for (const button of document.querySelectorAll('[data-go]')) button.addEventListener('click', () => go(button.dataset.go));
+renderThread(); renderBench(); renderPhone(); renderNotes();
+const [initial, initialRun] = (location.hash.slice(1) || 'a').split(':');
+if (['a', 'b', 'c', 'notes'].includes(initial)) go(initial, initialRun);
+</script>
+
+
+</body>
+</html>
