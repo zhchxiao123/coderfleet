@@ -2,21 +2,21 @@
 // composer with attachments (any file), auto mode, model and one send/stop button. Sending while a turn
 // runs goes into it (Claude) or waits as the next turn (other agents).
 import 'dart:async';
-import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:image_picker/image_picker.dart';
 
 import '../backend.dart';
 import '../models.dart';
 import '../state.dart';
+import 'attachments.dart';
 import 'steady_scroll.dart';
 import 'theme.dart';
 import 'turn_view.dart';
+
+export 'attachments.dart' show AttachFrom, AttachmentSource, PickedFile, pickAttachments, pickedBytes;
 
 /// Per-project auto mode, remembered on the phone.
 class AutoModeStore {
@@ -32,51 +32,6 @@ class AutoModeStore {
     _memory[key] = value;
     if (persist) { try { await _storage.write(key: 'auto:$key', value: value ? '1' : ''); } catch (_) {} }
   }
-}
-
-enum AttachFrom { camera, photos, files }
-
-/// A picked file. It is read when it is uploaded, so a large one never sits in memory;
-/// `preview` holds the bytes of an image small enough to show.
-typedef PickedFile = ({String name, int size, Stream<List<int>> Function() open, Uint8List? preview});
-
-/// A picked file already in memory.
-PickedFile pickedBytes(String name, Uint8List bytes) => (name: name, size: bytes.length, open: () => Stream.value(bytes), preview: bytes);
-
-/// Picks attachments; tests replace it.
-typedef AttachmentSource = Future<List<PickedFile>> Function(BuildContext context, AttachFrom from);
-
-Future<List<PickedFile>> pickAttachments(BuildContext context, AttachFrom from) async {
-  if (from == AttachFrom.files) {
-    final files = await FilePicker.pickFiles();
-    return [
-      for (final file in files.map((item) => item.xFile))
-        await () async {
-          final size = await file.length();
-          return (name: file.name, size: size, open: () => file.openRead().cast<List<int>>(),
-              preview: isImageUpload(file.name) && size <= maxPreview ? await file.readAsBytes() : null);
-        }(),
-    ];
-  }
-  final picker = ImagePicker();
-  final files = from == AttachFrom.camera
-      ? [?await picker.pickImage(source: ImageSource.camera, maxWidth: 2048, maxHeight: 2048, imageQuality: 85)]
-      : await picker.pickMultiImage(maxWidth: 2048, maxHeight: 2048, imageQuality: 85, limit: 10);
-  return [for (final file in files) pickedBytes(file.name, await file.readAsBytes())];
-}
-
-/// The backend's limit for one upload.
-const maxUpload = 500 * 1024 * 1024;
-/// The largest image shown as a picture; a larger one shows as a file.
-const maxPreview = 20 * 1024 * 1024;
-
-class _Attachment {
-  _Attachment(this.name, this.size, this.preview);
-  final String name;
-  final int size;
-  final Uint8List? preview;
-  String? path;
-  bool get image => preview != null && isImageUpload(name);
 }
 
 class ChatScreen extends StatefulWidget {
@@ -101,7 +56,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   late final AutoModeStore autos = widget.autoStore ?? AutoModeStore();
   late final UploadCache images = UploadCache(widget.client, widget.projectId);
   final input = TextEditingController();
-  final attachments = <_Attachment>[];
+  late final attachments = Attachments(upload: (name, data, size) => widget.client.upload(widget.projectId, name, data, size), cache: images)
+    ..addListener(() => setState(() {}));
   final scroller = ScrollController();
   final growth = Growth();
   /// Far enough from the end of the conversation for the button that goes back there.
@@ -159,33 +115,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     chat?.dispose();
     input.dispose();
+    attachments.dispose();
     scroller.dispose();
     away.dispose();
     super.dispose();
   }
 
-  Future<void> _attach(AttachFrom from) async {
-    List<PickedFile> picked;
-    try { picked = await widget.attachmentSource(context, from); } catch (error) { if (mounted) showMessage(context, '没能读取文件：$error'); return; }
-    for (final file in picked.take(20 - attachments.length)) {
-      if (file.size > maxUpload) { if (mounted) showMessage(context, '${file.name} 超过 500 MB'); continue; }
-      final name = from == AttachFrom.files || file.name.contains('.') ? file.name : '${file.name}.jpg';
-      final item = _Attachment(name, file.size, file.preview);
-      setState(() => attachments.add(item));
-      widget.client.upload(widget.projectId, name, file.open(), file.size).then((path) {
-        if (item.image) images.seed(path, item.preview!);
-        if (mounted) setState(() => item.path = path);
-      }).catchError((Object error) {
-        if (!mounted) return;
-        setState(() => attachments.remove(item));
-        showMessage(context, '上传失败：$error');
-      });
-    }
-  }
-
   Future<void> _send() async {
     final text = input.text.trim();
-    if (sending || (text.isEmpty && attachments.isEmpty) || attachments.any((item) => item.path == null)) return;
+    if (sending || (text.isEmpty && attachments.isEmpty) || attachments.uploading) return;
     setState(() => sending = true);
     try {
       var id = conversationId;
@@ -194,9 +132,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         id = conversationId = created.id;
         _follow(id);
       }
-      final delivery = await widget.client.send(id, prompt: text, images: [for (final item in attachments) item.path!], model: model, auto: auto);
+      final delivery = await widget.client.send(id, prompt: text, images: attachments.paths, model: model, auto: auto);
       input.clear();
-      setState(() => attachments.clear());
+      attachments.clear();
       // Only a new conversation takes its title from the first message (like the backend, 40 characters).
       if (widget.conversation == null && title == '新对话') {
         final first = text.isEmpty ? '附件' : text.replaceAll(RegExp(r'\s+'), ' ');
@@ -297,8 +235,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Widget _composer(Palette palette, Turn? running, List<FollowUp> followUps) {
     final ready = project?.running ?? true;
-    final uploading = attachments.any((item) => item.path == null);
-    final canSend = !sending && ready && !uploading && (input.text.trim().isNotEmpty || attachments.isNotEmpty);
+    final uploading = attachments.uploading;
+    final canSend = !sending && ready && !uploading && (input.text.trim().isNotEmpty || !attachments.isEmpty);
     return SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(10, 4, 10, 8), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       if (!ready)
         Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(12),
@@ -322,22 +260,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         decoration: BoxDecoration(color: palette.surface, borderRadius: BorderRadius.circular(22),
             boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.07), blurRadius: 20, offset: const Offset(0, 4))]),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          if (attachments.isNotEmpty)
-            SizedBox(height: 68, child: ListView(scrollDirection: Axis.horizontal, children: [
-              for (final item in attachments)
-                Padding(padding: const EdgeInsets.only(right: 8, bottom: 8), child: Stack(children: [
-                  item.image
-                      ? ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.memory(item.preview!, width: 60, height: 60, fit: BoxFit.cover,
-                          opacity: AlwaysStoppedAnimation(item.path == null ? 0.45 : 1)))
-                      : Opacity(opacity: item.path == null ? 0.45 : 1, child: FileChip(name: item.name, size: item.size, height: 60, maxWidth: 200)),
-                  if (item.path == null) const Positioned.fill(child: Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)))),
-                  Positioned(top: 2, right: 2, child: GestureDetector(
-                    onTap: () => setState(() => attachments.remove(item)),
-                    child: Container(width: 20, height: 20, decoration: const BoxDecoration(color: Color(0xB80F1115), shape: BoxShape.circle),
-                        child: const Icon(Icons.close, size: 12, color: Colors.white)),
-                  )),
-                ])),
-            ])),
+          if (!attachments.isEmpty) AttachmentRow(attachments: attachments),
           TextField(
             controller: input, minLines: 1, maxLines: 6, textInputAction: TextInputAction.newline,
             decoration: InputDecoration(
@@ -346,11 +269,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
           ),
           Row(children: [
-            _iconButton(palette, Icons.attach_file, '添加附件', () => showModalBottomSheet<void>(context: context, builder: (sheet) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              ListTile(leading: const Icon(Icons.photo_camera_outlined), title: const Text('拍照'), onTap: () { Navigator.pop(sheet); _attach(AttachFrom.camera); }),
-              ListTile(leading: const Icon(Icons.photo_library_outlined), title: const Text('从相册选择'), onTap: () { Navigator.pop(sheet); _attach(AttachFrom.photos); }),
-              ListTile(leading: const Icon(Icons.insert_drive_file_outlined), title: const Text('选择文件'), onTap: () { Navigator.pop(sheet); _attach(AttachFrom.files); }),
-            ])))),
+            _iconButton(palette, Icons.attach_file, '添加附件', () => showAttachMenu(context, (from) => attachments.add(context, from, widget.attachmentSource))),
             const SizedBox(width: 4),
             _chip(palette, Icons.bolt, '自动', auto, () async {
               final next = !auto;
