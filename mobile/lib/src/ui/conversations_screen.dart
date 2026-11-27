@@ -2,7 +2,7 @@
 // yesterday, earlier), each with its state and the line its latest answer ended
 // on, a page at a time (more as the list is scrolled to its end); pulling down
 // refreshes; search runs on the backend; a new conversation starts from a
-// project picker.
+// project picker; 领航's thread opens from the top bar.
 import 'dart:async';
 
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
@@ -15,6 +15,7 @@ import '../notifications.dart';
 import '../state.dart';
 import 'chat_screen.dart';
 import 'connect_screen.dart';
+import 'lead_screen.dart';
 import 'theme.dart';
 
 class ConversationsScreen extends StatefulWidget {
@@ -137,6 +138,18 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
         });
   }
 
+  /// 领航's thread; like a conversation, the list stops polling while it is open.
+  void _lead() {
+    final client = widget.state.client, current = feed;
+    if (client == null || current == null) return;
+    current.stop();
+    _chatOpen = true;
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => LeadScreen(client: client, feed: current, wait: widget.feedWait))).then((_) {
+      _chatOpen = false;
+      if (mounted) feed?.start();
+    });
+  }
+
   Future<void> _newChat() async {
     final current = feed;
     if (current == null) return;
@@ -233,6 +246,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
               ])),
         actions: [
           IconButton(icon: Icon(searching ? Icons.close : Icons.search), onPressed: () => searching ? _endSearch() : setState(() => searching = true)),
+          if (!searching) IconButton(icon: const Icon(Icons.explore_outlined), tooltip: '领航', onPressed: _lead),
           if (!searching) IconButton(icon: const Icon(Icons.edit_outlined), tooltip: '新对话', onPressed: _newChat),
         ],
       ),

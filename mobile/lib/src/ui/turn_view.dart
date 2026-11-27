@@ -365,8 +365,10 @@ class Thumb extends StatelessWidget {
 }
 
 class Answer extends StatelessWidget {
-  const Answer({super.key, required this.text});
+  const Answer({super.key, required this.text, this.onConversation});
   final String text;
+  /// Opens a conversation the text names with a `conv:<id>` link (领航's words); without it such links stay inert.
+  final void Function(String conversationId)? onConversation;
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
@@ -390,6 +392,8 @@ class Answer extends StatelessWidget {
         ),
         // Links open in the phone's browser; anything that is not a web address stays inert.
         onTapLink: (_, href, _) {
+          final conversation = RegExp(r'^conv:([\w-]+)$').firstMatch(href ?? '')?.group(1);
+          if (conversation != null) return onConversation?.call(conversation);
           final uri = Uri.tryParse(href ?? '');
           if (uri != null && (uri.isScheme('http') || uri.isScheme('https'))) launchUrl(uri, mode: LaunchMode.externalApplication).ignore();
         },
@@ -720,7 +724,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
     final palette = context.palette;
     Map<String, dynamic> input = {};
     try { input = (jsonDecode(widget.permission.details) as Map).cast<String, dynamic>(); } catch (_) {}
-    return _Card(
+    return ActionCard(
       icon: Icons.shield_outlined, title: widget.permission.title, subtitle: '需要你确认这一步操作',
       body: input.isEmpty ? null : InputView(input: input),
       actions: [
@@ -772,7 +776,7 @@ class _QuestionCardState extends State<QuestionCard> {
   Widget build(BuildContext context) {
     final palette = context.palette;
     final questions = widget.permission.questions!;
-    return _Card(
+    return ActionCard(
       icon: Icons.help_outline, title: '需要你回答', subtitle: '回答后会继续执行', palette: palette,
       body: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         for (final question in questions) ...[
@@ -800,8 +804,9 @@ class _QuestionCardState extends State<QuestionCard> {
   }
 }
 
-class _Card extends StatelessWidget {
-  const _Card({required this.icon, required this.title, required this.subtitle, required this.actions, required this.palette, this.body});
+/// A card that waits for the user: an icon, a title and what it is about, then the buttons that answer it.
+class ActionCard extends StatelessWidget {
+  const ActionCard({super.key, required this.icon, required this.title, required this.subtitle, required this.actions, required this.palette, this.body});
   final IconData icon;
   final String title, subtitle;
   final Widget? body;
@@ -824,8 +829,10 @@ class _Card extends StatelessWidget {
             ])),
           ]),
           if (body != null) Padding(padding: const EdgeInsets.only(top: 12), child: body),
-          const SizedBox(height: 12),
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: [for (final action in actions) Padding(padding: const EdgeInsets.only(left: 8), child: action)]),
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(alignment: WrapAlignment.end, spacing: 8, runSpacing: 8, children: actions),
+          ],
         ]),
       );
 }

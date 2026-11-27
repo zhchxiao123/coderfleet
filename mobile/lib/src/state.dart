@@ -1,5 +1,5 @@
-// App state: saved backends (in the Keychain / Keystore) and the two long-poll
-// feeds (conversation list, one conversation's turns). Feeds pause while the
+// App state: saved backends (in the Keychain / Keystore) and the long-poll
+// feeds (conversation list, one conversation's turns, 领航's thread). Feeds pause while the
 // app is in the background and resume at once when it comes back. Both follow
 // only what is on screen: a page of the list, the latest turns of a conversation;
 // the rest is fetched as the user scrolls.
@@ -341,6 +341,48 @@ class ChatFeed extends Feed {
 
   /// Asks for everything again on the next step (after sending, so the new turn shows at once).
   void poke() {
+    stop();
+    start();
+  }
+}
+
+/// 领航's thread (GET lead/changes), followed while its page is open.
+class LeadFeed extends Feed {
+  LeadFeed(this.client, {this.wait = const Duration(seconds: 25)});
+  final BackendClient client;
+  final Duration wait;
+  String _etag = '';
+  /// Bumped by [poke]: an answer to a poll started before it is dropped.
+  int _round = 0;
+  LeadView? view;
+  bool loaded = false;
+  /// The backend has no 领航 (it is older than the App).
+  bool missing = false;
+
+  @override
+  Future<void> step() async {
+    final round = _round;
+    ({String etag, LeadView view})? changes;
+    try {
+      changes = await client.leadChanges(_etag, wait: loaded ? wait : Duration.zero);
+    } on BackendError catch (failure) {
+      if (failure.status == 404 && !missing) {
+        missing = loaded = true;
+        notifyListeners();
+      }
+      rethrow;
+    }
+    if (round != _round || changes == null) return;
+    _etag = changes.etag;
+    view = changes.view;
+    loaded = true;
+    missing = false;
+    notifyListeners();
+  }
+
+  /// Reads 领航's state again now (after the user did something).
+  void poke() {
+    _round++;
     stop();
     start();
   }

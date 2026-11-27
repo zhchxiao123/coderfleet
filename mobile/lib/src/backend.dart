@@ -228,5 +228,22 @@ class BackendClient {
 
   Future<void> cancel(String turnId) => _call('POST', 'turns/$turnId/cancel');
 
+  /// Long poll of 领航's thread: null when nothing changed within [wait]. A backend from before 领航 answers 404.
+  Future<({String etag, LeadView view})?> leadChanges(String since, {Duration wait = const Duration(seconds: 25)}) async {
+    final data = asMap(await _call('GET', 'lead/changes?since=${Uri.encodeQueryComponent(since)}&wait=${wait.inMilliseconds}', timeout: wait + const Duration(seconds: 15)));
+    if (data['unchanged'] == true) return null;
+    return (etag: data['etag'] as String? ?? '', view: LeadView.fromJson(data));
+  }
+
+  /// Says something to 领航 as the user.
+  Future<void> leadSay(String text) => _call('POST', 'lead/messages', body: {'text': text});
+
+  /// Answers a card: [answer] is one of its options or free text; [answers] holds a question card's picks (question → labels).
+  Future<void> leadAnswer(String askId, {String? answer, Map<String, String>? answers}) =>
+      _call('POST', 'lead/asks/$askId', body: {'answer': ?answer, 'answers': ?answers});
+
+  /// Takes back what 领航 settled (stops the turn it started or let go on).
+  Future<void> leadUndo(String didId) => _call('POST', 'lead/undo/$didId');
+
   void close() => _http.close();
 }

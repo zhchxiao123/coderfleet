@@ -209,5 +209,99 @@ class TurnChanges {
 /// Outcome of sending a message: a new turn, taken into the running turn, or queued after it.
 enum Delivery { turn, message, queued }
 
+// ── 领航 (node-app/src/lead.ts view()) ──────────────────────────────
+
+/// One command 领航 ran in the project to check something, and what it printed.
+class LeadEvidence {
+  LeadEvidence(this.command, this.output);
+  final String command, output;
+}
+
+/// How a card closed: `by` is `user` (answered in 领航's thread) or `elsewhere`.
+class LeadResolved {
+  LeadResolved({required this.answer, required this.by});
+  final String answer, by;
+  bool get byUser => by == 'user';
+}
+
+/// One entry of 领航's thread: `user` / `lead` / `note` (text), `did` (what it settled),
+/// `seen` (a finished turn with nothing for the user) or `ask` (handed to the user).
+class LeadItem {
+  LeadItem({
+    required this.id, required this.type, this.text = '', this.conversationId = '', this.conversation = '', this.projectId = '',
+    this.action = '', this.asked = '', this.said = '', this.reason = '', this.evidence = const [], this.undo = '', this.undone = false,
+    this.kind = '', this.quote, this.why = '', this.lean = '', this.options = const [], this.questions = const [], this.free = false, this.resolved,
+  });
+  factory LeadItem.fromJson(Map<String, dynamic> json) => LeadItem(
+        id: _text(json['id']), type: _text(json['type']), text: _text(json['text']), conversationId: _text(json['conversationId']),
+        conversation: _text(json['conversation']), projectId: _text(json['projectId']), action: _text(json['action']), asked: _text(json['asked']),
+        said: _text(json['said']), reason: _text(json['reason']),
+        evidence: _maps(json['evidence']).map((item) => LeadEvidence(_text(item['command']), _text(item['output']))).toList(),
+        undo: _text(json['undo']), undone: json['undone'] == true, kind: _text(json['kind']), quote: json['quote'] is String ? json['quote'] as String : null,
+        why: _text(json['why']), lean: _text(json['lean']), options: _strings(json['options']),
+        questions: _maps(json['questions']).map(Question.fromJson).toList(), free: json['free'] == true,
+        resolved: json['resolved'] is Map ? LeadResolved(answer: _text(_map(json['resolved'])['answer']), by: _text(_map(json['resolved'])['by'])) : null);
+  final String id, type, text, conversationId, conversation, projectId;
+  /// `did`: approve / answer / reply / accept / stop / start, and whether it can still be taken back (`undo` = 'stop').
+  final String action, asked, said, reason, undo;
+  final List<LeadEvidence> evidence;
+  final bool undone;
+  /// `ask`: approval / question / finished / job / failed. `quote` is null on cards written before
+  /// the conversation's own words were kept apart from the question.
+  final String kind, why, lean;
+  final String? quote;
+  final List<String> options;
+  final List<Question> questions;
+  /// The answer may be any text (it goes to the conversation as a message).
+  final bool free;
+  final LeadResolved? resolved;
+  bool get canUndo => undo.isNotEmpty && !undone;
+  bool get open => type == 'ask' && resolved == null;
+}
+
+/// A conversation 领航 follows that waits, runs or failed: `status` is waiting / running / failed, `note` says it in words.
+class LeadWatch {
+  LeadWatch({required this.id, required this.name, required this.projectId, required this.account, required this.status, required this.note, this.at});
+  factory LeadWatch.fromJson(Map<String, dynamic> json) => LeadWatch(
+        id: _text(json['id']), name: _text(json['name']), projectId: _text(json['projectId']), account: _text(json['account']),
+        status: _text(json['status']), note: _text(json['note']), at: DateTime.tryParse(_text(json['at'])));
+  final String id, name, projectId, account, status, note;
+  final DateTime? at;
+}
+
+class LeadRule {
+  LeadRule(this.text, {this.fixed = false});
+  final String text;
+  /// Also enforced in code: cannot be removed.
+  final bool fixed;
+}
+
+/// 领航's state as GET lead and GET lead/changes return it.
+class LeadView {
+  LeadView({
+    required this.configured, required this.enabled, this.model = '', this.rules = const [], this.waiting = 0, this.items = const [],
+    this.watching = const [], this.rest = 0, this.working, this.draft = '', this.step = '',
+  });
+  factory LeadView.fromJson(Map<String, dynamic> json) => LeadView(
+        configured: json['configured'] == true, enabled: json['enabled'] == true, model: _text(json['model']),
+        rules: _maps(json['rules']).map((item) => LeadRule(_text(item['text']), fixed: item['fixed'] == true)).toList(),
+        waiting: json['waiting'] is int ? json['waiting'] as int : 0, items: _maps(json['items']).map(LeadItem.fromJson).toList(),
+        watching: _maps(json['watching']).map(LeadWatch.fromJson).toList(), rest: json['rest'] is int ? json['rest'] as int : 0,
+        working: json['working'] is String ? json['working'] as String : null, draft: _text(json['draft']), step: _text(json['step']));
+  /// `configured`: the backend has a system model for 领航 to judge with.
+  final bool configured, enabled;
+  final String model;
+  final List<LeadRule> rules;
+  /// Cards the user has not answered yet.
+  final int waiting;
+  final List<LeadItem> items;
+  /// The followed conversations that wait, run or failed; `rest` counts the followed ones at rest.
+  final List<LeadWatch> watching;
+  final int rest;
+  /// What it is looking at right now ('' for the user's words; null when idle), its answer as it is being written, and its current step.
+  final String? working;
+  final String draft, step;
+}
+
 List<T> parseList<T>(Object? value, T Function(Map<String, dynamic>) parse) => _maps(value).map(parse).toList();
 Map<String, dynamic> asMap(Object? value) => _map(value);
