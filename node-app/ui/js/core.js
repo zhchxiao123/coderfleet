@@ -384,6 +384,7 @@
     let operations = [];
     let backend = '';
     let timer = 0;
+    let unsupported = ''; // backend id whose version has no operations list
     const listeners = new Set();
     const waiters = new Map(); // operation id → resolve(final operation)
     const notify = (title, body) => {
@@ -395,8 +396,18 @@
       const current = CF.state.backendId;
       if (!current || !CF.state.connected) { timer = setTimeout(poll, 5000); return; }
       let next;
-      try { next = await CF.get('operations'); } catch { timer = setTimeout(poll, 5000); return; }
+      try { next = await CF.get('operations'); } catch (error) {
+        // A backend older than this App has no list of operations: say so instead of showing an empty one.
+        const missing = /Unknown API endpoint/.test(CF.errorText(error));
+        if (missing && current === CF.state.backendId && unsupported !== current) {
+          unsupported = current;
+          for (const listener of listeners) listener([]);
+        }
+        timer = setTimeout(poll, missing ? 60000 : 5000);
+        return;
+      }
       if (current !== CF.state.backendId) return;
+      unsupported = '';
       const before = backend === current ? new Map(operations.map(item => [item.id, item.status])) : null;
       backend = current;
       operations = next;
@@ -418,12 +429,56 @@
       list: () => (backend === CF.state.backendId ? operations : []),
       running: () => (backend === CF.state.backendId ? operations.filter(item => item.status === 'running') : []),
       subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      /** The connected backend is too old to list its operations. */
+      unsupported: () => unsupported !== '' && unsupported === CF.state.backendId,
       /** Poll now (an operation just started, or the backend changed). */
       refresh: () => { void poll(); },
       /** Resolves with the operation once it has finished. */
       wait: operation => new Promise(resolve => { waiters.set(operation.id, resolve); void poll(); }),
     };
   })();
+
+  /** Every recent background operation of the connected backend, live; a row opens its log. */
+  CF.activitySheet = () => {
+    const list = h('div.activity-list');
+    const draw = operations => {
+      const sorted = [...operations].sort((left, right) => (right.status === 'running') - (left.status === 'running'));
+      list.replaceChildren(...(sorted.length ? sorted.map(operation => {
+        const running = operation.status === 'running';
+        const percent = running && operation.step ? Math.round(operation.step.current / operation.step.total * 100) : null;
+        const detail = running ? operation.lastLine : operation.status === 'failed' ? operation.error || operation.lastLine : '';
+        return h('button.activity-item', { on: { click: () => CF.operationLog(operation, CF.operationLabel(operation)) } },
+          running ? h('span.spinner') : h('span.dot' + (operation.status === 'failed' ? '.failed' : '.running')),
+          h('span.activity-text', h('strong', CF.operationLabel(operation)),
+            h('small', CF.operationProgress(operation) + (detail ? ' · ' + detail : ''))),
+          h('span.activity-when', CF.relative(operation.startedAt)),
+          percent === null ? null : h('span.activity-bar', h('span', { style: 'width:' + percent + '%' })));
+      }) : [h('p.activity-empty', CF.activity.unsupported()
+        ? '这台机器上的后端版本比 App 旧，看不到它的后台任务。到「通用 → 后端连接」把它升级后就能看到。'
+        : '最近没有后台任务。构建或下载镜像、启动和停止容器这类要等一会儿的操作，会出现在这里。')]));
+    };
+    const unsubscribe = CF.activity.subscribe(draw);
+    const sheet = CF.sheet({ title: '后台任务', onClose: unsubscribe }, () => list);
+    sheet.foot(h('button.btn', { on: { click: () => sheet.close() } }, '关闭'));
+    draw(CF.activity.list());
+    CF.activity.refresh();
+  };
+
+  /** Window-bar icon that opens the background operations; spins while any runs. */
+  CF.activityButton = () => {
+    const button = h('button.icon-btn.win-activity', { on: { click: () => CF.activitySheet() } });
+    const draw = () => {
+      const running = CF.activity.running();
+      const old = CF.activity.unsupported();
+      const title = old ? '后台任务 · 后端版本太旧，看不到' : running.length ? '后台任务 · ' + running.length + ' 个进行中' : '后台任务';
+      button.title = title;
+      button.setAttribute('aria-label', title);
+      button.replaceChildren(running.length ? h('span.spinner') : CF.icon('clock', 16), old ? h('span.dot.waiting') : null);
+    };
+    CF.activity.subscribe(draw);
+    draw();
+    return button;
+  };
 
   /** Waits for an operation; the activity watcher reports how it ended. */
   CF.trackOperation = async (operation, _label, refresh) => {

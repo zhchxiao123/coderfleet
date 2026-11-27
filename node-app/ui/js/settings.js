@@ -55,7 +55,11 @@
       // Connections
       const current = profiles.find(item => item.id === backendId);
       let bundle = '';
-      try { bundle = (await CF.transport.bundle?.())?.version || ''; } catch { /* no bundle in development */ }
+      let appVersion = '';
+      try { const info = await CF.transport.bundle?.(); bundle = info?.version || ''; appVersion = info?.app || ''; } catch { /* no bundle in development */ }
+      // An SSH backend installed by an older App lacks what this App expects (background tasks, the machine helper…).
+      const older = profile => profile.kind === 'ssh' && profile.version && appVersion
+        && profile.version.localeCompare(appVersion, undefined, { numeric: true }) < 0;
       const name = h('input', { placeholder: '名称', maxLength: 100 });
       const url = h('input', { type: 'url', placeholder: 'https://coderfleet.example.com' });
       const token = h('input', { type: 'password', placeholder: '服务令牌', autocomplete: 'off' });
@@ -84,7 +88,8 @@
           h('div.row-lead',
             h('span.row-avatar', profile.kind === 'ssh' ? CF.icon('terminal', 16) : profile.kind === 'local' ? CF.icon('box', 16) : CF.icon('link', 16)),
             h('div.row-main', h('div.row-title', h('span.name', profile.name),
-              profile.id === backendId ? h('span.badge' + (CF.state.connected ? '.green' : ''), CF.state.connected ? '已连接' : '当前') : null),
+              profile.id === backendId ? h('span.badge' + (CF.state.connected ? '.green' : ''), CF.state.connected ? '已连接' : '当前') : null,
+              older(profile) ? h('span.badge.amber', { title: '后端比 App（' + appVersion + '）旧，后台任务、机器助手等新功能在它上面用不了；升级后端后恢复' }, '比 App 旧') : null),
               h('div.row-sub', h('span.path', describe(profile))))),
           h('div.row-actions',
             profile.kind === 'ssh' && profile.version && bundle && profile.version !== bundle
@@ -194,7 +199,6 @@
       const buildButton = overview.initialized && overview.docker ? h('button.btn.small', { on: { click: event => build(event.currentTarget) } }) : null;
       const pullButton = buildButton ? h('button.btn.small', { on: { click: event => pull(event.currentTarget) } }) : null;
       const imageValue = h('dd');
-      const operationsValue = h('dd');
       // The name and tag are edited in the card below; here only whether it is there (and the name, before there are settings).
       const drawImage = () => imageValue.replaceChildren(...(image ? [...(overview.initialized ? [] : [h('span.mono', image.name), ' · ']), image.exists ? '已就绪' : '还没有'] : ['—']));
       let lastBuild = '';
@@ -218,12 +222,6 @@
           if (latest?.kind === 'pull') syncPlatform();
         }
         lastBuild = key || 'none';
-        operationsValue.replaceChildren(operations.length
-          ? h('div', { style: 'display:grid;gap:4px' }, operations.slice(0, 5).map(operation => h('button.btn.ghost.small', {
-            style: 'justify-content:flex-start', on: { click: () => CF.operationLog(operation, CF.operationLabel(operation)) },
-          }, operation.status === 'running' ? h('span.spinner') : h('span.dot' + (operation.status === 'failed' ? '.failed' : '.running')),
-            CF.operationLabel(operation), h('span', { style: 'color:var(--text-3)' }, operation.status === 'running' ? CF.operationProgress(operation) : CF.relative(operation.startedAt)))))
-          : '无');
         return true;
       };
       drawImage();
@@ -237,8 +235,7 @@
         h('div.card-body', h('dl.kv',
           h('dt', '工作区'), h('dd.mono', overview.workspace),
           h('dt', 'Docker'), h('dd', overview.docker ? '已连接 · ' + overview.docker : '未连接'),
-          h('dt', '镜像'), imageValue,
-          h('dt', '最近操作'), operationsValue))));
+          h('dt', '镜像'), imageValue))));
 
       // Proxy & containers
       if (!values) return;

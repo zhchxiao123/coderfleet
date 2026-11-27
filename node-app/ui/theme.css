@@ -862,6 +862,16 @@ img.preview-full { display: block; max-width: 100%; max-height: calc(100vh - 220
 .activity-text small { font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .activity-bar span { display: block; height: 100%; background: var(--accent); transition: width 0.4s ease; }
+/* The same operations as a list (the window bar's 后台任务) */
+.activity-list { display: grid; gap: 4px; margin: 0 -8px; }
+.activity-item {
+  position: relative; display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; overflow: hidden;
+  border: 0; border-radius: 10px; background: none; color: var(--text); text-align: left;
+}
+.activity-item:hover { background: var(--hover); }
+.activity-item .spinner { flex: none; }
+.activity-when { flex: none; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.activity-empty { margin: 4px 8px 10px; color: var(--text-2); }
 
 /* Project environment variables */
 .env-head, .env-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 30px 30px; gap: 8px; align-items: center; }
@@ -982,6 +992,9 @@ ul.addresses, ol.pair-addresses { list-style: none; margin: 0; padding: 0; displ
 img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius: 12px; background: #fff; padding: 6px; }
 .pair-hint { margin: 0; color: var(--text-3); font-size: 12.5px; text-align: center; }
 .pair ol.pair-addresses { width: 100%; }
+.pair-token { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 4px; font-size: 13px; }
+.pair-token span { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+.pair-token code { flex: 1; min-width: 0; font: 12.5px var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
 
 /* An Agent call's own steps */
 .tool-children { margin: 0 0 4px 7px; padding-left: 14px; border-left: 1px solid var(--line-strong); display: grid; grid-template-columns: minmax(0, 1fr); }
@@ -1137,7 +1150,10 @@ img.qr { width: 240px; height: 240px; image-rendering: pixelated; border-radius:
 .platform-darwin .win-nav { padding-left: 84px; }
 .app.sidebar-hidden .win-nav { width: auto; padding-right: 6px; }
 .win-page { flex: 1; min-width: 0; height: 100%; display: flex; }
-.winbar .topbar { flex: 1; min-width: 0; height: 100%; padding: 0 12px 0 22px; }
+.win-activity { position: relative; }
+.win-activity .dot { position: absolute; top: 4px; right: 4px; }
+.win-tools { flex: none; display: flex; align-items: center; gap: 2px; padding-right: 12px; }
+.winbar .topbar { flex: 1; min-width: 0; height: 100%; padding: 0 4px 0 22px; }
 .app.sidebar-hidden .winbar .topbar { padding-left: 8px; }
 .winbar .icon-btn { width: 30px; height: 28px; color: var(--text-2); -webkit-app-region: no-drag; }
 .winbar .icon-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }

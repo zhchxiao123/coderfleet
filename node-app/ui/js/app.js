@@ -378,7 +378,8 @@
    */
   const winNav = h('div.win-nav');
   const winPage = h('div.win-page');
-  winbar.append(winNav, winPage);
+  // Background operations, at the right end of the bar on every page.
+  winbar.append(winNav, winPage, h('div.win-tools', CF.activityButton()));
   /** The open page's own row in the window bar (a conversation's title and buttons), or none. */
   const setBar = node => winPage.replaceChildren(...(node ? [node] : []));
   CF.app.setBar = setBar;

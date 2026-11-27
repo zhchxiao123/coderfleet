@@ -33,11 +33,19 @@
         await navigator.clipboard.writeText(result.link);
         copy.textContent = '已复制';
       } } }, '复制配对链接');
+      const deviceToken = new URL(result.link).searchParams.get('token');
+      const copyToken = h('button.btn.small', { on: { click: async () => {
+        await navigator.clipboard.writeText(deviceToken);
+        copyToken.textContent = '已复制';
+      } } }, '复制');
       sheet.dialog.querySelector('.sheet-body').replaceChildren(h('div.pair',
         qrImage(result.link),
         h('p.pair-hint', '用 CoderFleet 手机 App 扫码。二维码里有令牌，关掉后不会再显示。'),
         h('ol.pair-addresses', result.addresses.map(address => h('li', h('span.badge', KIND[address.kind] || address.kind), h('code', address.url), h('small', address.label)))),
-        h('p.pair-hint', '手机会按这个顺序尝试，用第一个连得上的。')));
+        h('p.pair-hint', '手机会按这个顺序尝试，用第一个连得上的。'),
+        // For the phone's 手动填写 form, which asks for one of the addresses above and this token.
+        h('div.pair-token', h('span', '设备令牌'), h('code', deviceToken), copyToken),
+        h('p.pair-hint', '扫不了码时，在手机上选「手动填写地址和令牌」，填上面的一个地址和这个令牌。')));
       sheet.foot(copy, h('button.btn.primary', { on: { click: () => sheet.close() } }, '完成'));
     }) } }, '生成二维码');
     sheet.foot(h('button.btn', { on: { click: () => sheet.close() } }, '取消'), create);

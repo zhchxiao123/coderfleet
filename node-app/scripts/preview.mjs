@@ -138,7 +138,7 @@ window.coderFleet = {
   connect: async () => ({}), setLan: async () => ({}), restartLocal: async () => ({}),
   setupLocal: async () => 'local', addRemote: async () => 'local', remove: async () => [],
   pickDirectory: null, pickFile: null,
-  bundle: async () => ({ version: '0.1.0' }),
+  bundle: async () => ({ version: '0.1.0', app: '0.1.0' }),
   addSsh: async () => { window.__jobStart = Date.now(); return 'job'; },
   reinstallSsh: async () => { window.__jobStart = Date.now(); return 'job'; },
   job: async () => {
