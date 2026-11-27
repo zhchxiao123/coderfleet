@@ -1,8 +1,9 @@
 // Runs one Codex turn inside the project's persistent container with the
 // official TypeScript Codex SDK (@openai/codex-sdk), which drives the
-// container's `codex` CLI. Like the Python scheduler: the workspace-write sandbox,
-// or danger-full-access without approvals in auto mode; resume by thread ID;
-// images as local_image inputs. Codex thread events are
+// container's `codex` CLI. Codex's own sandbox is off (danger-full-access, no
+// approvals): it needs bubblewrap, which cannot create its user namespace in
+// a container, so every command would fail; the container is the boundary.
+// Resume by thread ID; images as local_image inputs. Codex thread events are
 // translated into the shared stream-json events.
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -101,8 +102,9 @@ export async function runCodex(spec: CodexSpec): Promise<number> {
   try {
     const sdk = await import(pathToFileURL(join(spec.vendor_directory, 'codex-sdk', 'index.js')).href) as { Codex: new (options: Json) => CodexClient };
     const codex = new sdk.Codex({ codexPathOverride: codexPath() });
-    const sandboxMode = spec.read_only ? 'read-only' : spec.auto ? 'danger-full-access' : 'workspace-write';
-    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode, ...(spec.auto || spec.read_only ? { approvalPolicy: 'never' } : {}), ...(spec.model ? { model: spec.model } : {}) };
+    // A read-only turn has no sandbox to hold it to that either: its prompt says so.
+    const sandboxMode = 'danger-full-access';
+    const options: Json = { workingDirectory: spec.cwd, skipGitRepoCheck: true, sandboxMode, approvalPolicy: 'never', ...(spec.model ? { model: spec.model } : {}) };
     const files = attachments(spec.cwd, spec.images);
     const images = files.filter(file => file.kind === 'image');
     const prompt = withPaths(spec.prompt, files.filter(file => file.kind !== 'image'));
