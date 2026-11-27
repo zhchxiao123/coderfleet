@@ -427,6 +427,13 @@ button.flow-row:hover { background: var(--hover); color: var(--text-2); }
 .assistant:empty { display: none; }
 .assistant > :first-child { margin-top: 0; }
 .assistant > :last-child { margin-bottom: 0; }
+/* An answer being written (stream.js): one .chunk per block, laid out as if the blocks were direct children. */
+.assistant .chunk { display: contents; }
+.assistant > .chunk:first-child > :first-child { margin-top: 0; }
+.assistant > .chunk:last-child > :last-child { margin-bottom: 0; }
+.assistant .fade { animation: text-in 0.24s ease-out both; }
+@keyframes text-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .assistant .fade { animation: none; } }
 .assistant p { margin: 0 0 12px; }
 .assistant h1, .assistant h2, .assistant h3 { margin: 20px 0 8px; line-height: 1.35; letter-spacing: -0.015em; font-weight: 660; }
 .assistant h1 { font-size: 19px; } .assistant h2 { font-size: 17px; } .assistant h3 { font-size: 15px; }

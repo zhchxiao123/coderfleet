@@ -9,6 +9,9 @@
 
   const STATUS = { starting: '正在启动', running: '正在处理' };
   const isActive = turn => turn.status === 'starting' || turn.status === 'running';
+  /** While an answer runs: how long one request waits at the backend for a change, and how often the job card is asked. */
+  const BUSY_WAIT = 2000;
+  const JOB_EVERY = 600;
 
   // Tool call states and how each one reads in a flow row.
   const TOOL_STATES = {
@@ -230,18 +233,62 @@
       if (group.length) nodes.push(toolFlow(turn, group, turn.id + ':' + nodes.length));
       group = [];
     };
+    // While the turn runs its text is written out by stream.js; a stream stays until all of
+    // its text is on screen, also after the turn ended or went on to a tool call.
+    const live = isActive(turn);
+    const current = session;
+    const streams = current?.streams;
+    const kept = new Set();
     blocks.forEach((block, index) => {
       if (block.kind === 'tool') { const tool = byId.get(block.id); if (tool) group.push(tool); return; }
       flush();
       if (block.kind === 'user') { nodes.push(userBubble(turn.projectId, block.text, block.images, '插话')); return; }
       if (!block.text.trim()) return;
-      const state = translations.get(turn.id + ':' + index);
+      const key = turn.id + ':' + index;
+      let stream = streams?.get(key);
+      if (!stream && live && streams) {
+        stream = CF.stream.create({
+          render: text => answerContent(turn.projectId, text), text: block.text, revealed: !current.written.has(turn.id),
+          onDraw: () => current.keepUp?.(),
+          onSettled: () => { const now = current.turns.find(item => item.id === turn.id); if (session === current && now && !isActive(now)) current.rerender(turn.id); },
+        });
+        streams.set(key, stream);
+      }
+      if (stream && (live || !stream.settled)) {
+        stream.set(block.text, !live || index !== blocks.length - 1);
+        kept.add(key);
+        nodes.push(stream.detach());
+        return;
+      }
+      const state = translations.get(key);
       nodes.push(state?.showing && state.text !== undefined
         ? h('div.assistant.translated', answerContent(turn.projectId, state.text))
         : h('div.assistant', { dataset: { block: String(index) } }, answerContent(turn.projectId, block.text)));
     });
     flush();
+    if (streams) {
+      for (const [key, stream] of streams) if (key.startsWith(turn.id + ':') && !kept.has(key)) { stream.stop(); streams.delete(key); }
+      if (live) current.written.add(turn.id);
+    }
     return nodes;
+  }
+
+  /** Some of the turn's text is still being written out on screen. */
+  const writing = turn => [...(session?.streams || [])].some(([key, stream]) => key.startsWith(turn.id + ':') && !stream.settled);
+
+  /** Hands the text that arrived to the streams of a running turn; false when the turn has to be drawn again. */
+  function feed(turn) {
+    const blocks = turn.blocks || [];
+    if (!blocks.length) return false;
+    const targets = [];
+    for (const [index, block] of blocks.entries()) {
+      if (block.kind !== 'text' || !block.text.trim()) continue;
+      const stream = session?.streams.get(turn.id + ':' + index);
+      if (!stream) return false;
+      targets.push([stream, block.text, index !== blocks.length - 1]);
+    }
+    for (const [stream, text, finished] of targets) stream.set(text, finished);
+    return true;
   }
 
   /**
@@ -331,7 +378,7 @@
 
   /** Time and actions under a finished answer: copy, translate, fork (Claude). */
   function turnActions(turn) {
-    if (isActive(turn) || turn.status === 'queued') return null;
+    if (isActive(turn) || turn.status === 'queued' || writing(turn)) return null;
     const text = textBlocks(turn).map(([, value]) => value).join('\n\n');
     const translated = textBlocks(turn).some(([index]) => translations.get(turn.id + ':' + index)?.showing);
     const time = turn.finishedAt || turn.createdAt;
@@ -395,10 +442,12 @@
     return node;
   }
 
-  const signature = turn => [turn.status, turn.answer.length, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
+  /** Everything a turn's node depends on except how much text has arrived. */
+  const shape = turn => [turn.status, turn.permission?.id || '', turn.error || '', (turn.blocks || []).length,
     textBlocks(turn).map(([index]) => translations.get(turn.id + ':' + index)?.showing ? 1 : 0).join(''), translateReady.get(CF.state.backendId) ? 1 : 0,
     JSON.stringify(translating.get(turn.id) ?? null),
     turn.tools.map(tool => tool.id + tool.status + (tool.detail || '')).join(',')].join('|');
+  const signature = turn => shape(turn) + '|' + turn.answer.length;
 
   function project() {
     return CF.state.projects.find(item => item.id === session?.projectId);
@@ -452,7 +501,13 @@
         || list.find(item => item.state === 'running') || list[0] || null;
     },
 
-    stop() { if (session) { clearTimeout(session.timer); drafts.set(session.key, session.textarea.value); session = null; } },
+    stop() {
+      if (!session) return;
+      clearTimeout(session.timer);
+      for (const stream of session.streams.values()) stream.stop();
+      drafts.set(session.key, session.textarea.value);
+      session = null;
+    },
 
     /** view: { conversationId?, projectId } */
     mount(container, view) {
@@ -533,7 +588,8 @@
       const title = h('div.title');
       const meta = h('div.meta');
       const welcome = h('div.welcome-chat', h('div.hero', CF.brandMark(), h('h2'), h('p', '对话在项目容器里运行，可以读写这个项目的文件。')));
-      session = { key, conversationId: conversation?.id || '', projectId, turns: [], followUps: [], attachments: [], timer: 0, textarea, sending: false };
+      session = { key, conversationId: conversation?.id || '', projectId, turns: [], followUps: [], attachments: [], timer: 0, textarea, sending: false,
+        etag: '', round: 0, jobAt: 0, streams: new Map(), written: new Set() };
       if (projectId) { try { localStorage.setItem(lastKey(), projectId); } catch { /* storage unavailable */ } }
       const current = session;
       textarea.value = drafts.get(key) || '';
@@ -689,6 +745,29 @@
       };
       transcript.addEventListener('scroll', () => requestAnimationFrame(trackCurrent), { passive: true });
 
+      // The view follows the newest text while it is at the bottom, and lets go as soon as the
+      // user scrolls up. Small steps glide; a long way (a conversation just opened) is a jump.
+      let following = true;
+      let lastTop = 0;
+      let gliding = 0;
+      const still = matchMedia('(prefers-reduced-motion: reduce)');
+      transcript.addEventListener('scroll', () => {
+        const top = transcript.scrollTop;
+        if (top + transcript.clientHeight >= transcript.scrollHeight - 40) following = true;
+        else if (top < lastTop - 1) following = false;
+        lastTop = top;
+      }, { passive: true });
+      const glide = () => {
+        gliding = 0;
+        if (!following || session !== current) return;
+        const gap = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop;
+        if (gap < 1) return;
+        if (gap > transcript.clientHeight || still.matches) { transcript.scrollTop = transcript.scrollHeight; return; }
+        transcript.scrollTop += Math.ceil(gap * 0.18);
+        gliding = requestAnimationFrame(glide);
+      };
+      current.keepUp = () => { if (following && !gliding) glide(); };
+
       // Each job of the conversation says where its work happens (above the turn that started
       // it: the conversation may have been going before) and how it ended (below its last turn:
       // the conversation may go on after).
@@ -723,20 +802,22 @@
         // A conversation the clock opened says so at its top.
         const schedule = CF.findConversation(current.conversationId)?.schedule;
         if (schedule && !scheduleNode) { scheduleNode = h('div.job-divider', h('span', h('b', '定时'), schedule + ' · 到点自动开始')); inner.prepend(scheduleNode); }
-        const atBottom = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 40;
         for (const turn of current.turns) {
           const existing = nodes.get(turn.id);
+          const form = shape(turn);
           const sig = signature(turn);
           if (existing && existing.sig === sig) continue;
+          // Only more text for a running turn: its streams take it, nothing is rebuilt.
+          if (existing && existing.form === form && isActive(turn) && feed(turn)) { existing.sig = sig; continue; }
           const node = turnNode(turn);
           if (existing) existing.node.replaceWith(node); else inner.append(node);
-          nodes.set(turn.id, { node, sig });
+          nodes.set(turn.id, { node, sig, form });
           // Where the inherited history ends and the fork's own turns begin.
           if (!existing && turn.inherited && !dividerNode) { dividerNode = h('div.fork-divider', h('span', '以上是分叉前的历史')); }
           if (dividerNode && turn.inherited) node.after(dividerNode);
         }
         renderJobLines();
-        if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+        current.keepUp();
         updateComposer();
         renderRail();
         trackCurrent();
@@ -808,30 +889,45 @@
         if (!turn || !existing) return;
         const node = turnNode(turn);
         existing.node.replaceWith(node);
-        nodes.set(turnId, { node, sig: signature(turn) });
+        nodes.set(turnId, { node, sig: signature(turn), form: shape(turn) });
+        current.keepUp();
       };
-      current.refresh = async () => {
+      // The conversation's change feed: only the turns that changed come back. While an answer
+      // runs the request waits at the backend for the next change, so text shows as it arrives.
+      current.refresh = async (wait = 0) => {
         if (!current.conversationId || session !== current) return;
         clearTimeout(current.timer);
+        // A refresh asked for meanwhile (after sending, stopping, answering) replaces this one.
+        const round = current.round += 1;
+        const latest = () => session === current && round === current.round;
         try {
-          const [turns, followUps] = await Promise.all([
-            CF.get('conversations/' + current.conversationId + '/turns'),
-            CF.get('conversations/' + current.conversationId + '/follow-ups').catch(() => []),
-          ]);
-          if (session !== current) return;
-          current.turns = turns;
-          current.followUps = followUps;
+          const changes = await CF.get('conversations/' + current.conversationId + '/changes?since=' + encodeURIComponent(current.etag) + '&wait=' + wait);
+          if (!latest()) return;
+          if (!changes.unchanged) {
+            const byId = new Map((changes.full ? [] : current.turns).map(turn => [turn.id, turn]));
+            for (const turn of changes.turns) byId.set(turn.id, turn);
+            current.turns = changes.order.flatMap(id => byId.get(id) ?? []);
+            current.followUps = changes.followUps;
+            current.etag = changes.etag;
+          }
           mountJob();
-          await current.jobCard?.refresh();
-          if (session !== current) return;
+          if (Date.now() - current.jobAt >= JOB_EVERY) { current.jobAt = Date.now(); await current.jobCard?.refresh(); }
+          if (!latest()) return;
           applyModel();
           renderTurns();
           renderFollowUps();
           const running = activeTurn();
           if (!running && current.wasRunning) { void CF.app.refreshConversations(); void CF.app.refreshProjects(); }
           current.wasRunning = Boolean(running);
-        } catch (error) { if (session === current) CF.fail(error); }
-        if (session === current) current.timer = setTimeout(current.refresh, activeTurn() || current.followUps.length ? 600 : 4000);
+        } catch (error) {
+          if (!latest()) return;
+          CF.fail(error);
+          current.timer = setTimeout(() => current.refresh(), 4000);
+          return;
+        }
+        if (!latest()) return;
+        const busy = activeTurn() || current.followUps.length;
+        current.timer = setTimeout(() => current.refresh(busy ? BUSY_WAIT : 0), busy ? 0 : 4000);
       };
 
       const stop = async () => {
