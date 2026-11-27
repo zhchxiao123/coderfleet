@@ -53,7 +53,7 @@
     reply: item => ['我回了「', item.conversation, '」：' + clip(item.said, 80)],
     accept: item => ['「', item.conversation, '」我收下了，让它合并'],
     stop: item => ['我让「', item.conversation, '」停下了'],
-    start: item => ['开了新对话「', item.conversation, '」：' + clip(item.said, 80)],
+    start: item => ['开了新对话「', item.conversation, '」：' + clip(item.said, 80) + (item.attachments?.length ? '（带了 ' + item.attachments.length + ' 个附件）' : '')],
   };
   /** What 领航 settled by itself: one faint line. */
   function note(item, parts, extra = null) {
@@ -72,6 +72,7 @@
         item.asked ? [h('dt', '它问'), h('dd', item.asked)] : null,
         item.evidence.length ? [h('dt', '我进项目里看了'), evidence(item.evidence)] : null,
         item.said ? [h('dt', item.action === 'start' ? '我交代的' : '我回'), h('dd', item.said)] : null,
+        item.attachments?.length ? [h('dt', '一起交过去的附件'), h('dd', attachmentList(item.attachments))] : null,
         item.reason ? [h('dt', '依据'), h('dd', item.reason)] : null) : null]);
     return node;
   }
@@ -122,8 +123,11 @@
     return node;
   }
 
+  /** Files the user gave 领航, as in a conversation: thumbnails for images, a chip for the rest. */
+  const attachmentList = paths => paths?.length ? h('div.user-images', paths.map(path => CF.isImageUpload(path) ? CF.uploadThumb(null, path) : CF.fileChip(CF.uploadName(path), CF.uploadSize(path)))) : null;
+
   function itemNode(item) {
-    if (item.type === 'user') return h('div.user-msg', h('div.bubble', item.text));
+    if (item.type === 'user') return h('div.user-msg', attachmentList(item.attachments), item.text ? h('div.bubble', item.text) : null);
     if (item.type === 'lead') return words(item.text);
     if (item.type === 'note') return h('div.turn-note', item.text);
     if (item.type === 'did') return didRow(item);
@@ -228,24 +232,34 @@
       const textarea = h('textarea', { rows: 1, placeholder: '直接说就行：交代一件事，或者一句话回它问你的几件事…', 'aria-label': '给领航的话' });
       const sendButton = h('button.send', { title: '发送', disabled: true }, CF.icon('send', 16));
       const autosize = () => { textarea.style.height = 'auto'; textarea.style.height = Math.min(textarea.scrollHeight, 240) + 'px'; };
+      // Files for 领航: kept by the backend; whatever it hands to a conversation goes along with them.
+      const attach = CF.attachments({ projectId: null, upload: (name, file) => CF.transport.upload(CF.state.backendId, null, name, file),
+        alive: () => host?.isConnected && parts?.textarea === textarea, onChange: () => updateSend() });
+      const updateSend = () => { sendButton.disabled = (!textarea.value.trim() && !attach.count()) || attach.uploading(); };
+      const attachButton = h('button.composer-icon', { title: '添加附件', 'aria-label': '添加附件', on: { click: () => CF.menu(attachButton, [
+        { icon: 'clip', label: '添加附件', hint: '图片、PDF 或任意文件，也可以粘贴或拖进来', run: attach.pick },
+      ], { alignStart: true }) } }, CF.icon('plus', 16));
       const send = async said => {
         const text = (said ?? textarea.value).trim();
-        if (!text || sendButton.dataset.busy) return;
+        // A hint chip says only its words; the box sends what is typed and attached.
+        const attachments = said === undefined ? attach.paths() : [];
+        if ((!text && !attachments.length) || sendButton.dataset.busy || (said === undefined && attach.uploading())) return;
         sendButton.dataset.busy = '1';
         try {
-          await CF.lead.say(text);
-          if (said === undefined) { textarea.value = ''; autosize(); sendButton.disabled = true; }
+          await CF.lead.say(text, attachments);
+          if (said === undefined) { textarea.value = ''; autosize(); attach.clear(); }
         } catch (error) { CF.fail(error); }
-        finally { delete sendButton.dataset.busy; }
+        finally { delete sendButton.dataset.busy; updateSend(); }
       };
-      textarea.addEventListener('input', () => { autosize(); sendButton.disabled = !textarea.value.trim(); });
+      textarea.addEventListener('input', () => { autosize(); updateSend(); });
+      textarea.addEventListener('paste', attach.paste);
       textarea.addEventListener('keydown', event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
       });
       sendButton.addEventListener('click', () => void send());
       host = h('div.chat.lead-chat', watch, transcript,
-        h('div.composer-wrap', notice, h('div.composer', textarea,
-          h('div.composer-bar', HINTS.map(hint => h('button.lead-chip', { on: { click: () => void send(hint) } }, hint)), h('span.hint', 'Enter 发送'), sendButton))));
+        h('div.composer-wrap', notice, h('div.composer', { on: attach.drop }, attach.row, textarea, attach.input,
+          h('div.composer-bar', attachButton, HINTS.map(hint => h('button.lead-chip', { on: { click: () => void send(hint) } }, hint)), h('span.hint', 'Enter 发送'), sendButton))));
       parts = { transcript, inner, notice, textarea, watch };
       container.replaceChildren(h('div.chat-row', host));
       shown = ''; cards.clear();
@@ -255,9 +269,9 @@
       textarea.focus();
     },
 
-    /** Says something to 领航 as the user. */
-    async say(text) {
-      await CF.api('POST', 'lead/messages', { text });
+    /** Says something to 领航 as the user, maybe with files uploaded to it. */
+    async say(text, attachments = []) {
+      await CF.api('POST', 'lead/messages', { text, ...(attachments.length ? { attachments } : {}) });
       await CF.lead.refresh();
       if (parts?.transcript.isConnected) parts.transcript.scrollTop = parts.transcript.scrollHeight;
     },

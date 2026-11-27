@@ -12,6 +12,8 @@ import { configured, proxyFetch, type SystemLLMConfig } from './translate.js';
 /** A tool the model may call: its name, what it is for, and the JSON Schema of its input. */
 export interface ToolSpec { readonly name: string; readonly description: string; readonly parameters: Record<string, unknown> }
 export interface ToolCall { readonly name: string; readonly input: Record<string, unknown> }
+/** An image the prompt comes with: base64 data and its type. */
+export interface Image { readonly data: string; readonly mimeType: string }
 
 export class EngineError extends Error {}
 
@@ -21,6 +23,8 @@ export interface RunOptions {
   readonly directory: string;
   readonly system: string;
   readonly prompt: string;
+  /** Shown to the model with the prompt; it is then registered as taking images. */
+  readonly images?: readonly Image[];
   readonly tools: readonly ToolSpec[];
   /** Performs a call. `end`: the run is over with it, the model is not asked again. */
   call(call: ToolCall): Promise<{ output: string; end?: boolean }>;
@@ -49,7 +53,7 @@ interface PiEvent {
 interface PiSession {
   readonly messages: readonly PiMessage[];
   subscribe(listener: (event: PiEvent) => void): () => void;
-  prompt(text: string): Promise<void>;
+  prompt(text: string, options?: { images?: readonly { type: 'image'; data: string; mimeType: string }[] }): Promise<void>;
   abort(): Promise<void>;
   dispose(): void;
 }
@@ -86,7 +90,7 @@ export async function run(options: RunOptions): Promise<{ text: string; ended: b
   const known = runtime.getModels().find(item => item.id === llm.model);
   runtime.registerProvider(PROVIDER, {
     name: 'CoderFleet system model', baseUrl: llm.baseUrl || provider.baseUrl, apiKey: PROVIDER, api: provider.api,
-    models: [{ type: 'chat', id: llm.model, name: llm.model, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    models: [{ type: 'chat', id: llm.model, name: llm.model, reasoning: false, input: options.images?.length ? ['text', 'image'] : ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: known?.contextWindow ?? CONTEXT_WINDOW, maxTokens: Math.min(known?.maxTokens ?? MAX_OUTPUT, MAX_OUTPUT) }],
   });
   // Set as a value, not as configuration: pi reads `$NAME` and `!command` in a configured key.
@@ -135,7 +139,8 @@ export async function run(options: RunOptions): Promise<{ text: string; ended: b
   let late = false;
   const timer = setTimeout(() => { late = true; void session?.abort(); }, options.limitMs);
   try {
-    await session.prompt(options.prompt);
+    const images = (options.images ?? []).map(image => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));
+    await session.prompt(options.prompt, images.length ? { images } : undefined);
     if (ended) return { text: '', ended: true };
     if (late) throw new EngineError('看了 ' + Math.round(options.limitMs / 60_000) + ' 分钟还没有定下来');
     const last = session.messages.at(-1);

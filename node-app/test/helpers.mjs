@@ -177,9 +177,9 @@ export async function environment({ accounts = '', projects = (project) => '', b
     as: (bearer, method, path, value) => call(method, path, value, bearer),
     get: path => call('GET', path),
     post: (path, value = {}) => call('POST', path, value),
-    /** A file sent as the request body (the App's upload); `length` overrides the declared size. */
+    /** A file sent as the request body (the App's upload; `projectId` null: to 领航); `length` overrides the declared size. */
     upload: (projectId, name, data, length = data.length) => new Promise((resolve, reject) => {
-      const request = httpRequest(base + 'projects/' + projectId + '/uploads?name=' + encodeURIComponent(name), {
+      const request = httpRequest(base + (projectId === null ? 'lead' : 'projects/' + projectId) + '/uploads?name=' + encodeURIComponent(name), {
         method: 'POST', agent: false, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream', 'Content-Length': length },
       }, response => {
         const chunks = [];

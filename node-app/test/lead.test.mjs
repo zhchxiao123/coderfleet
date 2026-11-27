@@ -55,7 +55,8 @@ test('new work goes to the project\'s usual account unless it is nearly used up'
 });
 
 test('a phone may read and answer 领航, not switch it on or off', () => {
-  for (const [method, path] of [['GET', 'lead'], ['GET', 'lead/changes'], ['POST', 'lead/messages'], ['POST', 'lead/asks/abc123'], ['POST', 'lead/undo/abc123'], ['PUT', 'conversations/abc/lead']])
+  for (const [method, path] of [['GET', 'lead'], ['GET', 'lead/changes'], ['POST', 'lead/messages'], ['POST', 'lead/uploads'], ['GET', 'lead/uploads/0123456789abcdef-a.png'],
+    ['POST', 'lead/asks/abc123'], ['POST', 'lead/undo/abc123'], ['PUT', 'conversations/abc/lead']])
     assert.equal(deviceAllowed(method, path), true, method + ' ' + path);
   assert.equal(deviceAllowed('PUT', 'lead/settings'), false);
 });
@@ -304,6 +305,91 @@ test('the user talks to 领航: rules, new work, and who keeps a conversation', 
     const running = await lastTurn(env, slow);
     await env.post('turns/' + running.id + '/cancel');
     await until(() => lastTurn(env, slow), value => value.status !== 'running', 'stopped turn');
+  } finally { await close(); }
+});
+
+test('files given to 领航 are checked, read by the model, and go along with what it hands to a conversation', { timeout: 120_000 }, async () => {
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  let paths = [];
+  const { llm, env, talk, items, close } = await setup((prompt, results) => {
+    const said = prompt.split('## 用户刚对你说\n')[1] ?? '';
+    if (results) return /没做成/.test(results.join()) ? '没办成：' + results.join() : '办好了。';
+    if (/开个活/.test(said)) return [['start_work', { project: 'app', text: 'hello' }]];
+    if (/转给它/.test(said)) return [['send', { conversation: /- (\w+) 【app】first/.exec(prompt)[1], text: 'see the files' }]];
+    if (/只转图/.test(said)) return [['send', { conversation: /- (\w+) 【app】first/.exec(prompt)[1], text: 'only the picture', attachments: [paths[0]] }]];
+    if (/乱转/.test(said)) return [['send', { conversation: /- (\w+) 【app】first/.exec(prompt)[1], text: 'x', attachments: ['/lead/uploads/0123456789abcdef-other.txt'] }]];
+    return '看到了。';
+  });
+  const say = async (text, attachments) => {
+    const before = (await items('lead')).length;
+    const sent = await env.post('lead/messages', { text, attachments });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    return { item: sent.body.item, said: (await until(() => items('lead'), value => value.length > before, 'reply to ' + text)).at(-1).text };
+  };
+  const uploads = join(env.root, 'state', 'lead', 'uploads');
+  const inProject = path => join(env.project, '.coderfleet-uploads', path.split('/').pop());
+  try {
+    // Uploads to 领航 belong to no project: they are kept in the backend's state directory.
+    const picture = await env.upload(null, '截图 1.png', PNG);
+    assert.equal(picture.status, 200);
+    assert.match(picture.body.path, /^\/lead\/uploads\/[a-f0-9]{16}-截图_1\.png$/);
+    const notes = await env.post('lead/uploads', { name: 'notes.txt', data: Buffer.from('hello from notes').toString('base64') });
+    const report = await env.upload(null, 'report.pdf', Buffer.from('%PDF-1.4 binary\0'));
+    paths = [picture.body.path, notes.body.path, report.body.path];
+    for (const path of paths) assert.ok(existsSync(join(uploads, path.split('/').pop())), path);
+    assert.ok(!existsSync(join(env.project, '.coderfleet-uploads')));
+    const preview = await env.get('lead/uploads/' + encodeURIComponent(picture.body.path.split('/').pop()));
+    assert.deepEqual(preview.body, { mime: 'image/png', data: PNG.toString('base64') });
+
+    // The same checks as a conversation's message: at most 20, uploads to 领航 only, still there.
+    const refused = async (attachments, error) => {
+      const sent = await env.post('lead/messages', { text: 'x', attachments });
+      assert.deepEqual([sent.status, sent.body.error], [400, error], JSON.stringify(attachments));
+    };
+    await refused(Array(21).fill(paths[0]), '一次最多 20 个附件');
+    await refused(['/workspace/.coderfleet-uploads/0123456789abcdef-a.png'], '附件必须是在领航里上传的文件');
+    await refused(['/lead/uploads/../thread.jsonl'], '附件必须是在领航里上传的文件');
+    await refused(['/lead/uploads/0123456789abcdef-gone.txt'], '附件已不存在，请重新添加');
+    await refused([42], '附件必须是在领航里上传的文件');
+    assert.equal((await items('user')).length, 0);
+    assert.equal(llm.requests.length, 0);
+
+    // 领航 itself sees them: a list, the picture as an image, the text file's words; the PDF it can only hand over.
+    const looked = await say('', paths);
+    assert.deepEqual(looked.item.attachments, paths);
+    assert.equal(looked.said, '看到了。');
+    const request = llm.requests.at(-1);
+    assert.match(request.prompt, /用户这句话带的附件[\s\S]*截图_1\.png[\s\S]*图片[\s\S]*hello from notes[\s\S]*report\.pdf[\s\S]*读不了/);
+    const image = request.body.messages[0].content.find(block => block.type === 'image');
+    assert.deepEqual(image?.source, { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') });
+    assert.deepEqual((await items('user')).at(-1).attachments, paths);
+
+    // Handed to new work: copied into the project and sent as that message's attachments.
+    assert.equal((await say('开个活', paths)).said, '办好了。');
+    const [did] = await items('did');
+    assert.deepEqual(did.attachments, paths);
+    const opened = (await env.get('conversations/' + did.conversationId + '/turns')).body[0];
+    assert.equal(opened.prompt, 'hello');
+    assert.deepEqual(opened.images, paths.map(path => '/workspace/.coderfleet-uploads/' + path.split('/').pop()));
+    for (const path of paths) assert.ok(readFileSync(inProject(path)).equals(readFileSync(join(uploads, path.split('/').pop()))), path);
+    // The conversation previews the picture like any file the user added there.
+    const shown = await env.get('projects/app/uploads/' + encodeURIComponent(picture.body.path.split('/').pop()));
+    assert.equal(shown.body.data, PNG.toString('base64'));
+
+    // Handed to a conversation that is already going: the next turn carries them.
+    const first = await talk('first');
+    await until(() => lastTurn(env, first), value => value.status === 'done', 'first turn');
+    assert.equal((await say('转给它', [paths[1]])).said, '办好了。');
+    const handed = await until(() => env.get('conversations/' + first + '/turns'), value => value.body.length === 2, 'handed turn');
+    assert.deepEqual([handed.body[1].prompt, handed.body[1].images], ['see the files', ['/workspace/.coderfleet-uploads/' + paths[1].split('/').pop()]]);
+    await until(() => lastTurn(env, first), value => value.status === 'done', 'handed turn done');
+    // It may pick which of the user's files go; it cannot hand over a file the user never gave it.
+    assert.equal((await say('只转图')).said, '办好了。');
+    const picked = await until(() => env.get('conversations/' + first + '/turns'), value => value.body.length === 3, 'picked turn');
+    assert.deepEqual(picked.body[2].images, ['/workspace/.coderfleet-uploads/' + paths[0].split('/').pop()]);
+    await until(() => lastTurn(env, first), value => value.status === 'done', 'picked turn done');
+    assert.match((await say('乱转')).said, /没办成.*没有这个附件/);
+    assert.equal((await env.get('conversations/' + first + '/turns')).body.length, 3);
   } finally { await close(); }
 });
 

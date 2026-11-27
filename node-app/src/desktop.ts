@@ -114,12 +114,12 @@ async function api(profile: Profile, method: string, path: string, data?: unknow
 /** The largest attachment (the backend's limit). */
 const MAX_UPLOAD = 500 * 1024 * 1024;
 
-/** Sends one attachment as the request body: from disk as a stream, or bytes the window read itself (pasted). */
-async function upload(profile: Profile, projectId: string, name: string, source: string | ArrayBuffer): Promise<unknown> {
+/** Sends one attachment as the request body: from disk as a stream, or bytes the window read itself (pasted). `route`: `projects/<name>/uploads` or `lead/uploads`. */
+async function upload(profile: Profile, route: string, name: string, source: string | ArrayBuffer): Promise<unknown> {
   const size = typeof source === 'string' ? statSync(source).size : source.byteLength;
   if (size > MAX_UPLOAD) throw new Error('附件不能超过 500 MB');
   const { url, token } = await credentials(profile);
-  const response = await fetch(url + '/v1/projects/' + encodeURIComponent(projectId) + '/uploads?name=' + encodeURIComponent(name), {
+  const response = await fetch(url + '/v1/' + route + '?name=' + encodeURIComponent(name), {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60 * 60_000),
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) },
     body: typeof source === 'string' ? Readable.toWeb(createReadStream(source)) as ReadableStream : source,
@@ -365,8 +365,8 @@ function register(): void {
     guard(event);
     const raw = record(input);
     const source = raw.data instanceof ArrayBuffer ? raw.data : text(raw.path);
-    if (!source || !/^[\w.-]+$/.test(text(raw.projectId))) throw new Error('Unsupported request');
-    return upload(findProfile(raw.id), text(raw.projectId), text(raw.name), source);
+    if (!source || (raw.lead !== true && !/^[\w.-]+$/.test(text(raw.projectId)))) throw new Error('Unsupported request');
+    return upload(findProfile(raw.id), raw.lead === true ? 'lead/uploads' : 'projects/' + encodeURIComponent(text(raw.projectId)) + '/uploads', text(raw.name), source);
   });
   ipcMain.handle('remote:addSsh', (event, input: unknown) => {
     guard(event);

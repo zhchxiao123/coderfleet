@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { Transform } from 'node:stream';
@@ -18,7 +18,7 @@ import { FollowUps, type FollowUp } from './follow-ups.js';
 import { acceptPrompt, CHECK_ROUNDS, closedNote, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
 import { ForkError, forkOf, transcript } from './fork.js';
 import { HELPER_ANSWERS, HELPER_CARD, HelperHost, type HelperPending } from './helper-host.js';
-import { Lead, LeadError } from './lead.js';
+import { Lead, LeadError, LEAD_UPLOADS, leadUploads } from './lead.js';
 import { Lifecycle } from './lifecycle.js';
 import { label as ruleLabel, nextAfter, parseRule, ScheduleError, Schedules, type Run, type Schedule } from './schedules.js';
 import { ExtraAddresses, interfaceAddresses, listensBeyondLoopback, pairingLink, tailscaleName, type Address } from './mobile.js';
@@ -73,6 +73,71 @@ async function body(request: IncomingMessage, limit = 160_000): Promise<Record<s
 /** The largest attachment a message can carry. */
 const MAX_UPLOAD = 500 * 1024 * 1024;
 const TOO_LARGE = '附件不能超过 500 MB';
+/** The most attachments one message carries. */
+const MAX_ATTACHMENTS = 20;
+// <16 hex>-<name> (or the older <16 hex>.<ext>); only characters the Python service also accepts.
+const UPLOAD_NAME = '[a-f0-9]{16}[-.][\\p{L}\\p{N}_.-]{0,120}';
+const UPLOAD_PATH = new RegExp('^/workspace/\\.coderfleet-uploads/' + UPLOAD_NAME + '$', 'u');
+const LEAD_UPLOAD_PATH = new RegExp('^' + LEAD_UPLOADS + UPLOAD_NAME + '$', 'u');
+const UPLOAD_TYPES: Readonly<Record<string, string>> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+
+/**
+ * Saves the request's file in `directory` under a unique prefix plus the name in characters every
+ * tool handles. The file is the request body (application/octet-stream, named by ?name=), written to
+ * disk as it arrives; older clients send JSON { name, data: base64 }, which stays limited to 20 MB.
+ */
+async function saveUpload(request: IncomingMessage, url: URL, directory: string): Promise<{ file: string; name: string; size: number }> {
+  const raw = (request.headers['content-type'] ?? '').startsWith('application/octet-stream');
+  if (raw && Number(request.headers['content-length']) > MAX_UPLOAD) throw new HttpError(413, TOO_LARGE);
+  const input = raw ? { name: url.searchParams.get('name') ?? '' } : await body(request, 28 * 1024 * 1024);
+  const data = raw ? undefined : Buffer.from(text(input.data), 'base64');
+  if (data && !data.length) throw new HttpError(400, '文件是空的');
+  if (data && data.length > 20 * 1024 * 1024) throw new HttpError(400, '附件不能超过 20 MB');
+  mkdirSync(directory, { recursive: true });
+  const original = text(input.name).split(/[\\/]/).pop() ?? '';
+  const dot = original.lastIndexOf('.');
+  const extension = dot > 0 ? original.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
+  const stem = (dot > 0 ? original.slice(0, dot) : original).normalize('NFC').replace(/[^\p{L}\p{N}_.-]+/gu, '_').replace(/^[_.]+|[_.]+$/g, '').slice(0, 80) || 'file';
+  const file = randomBytes(8).toString('hex') + '-' + stem + (extension ? '.' + extension : '');
+  let size = data?.length ?? 0;
+  if (data) writeFileSync(join(directory, file), data, { mode: 0o644 });
+  else {
+    // Under a temporary name until it is complete: a dropped connection leaves nothing behind.
+    const partial = join(directory, '.' + file + '.part');
+    const counted = new Transform({ transform(chunk: Buffer, _encoding, done) {
+      size += chunk.length;
+      done(size > MAX_UPLOAD ? new HttpError(413, TOO_LARGE) : null, chunk);
+    } });
+    try {
+      await pipeline(request, counted, createWriteStream(partial, { mode: 0o644 }));
+      if (!size) throw new HttpError(400, '文件是空的');
+      renameSync(partial, join(directory, file));
+    } catch (error) {
+      rmSync(partial, { force: true });
+      throw error;
+    }
+  }
+  return { file, name: text(input.name).slice(0, 200), size };
+}
+
+/** An uploaded image of `directory` for its preview, by its URL-encoded name. */
+function readUpload(directory: string, encoded: string): { mime: string; data: string } {
+  let file = '';
+  try { file = decodeURIComponent(encoded); } catch { throw new HttpError(400, '无效的文件名'); }
+  if (!/^[a-f0-9]{16}[-.][\p{L}\p{N}_.-]*$/u.test(file)) throw new HttpError(400, '无效的文件名');
+  const path = join(directory, file);
+  if (!existsSync(path) || statSync(path).size > 20 * 1024 * 1024) throw new HttpError(404, '图片不存在');
+  return { mime: UPLOAD_TYPES[file.split('.').pop()?.toLowerCase() as string] as string, data: readFileSync(path).toString('base64') };
+}
+
+/** Validated upload references of a message: at most 20, each matching `pattern` and still a file of `directory`. */
+function attached(value: unknown, pattern: RegExp, directory: string, where: string): string[] {
+  const list = Array.isArray(value) ? value : [];
+  if (list.length > MAX_ATTACHMENTS) throw new HttpError(400, '一次最多 ' + MAX_ATTACHMENTS + ' 个附件');
+  if (!list.every(item => typeof item === 'string' && pattern.test(item) && !item.includes('..'))) throw new HttpError(400, '附件必须是' + where + '上传的文件');
+  for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '附件已不存在，请重新添加');
+  return list as string[];
+}
 
 function size(input: Record<string, unknown>): [number, number] {
   const cols = Number(input.cols); const rows = Number(input.rows);
@@ -94,7 +159,7 @@ const DEVICE_ROUTES: readonly [string, RegExp][] = [
   ['GET', /^conversations$/], ['GET', /^conversations\/changes$/], ['POST', /^conversations$/], ['PUT', /^conversations\/[\w-]+$/],
   ['GET', /^conversations\/[\w-]+\/(turns|changes|follow-ups)$/], ['POST', /^conversations\/[\w-]+\/(turns|fork)$/],
   ['DELETE', /^conversations\/[\w-]+\/follow-ups\/[\w-]+$/],
-  ['POST', /^projects\/[\w.-]+\/uploads$/], ['GET', /^projects\/[\w.-]+\/uploads\/[^/]+$/],
+  ['POST', /^(projects\/[\w.-]+|lead)\/uploads$/], ['GET', /^(projects\/[\w.-]+|lead)\/uploads\/[^/]+$/],
   ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['GET', /^turns\/[\w-]+\/files$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
   ['GET', /^system-llm$/], ['POST', /^translate$/],
   // 领航: its thread, the user's words and answers to it, and who keeps a conversation. Its switch stays on the computer.
@@ -689,6 +754,20 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     if (!conversation) throw new LeadError('这个对话已经不在了');
     return conversation;
   };
+  /**
+   * 领航's attachments for a message to a conversation: copied into its project as uploads (same name), so
+   * the conversation gets them as files the user added there, previews and all.
+   */
+  const handOver = (projectId: string, attachments: readonly string[]): string[] => {
+    const from = leadUploads(config.stateDirectory);
+    const into = join(project(projectId).path, '.coderfleet-uploads');
+    return attached(attachments, LEAD_UPLOAD_PATH, from, '在领航里').map(path => {
+      const file = path.slice(LEAD_UPLOADS.length);
+      mkdirSync(into, { recursive: true });
+      if (!existsSync(join(into, file))) copyFileSync(join(from, file), join(into, file));
+      return '/workspace/.coderfleet-uploads/' + file;
+    });
+  };
   const lead: Lead = new Lead(config.stateDirectory, {
     llm: () => systemLLM(workspace),
     conversations: () => {
@@ -704,11 +783,12 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       if (!turn || !active(turn)) throw new LeadError('这一轮已经结束了');
       await answerPermission(turn, input);
     },
-    send: async (id, words) => {
+    send: async (id, words, attachments = []) => {
       const conversation = leadConversation(id);
       // As the conversation's own last message was sent: the same model, tools asked for or not.
       const last = turnsOf(id).findLast(turn => !turn.checkRound && !turn.role);
-      const sent = await sendMessage(conversation, { prompt: words, model: last?.requestedModel ?? '', images: [], auto: last?.auto === true, job: false });
+      const images = handOver(conversation.projectId, attachments);
+      const sent = await sendMessage(conversation, { prompt: words, model: last?.requestedModel ?? '', images, auto: last?.auto === true, job: false });
       return sent.delivered === 'queued' ? '' : text(sent.turn.id);
     },
     accept: async id => (await acceptJob(id)).id,
@@ -728,13 +808,14 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       id: item.name, defaultAccount: defaultAccount(item)?.name ?? '',
       accounts: item.accounts.filter(chatAccount).map(account => ({ name: account.name, type: account.type, used: usedMost(account) })),
     })).filter(item => item.accounts.length),
-    start: async (projectId, account, words) => {
+    start: async (projectId, account, words, attachments = []) => {
       const target = chatProject(projectId, account);
       if (!target) throw new LeadError('项目里没有这个账号，或它不支持对话');
       const job = (await jobs.support(target)).supported;
+      const images = handOver(target.name, attachments);
       const conversation = newConversation(target, words.split('\n')[0] ?? '');
       try {
-        const sent = await sendMessage(conversation, { prompt: words, model: '', images: [], auto: false, job });
+        const sent = await sendMessage(conversation, { prompt: words, model: '', images, auto: false, job });
         return { conversationId: conversation.id, turnId: sent.delivered === 'queued' ? '' : text(sent.turn.id), job };
       } catch (error) {
         // Nothing started: the empty conversation is not left behind.
@@ -827,17 +908,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     return result;
   };
 
-  const UPLOAD_TYPES: Readonly<Record<string, string>> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
-  // <16 hex>-<name> (or the older <16 hex>.<ext>); only characters the Python service also accepts.
-  const UPLOAD_PATH = /^\/workspace\/\.coderfleet-uploads\/[a-f0-9]{16}[-.][\p{L}\p{N}_.-]{0,120}$/u;
-  /** Validated upload references of a message: at most 20, each a file of this project. */
-  const uploads = (projectId: string, value: unknown): string[] => {
-    const list = Array.isArray(value) ? value : [];
-    if (list.length > 20 || !list.every(item => typeof item === 'string' && UPLOAD_PATH.test(item) && !item.includes('..'))) throw new HttpError(400, '附件必须是这个项目里上传的文件');
-    const directory = join(project(projectId).path, '.coderfleet-uploads');
-    for (const item of list as string[]) if (!existsSync(join(directory, item.split('/').pop() as string))) throw new HttpError(400, '附件已不存在，请重新添加');
-    return list as string[];
-  };
+  const uploads = (projectId: string, value: unknown): string[] => attached(value, UPLOAD_PATH, join(project(projectId).path, '.coderfleet-uploads'), '这个项目里');
+  const leadAttachments = (value: unknown): string[] => attached(value, LEAD_UPLOAD_PATH, leadUploads(config.stateDirectory), '在领航里');
 
   const routes: [string, RegExp, Handler][] = [
     ['GET', /^health$/, async () => ({ service: 'coderfleet-node', version: 1, build: VERSION, buildId: BUILD_ID, pid: process.pid })],
@@ -1318,53 +1390,13 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return { removed: true };
     }],
     // Files for a message, saved in the project like the Python service (.coderfleet-uploads).
-    // The file is the request body (application/octet-stream, named by ?name=), written to disk as it
-    // arrives; older clients send JSON { name, data: base64 }, which stays limited to 20 MB.
     ['POST', /^projects\/([\w.-]+)\/uploads$/, async (request, [name], url) => {
-      const target = project(name as string);
-      const raw = (request.headers['content-type'] ?? '').startsWith('application/octet-stream');
-      if (raw && Number(request.headers['content-length']) > MAX_UPLOAD) throw new HttpError(413, TOO_LARGE);
-      const input = raw ? { name: url.searchParams.get('name') ?? '' } : await body(request, 28 * 1024 * 1024);
-      const data = raw ? undefined : Buffer.from(text(input.data), 'base64');
-      if (data && !data.length) throw new HttpError(400, '文件是空的');
-      if (data && data.length > 20 * 1024 * 1024) throw new HttpError(400, '附件不能超过 20 MB');
-      const directory = join(target.path, '.coderfleet-uploads');
-      mkdirSync(directory, { recursive: true });
-      // A unique prefix plus the name in characters every tool handles; the agent sees a readable file name.
-      const original = text(input.name).split(/[\\/]/).pop() ?? '';
-      const dot = original.lastIndexOf('.');
-      const extension = dot > 0 ? original.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
-      const stem = (dot > 0 ? original.slice(0, dot) : original).normalize('NFC').replace(/[^\p{L}\p{N}_.-]+/gu, '_').replace(/^[_.]+|[_.]+$/g, '').slice(0, 80) || 'file';
-      const file = randomBytes(8).toString('hex') + '-' + stem + (extension ? '.' + extension : '');
-      let size = data?.length ?? 0;
-      if (data) writeFileSync(join(directory, file), data, { mode: 0o644 });
-      else {
-        // Under a temporary name until it is complete: a dropped connection leaves nothing behind.
-        const partial = join(directory, '.' + file + '.part');
-        const counted = new Transform({ transform(chunk: Buffer, _encoding, done) {
-          size += chunk.length;
-          done(size > MAX_UPLOAD ? new HttpError(413, TOO_LARGE) : null, chunk);
-        } });
-        try {
-          await pipeline(request, counted, createWriteStream(partial, { mode: 0o644 }));
-          if (!size) throw new HttpError(400, '文件是空的');
-          renameSync(partial, join(directory, file));
-        } catch (error) {
-          rmSync(partial, { force: true });
-          throw error;
-        }
-      }
-      return { path: '/workspace/.coderfleet-uploads/' + file, name: text(input.name).slice(0, 200), size };
+      const { file, ...saved } = await saveUpload(request, url, join(project(name as string).path, '.coderfleet-uploads'));
+      return { path: '/workspace/.coderfleet-uploads/' + file, ...saved };
     }],
     // `<16 hex>-<name>.png` (this service) or `<16 hex>.png` (the Python service).
-    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}(?:[-%][^/]*)?\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) => {
-      let file = '';
-      try { file = decodeURIComponent(encoded as string); } catch { throw new HttpError(400, '无效的文件名'); }
-      if (!/^[a-f0-9]{16}[-.][\p{L}\p{N}_.-]*$/u.test(file)) throw new HttpError(400, '无效的文件名');
-      const path = join(project(name as string).path, '.coderfleet-uploads', file);
-      if (!existsSync(path) || statSync(path).size > 20 * 1024 * 1024) throw new HttpError(404, '图片不存在');
-      return { mime: UPLOAD_TYPES[file.split('.').pop()?.toLowerCase() as string], data: readFileSync(path).toString('base64') };
-    }],
+    ['GET', /^projects\/([\w.-]+)\/uploads\/([a-f0-9]{16}(?:[-%][^/]*)?\.(?:png|jpe?g|webp|gif))$/i, async (_request, [name, encoded]) =>
+      readUpload(join(project(name as string).path, '.coderfleet-uploads'), encoded as string)],
     ['GET', /^turns\/([\w-]+)\/tools\/(.+)$/, async (_request, [id, toolId]) => {
       const turn = store.turn(identifier(id));
       const tool = turn?.tools.find(item => item.id === decodeURIComponent(toolId as string));
@@ -1405,7 +1437,16 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       });
       return result ?? { etag: since, unchanged: true };
     }],
-    ['POST', /^lead\/messages$/, async request => leadCall(async () => ({ item: lead.say(text((await body(request)).text)) }))],
+    ['POST', /^lead\/messages$/, async request => leadCall(async () => {
+      const input = await body(request);
+      return { item: lead.say(text(input.text), leadAttachments(input.attachments)) };
+    })],
+    // Files for 领航, which belongs to no project: kept in the backend's state directory until handed to a conversation.
+    ['POST', /^lead\/uploads$/, async (request, _params, url) => {
+      const { file, ...saved } = await saveUpload(request, url, leadUploads(config.stateDirectory));
+      return { path: LEAD_UPLOADS + file, ...saved };
+    }],
+    ['GET', /^lead\/uploads\/([a-f0-9]{16}(?:[-%][^/]*)?\.(?:png|jpe?g|webp|gif))$/i, async (_request, [encoded]) => readUpload(leadUploads(config.stateDirectory), encoded as string)],
     ['POST', /^lead\/asks\/([\w-]+)$/, async (request, [id]) => leadCall(async () => {
       const input = await body(request);
       await lead.answerAsk(identifier(id), { answer: text(input.answer), answers: Object.fromEntries(Object.entries(record(input.answers)).map(([question, value]) => [question, text(value)])) });
