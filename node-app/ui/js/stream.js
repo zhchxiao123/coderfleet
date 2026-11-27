@@ -42,6 +42,8 @@
       if (!lines.slice(opened + 1).join('').trim()) return rest(lines.length - opened);
       return /^\s*(`{1,3}|~{1,3})$/.test(last) ? rest(1) : source;
     }
+    // A code block that is only just opening waits as well.
+    if (/^\s*(```|~~~)/.test(last)) return rest(1);
     if (/^\s*(#{1,6}|[-*+]|\d+[.)]?|>|`{1,3}|~{1,3})\s*$/.test(last)) return rest(1);
     const row = /^\s*\|/.test(last);
     last = last.replace(/<!(--(?:(?!-->).)*|-)?$/, '').replace(/\[([^\]]*)\]\([^)]*$/, '$1').replace(/\[([^\]]*)$/, '$1');

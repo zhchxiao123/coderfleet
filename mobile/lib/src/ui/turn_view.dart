@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../backend.dart';
 import '../models.dart';
+import 'streaming_answer.dart';
 import 'theme.dart';
 
 /// Fetches project uploads once per path for the conversation view.
@@ -90,14 +91,18 @@ class _TurnViewState extends State<TurnView> {
     }
 
     if (progress != null || translateFailure != null) children.add(_translationStatus(palette));
-    for (final block in turn.blocks) {
+    for (final (index, block) in turn.blocks.indexed) {
       switch (block) {
         case ToolBlock(:final id):
           final tool = turn.tool(id);
           if (tool != null && tool.parent.isEmpty) group.add(tool);
         case TextBlock(:final text):
           flush();
-          if (text.trim().isNotEmpty) children.add(Answer(text: showing ? translations[text] ?? text : text));
+          if (text.trim().isNotEmpty) {
+            // The block being written is the last one of a turn that still runs.
+            children.add(StreamingAnswer(key: ValueKey('answer-$index'), text: showing ? translations[text] ?? text : text,
+                live: turn.active && index == turn.blocks.length - 1));
+          }
         case UserBlock(:final text, images: final paths):
           flush();
           children.add(UserMessage(text: text, images: paths, cache: widget.images, label: '插话'));
