@@ -89,3 +89,18 @@ export async function models(dockerPath: string, project: WorkspaceProject): Pro
   });
 }
 
+/** The models Codex offers this account in its picker (`codex debug models`, visibility `list`), in its own order. */
+export async function codexModels(dockerPath: string, project: WorkspaceProject): Promise<readonly { id: string; label: string; title?: string }[]> {
+  await assertContainer(dockerPath, project);
+  // The catalog carries each model's full instructions: far more than the default buffer.
+  const { stdout } = await run(dockerPath, ['exec', project.container, 'codex', 'debug', 'models'], { timeout: 25_000, maxBuffer: 20_000_000 });
+  const catalog = (JSON.parse(stdout) as { models?: unknown }).models;
+  const rows = (Array.isArray(catalog) ? catalog : []) as Record<string, unknown>[];
+  return rows.filter(row => row.visibility === 'list' && typeof row.slug === 'string' && row.slug)
+    .sort((left, right) => Number(left.priority ?? 0) - Number(right.priority ?? 0))
+    .map(row => ({
+      id: row.slug as string, label: typeof row.display_name === 'string' && row.display_name ? row.display_name : row.slug as string,
+      ...(typeof row.description === 'string' && row.description ? { title: row.description } : {}),
+    }));
+}
+

@@ -13,7 +13,7 @@ CoderFleet runs several AI coding accounts (Claude Code, Codex, Antigravity and 
   | Type | Interface |
   | --- | --- |
   | Claude Code | TypeScript Claude Agent SDK with the container's `claude`: tool approvals, native questions, interrupt, resume |
-  | Codex | TypeScript Codex SDK (`@openai/codex-sdk`) with the container's `codex`: `workspace-write` sandbox, resume by thread ID |
+  | Codex | TypeScript Codex SDK (`@openai/codex-sdk`) with the container's `codex`: its own sandbox off (bubblewrap cannot run in a container; the container is the boundary), resume by thread ID |
   | OpenCode | OpenCode SDK (`@opencode-ai/sdk`) against `opencode serve` started on loopback in the container: tool approvals, abort, resume |
   | Pi | Pi's own SDK (`createAgentSession` from the globally installed package), in the worker process; Pi has no approvals |
   | Antigravity, Kimi Code, Grok | Agent Client Protocol over stdio (`agy acp`, `kimi acp`, `grok agent stdio`): tool approvals, interrupt, resume |

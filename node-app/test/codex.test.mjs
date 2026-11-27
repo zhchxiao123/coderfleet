@@ -9,29 +9,33 @@ test('Codex turns run with codex exec in the container', { timeout: 120_000 }, a
     containers: { 'codex-web': 'running' }, bins: { codex: fakeCodex },
   });
   try {
-    assert.deepEqual((await env.get('projects/web/models')).body, []);
+    // The account's own picker list: hidden models left out, in Codex's order.
+    assert.deepEqual((await env.get('projects/web/models')).body, [
+      { id: 'gpt-a', label: 'GPT A', title: 'GPT A model' }, { id: 'gpt-b', label: 'GPT B', title: 'GPT B model' },
+    ]);
     const conversation = (await env.post('conversations', { projectId: 'web' })).body.id;
     await env.post('conversations/' + conversation + '/turns', { prompt: 'hello' });
     let turn = await until(() => lastTurn(env, conversation), value => !['starting', 'running'].includes(value.status), 'first turn');
     assert.equal(turn.status, 'done', turn.error);
-    assert.match(turn.answer, /^echo:hello:exec --experimental-json --sandbox workspace-write --cd \S+ --skip-git-repo-check$/);
+    assert.match(turn.answer, /^echo:hello:exec --experimental-json --sandbox danger-full-access --cd \S+ --skip-git-repo-check --config approval_policy="never"$/);
     assert.deepEqual(turn.tools.map(tool => [tool.title, tool.status, tool.detail]), [['Shell', 'completed', 'ls']]);
     assert.equal(turn.sessionId, 'thread-1');
 
     await env.post('conversations/' + conversation + '/turns', { prompt: 'again' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'resumed turn');
-    assert.match(turn.answer, /^echo:again:exec --experimental-json .*--skip-git-repo-check resume thread-1$/);
+    assert.match(turn.answer, /^echo:again:exec --experimental-json .*--skip-git-repo-check .*resume thread-1$/);
 
     await env.post('conversations/' + conversation + '/turns', { prompt: 'fail' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'failed', 'failed turn');
     assert.equal(turn.error, 'quota exceeded');
 
-    // Auto mode leaves the workspace sandbox without approvals; images are local_image inputs.
+    // Auto mode runs the same way; the chosen model is passed on; images are local_image inputs.
     const upload = (await env.post('projects/web/uploads', { name: 'a.jpg', data: Buffer.from('ffd8ffe0', 'hex').toString('base64') })).body;
-    await env.post('conversations/' + conversation + '/turns', { prompt: 'pic', images: [upload.path], auto: true });
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'pic', images: [upload.path], auto: true, model: 'gpt-a' });
     turn = await until(() => lastTurn(env, conversation), value => value.status === 'done', 'auto turn');
     assert.match(turn.answer, /--sandbox danger-full-access/);
     assert.match(turn.answer, /approval_policy="never"/);
+    assert.match(turn.answer, /--model gpt-a /);
     assert.match(turn.answer, new RegExp('--image \\S+/\\.coderfleet-uploads/' + upload.path.split('/').pop()));
 
     // Codex cannot take a message mid-turn: it waits and becomes the next turn.

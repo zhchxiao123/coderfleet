@@ -12,7 +12,7 @@ import {
   addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
 } from './conf.js';
 import { projectMounts } from './compose.js';
-import { assertContainer, models } from './docker.js';
+import { assertContainer, codexModels, models } from './docker.js';
 import { Devices, FailedAuth, type Device } from './devices.js';
 import { FollowUps, type FollowUp } from './follow-ups.js';
 import { acceptPrompt, CHECK_ROUNDS, closedNote, criteria, JobError, Jobs, open as jobOpen, preamble, reviewFeedback, reviewPrompt, reviewVerdict, unmetFeedback, type Job } from './jobs.js';
@@ -829,8 +829,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
           throw new HttpError(502, '无法列出模型：' + message(error));
         }
       }
-      if (target.account.type !== 'antigravity') return [];
-      try { return await models(config.dockerPath, target); }
+      if (target.account.type !== 'antigravity' && target.account.type !== 'codex') return [];
+      try { return await (target.account.type === 'codex' ? codexModels : models)(config.dockerPath, target); }
       catch (error) { throw new HttpError(502, '无法列出模型：' + message(error)); }
     }],
 

@@ -228,6 +228,13 @@ async function handle(message) {
 
 export const fakeCodex = `#!/usr/bin/env node
 const args = process.argv.slice(2);
+if (args[0] === 'debug' && args[1] === 'models') {
+  // Like the real catalog: hidden rows, out of order, and far larger than a default exec buffer.
+  const row = (slug, display_name, visibility, priority) => ({ slug, display_name, description: display_name + ' model', visibility, priority, base_instructions: 'x'.repeat(600000) });
+  // Written synchronously: exiting right after an asynchronous write would cut a catalog this large.
+  require('node:fs').writeSync(1, JSON.stringify({ models: [row('gpt-review', 'Review', 'hide', 1), row('gpt-b', 'GPT B', 'list', 3), row('gpt-a', 'GPT A', 'list', 2)] }) + '\\n');
+  process.exit(0);
+}
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 let prompt = '';
 process.stdin.on('data', chunk => { prompt += chunk; });

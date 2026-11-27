@@ -117,7 +117,7 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.deepEqual(support, { supported: true, reason: '' });
 
     // The first message opens a worktree and branch; the turn runs there without asking for
-    // tools. Its criteria are met, so a fresh read-only session of the same account (there
+    // tools. Its criteria are met, so a fresh session of the same account, told to change nothing, (there
     // is no other) checks them before the user is asked.
     response = await env.post('conversations/' + conversation + '/turns', { prompt: 'Add greeting\nwrite hello.txt hi', job: true });
     assert.equal(response.status, 200, JSON.stringify(response.body));
@@ -131,7 +131,7 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.equal(turns[0].prompt, 'Add greeting\nwrite hello.txt hi');
     const work = join(env.project, '.coderfleet-work', job.id);
     assert.deepEqual(started(turns[0]), { cwd: work, sandbox: 'danger-full-access', resumed: '', preamble: true, continued: false });
-    assert.match(turns[1].answer, /^read-only [\s\S]*结论：通过$/);
+    assert.match(turns[1].answer, /^danger-full-access [\s\S]*结论：通过$/);
     assert.deepEqual([job.review.account, job.review.verdict, job.review.turnId], ['codex-a', 'pass', turns[1].id]);
     assert.equal(readFileSync(join(work, 'hello.txt'), 'utf8'), 'hi\n');
     assert.equal(existsSync(join(env.project, 'hello.txt')), false);
@@ -195,14 +195,13 @@ test('a job works in its own worktree until it is accepted or discarded', { time
     assert.equal((await env.get('conversations/' + conversation + '/job/changes')).body.files.length, 2);
     assert.equal((await env.post('conversations/' + conversation + '/job/discard')).status, 409);
     assert.equal((await env.post('conversations/' + conversation + '/job/accept')).status, 409);
-    // The conversation goes on: the same session, back in the project's directory, asking for
-    // each tool again; the first of these turns is told that the worktree is gone.
+    // The conversation goes on: the same session, back in the project's directory (Codex runs
+    // the same way with or without approvals); the first of these turns is told that the worktree is gone.
     let count = (await turnsOf(env, conversation)).length;
     response = await env.post('conversations/' + conversation + '/turns', { prompt: 'more' });
     assert.equal(response.status, 200, JSON.stringify(response.body));
     turns = await ended(env, conversation, count + 1);
-    assert.deepEqual(started(turns.at(-1)), { cwd: env.project, sandbox: started(turns.at(-1)).sandbox, resumed: 'author-thread', preamble: false, continued: false, moved: true });
-    assert.notEqual(started(turns.at(-1)).sandbox, 'danger-full-access');
+    assert.deepEqual(started(turns.at(-1)), { cwd: env.project, sandbox: 'danger-full-access', resumed: 'author-thread', preamble: false, continued: false, moved: true });
     await env.post('conversations/' + conversation + '/turns', { prompt: 'and more' });
     turns = await ended(env, conversation, count + 2);
     assert.equal(started(turns.at(-1)).moved, undefined);
@@ -380,7 +379,7 @@ test('another account checks a job before the user does', { timeout: 120_000 }, 
       [undefined, 'codex-a', 'web', 'done'], ['review', 'codex-b', 'web-review', 'done'],
       ['review-feedback', 'codex-a', 'web', 'done'], ['review', 'codex-b', 'web-review', 'done']]);
     assert.match(turns[1].prompt, /^请核对[\s\S]*只读[\s\S]*- \[x\] 写好了 —— state.txt 里是 bad[\s\S]*write state.txt bad$/);
-    assert.match(turns[1].answer, /^read-only [\s\S]*结论：要改$/);
+    assert.match(turns[1].answer, /^danger-full-access [\s\S]*结论：要改$/);
     assert.match(turns[2].prompt, /codex-b[\s\S]*核对了你的改动[\s\S]*state.txt 第 1 行应该是 good/);
     // The author keeps its own session: the reviewer's is never resumed.
     assert.deepEqual(started(turns[2]), { cwd: join(env.project, '.coderfleet-work', job.id), sandbox: 'danger-full-access', resumed: 'author-thread', preamble: false, continued: false });
