@@ -256,6 +256,46 @@
       if (!running) saveOnly.classList.add('primary');
     },
 
+    /**
+     * The project's own image: its name (IMAGE in projects.conf) and the Dockerfile it is
+     * built from. Without a name the container runs the shared image.
+     */
+    async image(project) {
+      let current;
+      try { current = await CF.api('GET', 'projects/' + project.id + '/image'); } catch (error) { CF.fail(error); return; }
+      const running = project.state === 'running';
+      const name = h('input.mono', { value: current.image, placeholder: '留空：用共享镜像 ' + current.shared, spellcheck: false, autocomplete: 'off' });
+      const dockerfile = h('textarea.mono', { rows: 12, spellcheck: false, placeholder: 'FROM ' + current.shared + '\nRUN apt-get update && apt-get install -y …', value: current.dockerfile });
+      const sheet = CF.sheet({ title: project.name + ' · 镜像', subtitle: '这个项目的容器用哪个镜像。可以填一个本机已有的镜像，也可以在下面写 Dockerfile 构建一个；改了镜像要重启项目才生效。', wide: true }, () => [
+        h('label.field', h('span', '镜像名', current.image && !current.exists ? h('span.hint', ' 本机还没有这个镜像') : null), name),
+        h('label.field', h('span', 'Dockerfile', h('span.hint', ' 建议从共享镜像开始；不填镜像名时构建为 ' + current.suggested)), dockerfile),
+      ]);
+      const save = async after => {
+        sheet.error('');
+        try { await CF.api('PUT', 'projects/' + project.id + '/image', { image: name.value.trim(), dockerfile: dockerfile.value }); } catch (error) { sheet.error(error); return; }
+        if (after === 'build') {
+          let operation;
+          try { operation = await CF.api('POST', 'projects/' + project.id + '/image/build'); } catch (error) { sheet.error(error); return; }
+          sheet.close();
+          CF.operationLog(operation, project.name + ' · 构建镜像');
+          CF.activity.refresh();
+          return;
+        }
+        sheet.close();
+        await CF.app.refreshProjects();
+        if (after !== 'restart') { CF.toast(running ? '已保存，重启项目后生效' : '已保存，启动项目时生效'); return; }
+        const operation = await CF.api('POST', 'projects/' + project.id + '/restart');
+        if (operation) void track(project.id, '重启', operation);
+      };
+      const saveOnly = h('button.btn', { on: { click: () => CF.busy(saveOnly, () => save('')) } }, '保存');
+      const saveRestart = running ? h('button.btn', { on: { click: () => CF.busy(saveRestart, () => save('restart')) } }, '保存并重启') : null;
+      const saveBuild = h('button.btn.primary', { on: { click: () => {
+        if (!dockerfile.value.trim()) { sheet.error('先写 Dockerfile 再构建'); return; }
+        void CF.busy(saveBuild, () => save('build'));
+      } } }, '保存并构建');
+      sheet.foot(h('button.btn.ghost', { on: { click: () => sheet.close() } }, '取消'), saveOnly, saveRestart, saveBuild);
+    },
+
     mount(container) {
       const { projects, overview } = CF.state;
       const banners = [];
@@ -278,6 +318,7 @@
           project.accounts ? { label: '账号…', icon: 'user', run: () => CF.projects.accounts(project) } : null,
           { label: '环境变量…', icon: 'key', run: () => CF.projects.env(project) },
           { label: '挂载目录…', icon: 'folder', run: () => CF.projects.mounts(project) },
+          project.runtime === 'container' ? { label: '镜像…', icon: 'box', run: () => CF.projects.image(project) } : null,
           { label: project.helper === 'command' ? '关闭机器操作' : '允许机器操作…', icon: 'terminal', run: () => CF.projects.helper(project) },
           { label: project.active ? '停用项目' : '启用项目', run: () => CF.busy(null, async () => {
             await CF.api('POST', 'projects/' + project.id + '/' + (project.active ? 'disable' : 'enable'));

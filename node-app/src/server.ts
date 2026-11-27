@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { gzip } from 'node:zlib';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
-  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type Account, type WorkspaceProject, projectAs, setProjectAccounts, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
+  addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type Account, type WorkspaceProject, projectAs, setProjectAccounts, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts, defaultProjectImage, projectImage, readProjectDockerfile, setProjectImage, writeProjectDockerfile,
 } from './conf.js';
 import { projectMounts } from './compose.js';
 import { assertContainer, codexModels, models } from './docker.js';
@@ -789,7 +789,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       return projects.map(item => ({
         id: item.name, name: item.name, account: item.account.name, type: item.account.type, typeLabel: accountType(item.account.type).label,
         path: item.path, active: item.active, runtime: item.account.runtime, container: item.container,
-        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item), helper: projectHelperAccess(item),
+        state: containers.get(item.container)?.state ?? 'missing', mounts: projectMountSpecs(item), helper: projectHelperAccess(item), image: projectImage(item),
         chat: item.accounts.some(chatAccount),
         // Every account in the container, the first being `account`; `defaultAccount`: the one a new conversation starts with.
         accounts: item.accounts.map(entry => ({ name: entry.name, type: entry.type, typeLabel: accountType(entry.type).label, chat: chatAccount(entry),
@@ -845,6 +845,22 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       setProjectMounts(workspace, target.name, specs);
       return { mounts: specs };
     }],
+    // The project's own image (IMAGE) and the Dockerfile it is built from; main token only. `image` is '' on the shared one.
+    ['GET', /^projects\/([\w-]+)\/image$/, async (_request, [name]) => {
+      const target = project(name as string);
+      const image = projectImage(target);
+      const shared = (await lifecycle.image()).name;
+      return { image, shared, suggested: defaultProjectImage(target.name), exists: await lifecycle.imageExists(image || shared), dockerfile: readProjectDockerfile(workspace, target.name) };
+    }],
+    // Either field alone changes just that one. A new image applies when the container is recreated.
+    ['PUT', /^projects\/([\w-]+)\/image$/, async (request, [name]) => {
+      const target = project(name as string);
+      const input = await body(request);
+      if (typeof input.image === 'string') setProjectImage(workspace, target.name, input.image.trim());
+      if (typeof input.dockerfile === 'string') writeProjectDockerfile(workspace, target.name, input.dockerfile);
+      return { image: projectImage(project(target.name)), dockerfile: readProjectDockerfile(workspace, target.name) };
+    }],
+    ['POST', /^projects\/([\w-]+)\/image\/build$/, async (_request, [name]) => lifecycle.buildProject(project(name as string).name)],
     // What the project's tasks may do on this machine through the helper (HELPER_ACCESS); applies to tasks started afterwards.
     ['PUT', /^projects\/([\w-]+)\/helper$/, async (request, [name]) => {
       const target = project(name as string);

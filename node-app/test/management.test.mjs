@@ -116,6 +116,23 @@ test('the App initializes the workspace and manages accounts, projects, containe
     assert.ok(mounted.services['claude-project-app'].volumes.includes(shared + ':/data:ro'));
     assert.deepEqual((await env.put('projects/app/mounts', { mounts: [] })).body.mounts, []);
     assert.doesNotMatch(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /EXTRA_MOUNTS/);
+
+    // A project's own image: IMAGE in projects.conf, built from projects/<name>/Dockerfile.
+    assert.deepEqual((await env.get('projects/app/image')).body, { image: '', shared: 'coderfleet:latest', suggested: 'coderfleet-app:latest', exists: true, dockerfile: '' });
+    assert.equal((await env.post('projects/app/image/build')).status, 400, 'no Dockerfile yet');
+    assert.equal((await env.put('projects/app/image', { image: 'bad name' })).status, 400);
+    assert.equal((await env.put('projects/app/image', { dockerfile: 'FROM coderfleet:latest\nRUN true' })).body.dockerfile, 'FROM coderfleet:latest\nRUN true\n');
+    const projectBuild = await operation(env, (await env.post('projects/app/image/build')).body.id);
+    assert.equal(projectBuild.body.status, 'succeeded');
+    assert.match(projectBuild.body.output, /--tag coderfleet-app:latest --file \S+projects\/app\/Dockerfile \S+projects\/app\n/);
+    assert.match(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /NAME=app .*IMAGE=coderfleet-app:latest/);
+    assert.equal((await env.get('projects')).body[0].image, 'coderfleet-app:latest');
+    assert.equal((await env.put('projects/app/image', { image: 'registry.example:5000/team/app:1.2' })).body.image, 'registry.example:5000/team/app:1.2');
+    assert.equal((await operation(env, (await env.post('projects/app/restart')).body.id)).body.status, 'succeeded');
+    assert.equal(JSON.parse(readFileSync(join(env.workspace, 'docker-compose.yml'), 'utf8').replace(/^#.*\n/, '')).services['claude-project-app'].image, 'registry.example:5000/team/app:1.2');
+    assert.deepEqual((await env.put('projects/app/image', { image: '', dockerfile: '' })).body, { image: '', dockerfile: '' });
+    assert.doesNotMatch(readFileSync(join(env.workspace, 'projects.conf'), 'utf8'), /IMAGE=/);
+    assert.ok(!existsSync(join(env.workspace, 'projects', 'app', 'Dockerfile')));
     assert.equal((await env.del('accounts/claude-a')).status, 400);
     accounts = (await env.get('accounts')).body;
     assert.deepEqual(accounts[0].projects, ['app']);

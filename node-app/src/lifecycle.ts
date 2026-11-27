@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { imageName, writeCompose } from './compose.js';
-import { loadConfig, readWorkspace, removeProject, SETTINGS, truthy, WorkspaceError, writeSettings, type WorkspaceProject } from './conf.js';
+import { defaultProjectImage, loadConfig, projectDockerfilePath, projectImage, readWorkspace, removeProject, setProjectImage, SETTINGS, truthy, WorkspaceError, writeSettings, type WorkspaceProject } from './conf.js';
 import { VERSION } from './version.js';
 
 const run = promisify(execFile);
@@ -87,10 +87,14 @@ export class Lifecycle {
 
   public async image(): Promise<{ name: string; exists: boolean; dockerfile: boolean }> {
     const name = imageName(loadConfig(this.workspace));
-    let exists = true;
-    try { await run(this.dockerPath, ['image', 'inspect', '--format', '{{.Id}}', name], { timeout: 10_000 }); }
-    catch { exists = false; }
+    const exists = await this.imageExists(name);
     return { name, exists, dockerfile: existsSync(join(this.workspace, 'Dockerfile')) };
+  }
+
+  /** Whether Docker has this image locally. */
+  public async imageExists(name: string): Promise<boolean> {
+    try { await run(this.dockerPath, ['image', 'inspect', '--format', '{{.Id}}', name], { timeout: 10_000 }); return true; }
+    catch { return false; }
   }
 
   public async dockerAvailable(): Promise<string> {
@@ -167,6 +171,27 @@ export class Lifecycle {
     return this.start('build', image, async (_log, exec) => {
       // Image builds use Docker's own network, not the relay.
       await exec(['build', '--platform', config.BUILD_PLATFORM || 'linux/amd64', '--tag', image, '--file', dockerfile, this.workspace]);
+    });
+  }
+
+  /**
+   * Builds the project's own image from projects/<name>/Dockerfile (that directory is the
+   * build context), under the project's image name or, without one, `coderfleet-<name>:latest`,
+   * which then becomes the project's image. The container uses it once it is recreated.
+   */
+  public buildProject(name: string): Operation {
+    const project = this.project(name);
+    const config = loadConfig(this.workspace);
+    const dockerfile = projectDockerfilePath(this.workspace, name);
+    if (!existsSync(dockerfile)) throw new WorkspaceError('项目 ' + name + ' 还没有 Dockerfile');
+    const image = projectImage(project) || defaultProjectImage(name);
+    return this.start('build', image, async (log, exec) => {
+      await exec(['build', '--platform', config.BUILD_PLATFORM || 'linux/amd64', '--tag', image, '--file', dockerfile, join(dockerfile, '..')]);
+      if (!projectImage(this.project(name))) {
+        setProjectImage(this.workspace, name, image);
+        log('项目镜像已设为 ' + image + '。\n');
+      }
+      log('重启项目后容器使用新镜像。\n');
     });
   }
 

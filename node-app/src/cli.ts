@@ -10,8 +10,9 @@
 //                    定时: things the service starts by itself (rule: daily HH:MM | weekly 1,3 HH:MM | every <hours>)
 //   containers list | start|stop|restart [project]
 //                    容器: all containers at once, or one project's (stop keeps them; the relay stops with all)
-//   image status | pull | build
-//                    镜像: download the published image for this machine, or build the workspace's Dockerfile
+//   image status | pull | build | project <project> [build | set <image> | clear]
+//                    镜像: download the published image for this machine, or build the workspace's Dockerfile;
+//                    `project`: one project's own image, built from projects/<project>/Dockerfile in the workspace
 //   helper status | install | start | stop | upgrade | restart-relay | access <project> off|command
 //          | policy show | policy set <program> <allow|confirm|deny> [word …] | policy remove <program> [word …] | policy unlisted <allow|confirm|deny> | policy path <directory> … | audit [n]
 //                    机器助手: the separate program that runs listed commands on this machine for tasks
@@ -219,15 +220,21 @@ async function containersCommand(verb: string | undefined, args: string[]): Prom
   } else throw new Error('Usage: coderfleet-backend containers list | start|stop|restart [project] [--config config.json]');
 }
 
-async function imageCommand(verb: string | undefined): Promise<void> {
-  if (verb === 'status') {
+async function imageCommand(verb: string | undefined, args: string[]): Promise<void> {
+  if (verb === 'project' && args[0] && (args.length === 1 || (args[1] === 'build' && args.length === 2) || (args[1] === 'set' && args.length === 3) || (args[1] === 'clear' && args.length === 2))) {
+    const path = 'projects/' + args[0] + '/image';
+    if (args[1] === 'build') await finished(await call<OperationView>('POST', path + '/build', {}), '镜像没有构建成功');
+    else if (args[1]) await call('PUT', path, { image: args[1] === 'set' ? args[2] : '' });
+    const state = await call<{ image: string; shared: string; exists: boolean; dockerfile: string }>('GET', path);
+    console.log(args[0] + '  ' + (state.image || state.shared + '（共享镜像）') + '  ' + (state.exists ? '已就绪' : '还没有') + '  ' + (state.dockerfile ? '有 Dockerfile' : '没有 Dockerfile'));
+  } else if (verb === 'status') {
     const { image } = await call<{ image?: { name: string; exists: boolean } }>('GET', 'overview');
     console.log(image ? image.name + '  ' + (image.exists ? '已就绪' : '还没有') : '连不上 Docker');
   } else if (verb === 'pull' || verb === 'build') {
     const label = verb === 'pull' ? '下载' : '构建';
     await finished(await call<OperationView>('POST', 'image/' + verb, {}), '镜像没有' + label + '成功');
     console.log('镜像已' + label);
-  } else throw new Error('Usage: coderfleet-backend image status | pull | build [--config config.json]');
+  } else throw new Error('Usage: coderfleet-backend image status | pull | build | project <project> [build | set <image> | clear] [--config config.json]');
 }
 
 try {
@@ -269,7 +276,7 @@ try {
   } else if (mode === 'containers') {
     await containersCommand(argv[1], argv.slice(2));
   } else if (mode === 'image') {
-    await imageCommand(argv[1]);
+    await imageCommand(argv[1], argv.slice(2));
   } else if (mode === 'helper') {
     await helperCommand(argv[1], argv.slice(2));
   } else if (mode === 'version') {

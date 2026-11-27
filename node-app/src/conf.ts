@@ -2,7 +2,7 @@
 // per-account directories. Same formats as coderfleet/config.py and the
 // Python account/project commands. Every mutation is one synchronous
 // read-modify-write of a single file.
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
@@ -311,6 +311,45 @@ export function setProjectMounts(workspace: string, name: string, specs: readonl
     return specs.length ? { ...rest, EXTRA_MOUNTS: specs.join(',') } : rest;
   });
   if (!found) throw new WorkspaceError('项目不存在');
+}
+
+/**
+ * A project's own image (IMAGE in projects.conf, as in the Python version); without one its
+ * container runs the shared image. The project's Dockerfile, projects/<name>/Dockerfile, is
+ * what `Lifecycle.buildProject` builds it from.
+ */
+export function projectImage(project: WorkspaceProject): string { return (project.record.IMAGE ?? '').trim(); }
+
+/** The name a project's image is built under when none is set. */
+export function defaultProjectImage(name: string): string { return 'coderfleet-' + name.toLowerCase() + ':latest'; }
+
+/** Sets the project's image, or with '' goes back to the shared one; applies when the container is recreated. */
+export function setProjectImage(workspace: string, name: string, image: string): void {
+  // A Docker image reference: [registry[:port]/]path[:tag][@digest].
+  if (image && (image.length > 255 || !/^[a-z0-9]+([._:/-]+[A-Za-z0-9]+)*(@sha256:[0-9a-f]{64})?$/.test(image))) throw new WorkspaceError('无效的镜像名：' + image);
+  const found = rewriteConf(join(workspace, 'projects.conf'), 'NAME', name, record => {
+    const { IMAGE: _previous, ...rest } = record;
+    return image ? { ...rest, IMAGE: image } : rest;
+  });
+  if (!found) throw new WorkspaceError('项目不存在');
+}
+
+export function projectDockerfilePath(workspace: string, name: string): string {
+  return join(projectEnvPath(workspace, name), '..', 'Dockerfile');
+}
+
+export function readProjectDockerfile(workspace: string, name: string): string {
+  const path = projectDockerfilePath(workspace, name);
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+}
+
+/** Saves the project's Dockerfile; empty content removes it. */
+export function writeProjectDockerfile(workspace: string, name: string, content: string): void {
+  if (content.length > 200_000) throw new WorkspaceError('Dockerfile 太长');
+  const path = projectDockerfilePath(workspace, name);
+  if (!content.trim()) { rmSync(path, { force: true }); return; }
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeText(path, content.endsWith('\n') ? content : content + '\n');
 }
 
 export type HelperAccess = 'off' | 'command' | 'gui';
