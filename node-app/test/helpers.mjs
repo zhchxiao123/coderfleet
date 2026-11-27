@@ -92,10 +92,12 @@ child.once('exit', code => process.exit(code ?? 1));
 `;
 
 // Stand-in for the container's python3, which only the usage probe runs: prints
-// $FAKE_USAGE ($FAKE_USAGE_CODEX for a Codex account), or "not signed in".
+// $FAKE_USAGE ($FAKE_USAGE_CODEX for a Codex account, $FAKE_USAGE_AGY for an Antigravity one),
+// or "not signed in".
 export const fakePython = `#!/usr/bin/env node
 const codex = process.argv.at(-1).includes('chatgpt.com');
-console.log((codex && process.env.FAKE_USAGE_CODEX) || process.env.FAKE_USAGE || '{"error": "no_credentials"}');
+const agy = process.argv.at(-1).includes('cloudcode-pa');
+console.log((codex && process.env.FAKE_USAGE_CODEX) || (agy ? process.env.FAKE_USAGE_AGY : process.env.FAKE_USAGE) || '{"error": "no_credentials"}');
 `;
 
 export async function port() {

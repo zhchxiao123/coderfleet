@@ -1,6 +1,6 @@
-// Subscription usage (5-hour and 7-day windows) of logged-in Claude Code and
-// Codex accounts; a port of coderfleet/usage_probe.py and the scheduler's
-// polling. The request is made inside one of the account's running containers
+// Subscription usage of logged-in accounts: the 5-hour and 7-day windows of
+// Claude Code and Codex, and Antigravity's quota pools (one per model family);
+// a port of coderfleet/usage_probe.py and the scheduler's polling. The request is made inside one of the account's running containers
 // with the container's python3, so it leaves through the container's network
 // (the relay) like the account's own traffic; this service never calls the
 // usage endpoints itself. Tokens are only read: the CLI refreshes them.
@@ -16,9 +16,18 @@ export interface UsageWindow {
   readonly resetsAt: string;
 }
 
+/** One of Antigravity's quotas: every model of a family draws on the same one. */
+export interface UsagePool extends UsageWindow {
+  /** What the IDs of the family's models start with: `gemini`, `claude`, … */
+  readonly id: string;
+  readonly label: string;
+}
+
 export interface AccountUsage {
   readonly fiveHour?: UsageWindow;
   readonly sevenDay?: UsageWindow;
+  /** Antigravity only, in place of the two windows. */
+  readonly pools?: readonly UsagePool[];
   readonly plan: string;
   readonly fetchedAt: string;
   /** Why the latest probe gave no numbers; the windows are then the last ones read. */
@@ -70,8 +79,32 @@ if tokens.get("account_id"):
 req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers=headers)
 ` + REQUEST;
 
+// The endpoint is the one agy itself asks (its default --cloud_code_endpoint); it is not a
+// published API. The access token lives an hour and only agy renews it.
+const ANTIGRAVITY_SCRIPT = `
+import json, sys, urllib.request, urllib.error
+try:
+    with open("/home/byclaw/.gemini/antigravity-cli/antigravity-oauth-token") as f:
+        token = json.load(f)["token"]["access_token"]
+except Exception:
+    print(json.dumps({"error": "no_credentials"}))
+    sys.exit(0)
+def request(method):
+    return urllib.request.Request("https://daily-cloudcode-pa.googleapis.com/v1internal:" + method, data=b"{}", headers={
+        "Authorization": "Bearer " + token, "Content-Type": "application/json", "User-Agent": "antigravity"})
+try:
+    with urllib.request.urlopen(request("loadCodeAssist"), timeout=10) as resp:
+        tiers = json.loads(resp.read().decode())
+    print(json.dumps({"plan": (tiers.get("paidTier") or tiers.get("currentTier") or {}).get("name", "")}))
+except Exception:
+    pass
+req = request("fetchAvailableModels")
+` + REQUEST;
+
+const SCRIPTS: Readonly<Record<string, string>> = { claude: CLAUDE_SCRIPT, codex: CODEX_SCRIPT, antigravity: ANTIGRAVITY_SCRIPT };
+
 export function usageSupported(account: Account): boolean {
-  return (account.type === 'claude' || account.type === 'codex') && account.auth === 'login' && account.runtime === 'container';
+  return account.type in SCRIPTS && account.auth === 'login' && account.runtime === 'container';
 }
 
 function percent(value: unknown): number | undefined {
@@ -91,6 +124,36 @@ function codexWindow(value: unknown): UsageWindow | undefined {
   return { used, resetsAt: typeof raw.reset_at === 'number' ? new Date(raw.reset_at * 1000).toISOString() : '' };
 }
 
+const FAMILIES: Readonly<Record<string, string>> = { MODEL_PROVIDER_GOOGLE: 'Gemini', MODEL_PROVIDER_ANTHROPIC: 'Claude' };
+
+/**
+ * Antigravity reports a remaining fraction per model, the same one for every model of a
+ * provider, so the models are folded into one pool per provider (the fullest model counts).
+ * Models without a reset time (tab completion, internal ones) have no quota to show.
+ */
+export function antigravityPools(models: unknown): UsagePool[] {
+  const pools = new Map<string, UsagePool>();
+  for (const [id, value] of Object.entries(record(models))) {
+    const model = record(value);
+    const quota = record(model.quotaInfo);
+    const remaining = quota.remainingFraction;
+    if (typeof remaining !== 'number' || !Number.isFinite(remaining) || !text(quota.resetTime)) continue;
+    const used = Math.max(0, Math.min(100, (1 - remaining) * 100));
+    const family = FAMILIES[text(model.modelProvider)];
+    const key = family ? family.toLowerCase() : id;
+    const current = pools.get(key);
+    // An untouched quota reports "five hours from now", which is not a reset anyone waits for.
+    if (!current || used > current.used) pools.set(key, { id: key, label: family ?? (text(model.displayName) || id), used, resetsAt: used > 0 ? text(quota.resetTime) : '' });
+  }
+  return [...pools.values()].sort((a, b) => Number(b.id === 'gemini') - Number(a.id === 'gemini') || a.label.localeCompare(b.label));
+}
+
+function pool(value: unknown): UsagePool[] {
+  const raw = record(value);
+  const used = percent(raw.used);
+  return used === undefined || !text(raw.id) ? [] : [{ id: text(raw.id), label: text(raw.label) || text(raw.id), used, resetsAt: text(raw.resetsAt) }];
+}
+
 /** The probe prints one JSON object per line: the plan (Claude), then the response or an error. */
 export function parseProbe(type: string, stdout: string, fetchedAt: string): AccountUsage {
   const failed = (error: string): AccountUsage => ({ plan: '', fetchedAt, error });
@@ -106,11 +169,14 @@ export function parseProbe(type: string, stdout: string, fetchedAt: string): Acc
   if (!response) return failed('empty_response');
   if (response.error) return failed(text(response.error));
   const status = response.status;
+  // Antigravity's token expires within the hour and is renewed by the next turn, not by a new login.
+  if (status === 401 && type === 'antigravity') return failed('token_stale');
   if (status === 401 || (type === 'codex' && status === 403)) return failed('unauthorized');
   if (status === 429) return failed('rate_limited');
   if (status !== 200) return failed('http_' + String(status));
   let data: Record<string, unknown>;
   try { data = record(JSON.parse(text(response.body))); } catch { return failed('invalid_json'); }
+  if (type === 'antigravity') return { pools: antigravityPools(data.models), plan, fetchedAt, error: '' };
   if (type === 'codex') {
     const limits = record(data.rate_limit);
     return { fiveHour: codexWindow(limits.primary_window), sevenDay: codexWindow(limits.secondary_window), plan: text(data.plan_type), fetchedAt, error: '' };
@@ -138,7 +204,8 @@ export class UsageTracker {
     try { raw = record(JSON.parse(readFileSync(this.path(name), 'utf8'))); } catch { return undefined; }
     const fetchedAt = text(raw.fetched_at);
     if (!fetchedAt) return undefined;
-    return { fiveHour: claudeWindow(raw.five_hour), sevenDay: claudeWindow(raw.seven_day), plan: text(raw.subscription_type), fetchedAt, error: text(raw.error) };
+    const pools = Array.isArray(raw.pools) ? raw.pools.flatMap(pool) : undefined;
+    return { fiveHour: claudeWindow(raw.five_hour), sevenDay: claudeWindow(raw.seven_day), ...(pools ? { pools } : {}), plan: text(raw.subscription_type), fetchedAt, error: text(raw.error) };
   }
 
   private save(name: string, usage: AccountUsage): void {
@@ -147,7 +214,7 @@ export class UsageTracker {
     if (!existsSync(join(this.workspace, 'accounts', name))) return;
     const temporary = path + '.' + process.pid + '.tmp';
     writeFileSync(temporary, JSON.stringify({
-      five_hour: window(usage.fiveHour), seven_day: window(usage.sevenDay), subscription_type: usage.plan, fetched_at: usage.fetchedAt, error: usage.error,
+      five_hour: window(usage.fiveHour), seven_day: window(usage.sevenDay), ...(usage.pools ? { pools: usage.pools } : {}), subscription_type: usage.plan, fetched_at: usage.fetchedAt, error: usage.error,
     }));
     renameSync(temporary, path);
   }
@@ -173,12 +240,12 @@ export class UsageTracker {
     const fetchedAt = new Date().toISOString();
     let usage: AccountUsage;
     try {
-      usage = parseProbe(account.type, await execText(this.dockerPath, container, ['python3', '-c', account.type === 'codex' ? CODEX_SCRIPT : CLAUDE_SCRIPT], PROBE_TIMEOUT), fetchedAt);
+      usage = parseProbe(account.type, await execText(this.dockerPath, container, ['python3', '-c', SCRIPTS[account.type] as string], PROBE_TIMEOUT), fetchedAt);
     } catch { usage = { plan: '', fetchedAt, error: 'probe_failed' }; }
     if (usage.error) {
       // Keep the last numbers next to the error; a signed-out account has none to trust.
       const last = usage.error === 'unauthorized' || usage.error === 'no_credentials' ? undefined : this.cached(account.name);
-      usage = { ...usage, fiveHour: last?.fiveHour, sevenDay: last?.sevenDay, plan: last?.plan ?? '' };
+      usage = { ...usage, fiveHour: last?.fiveHour, sevenDay: last?.sevenDay, ...(last?.pools ? { pools: last.pools } : {}), plan: last?.plan ?? '' };
     }
     this.save(account.name, usage);
     return usage;

@@ -543,7 +543,7 @@
       // or, for a new conversation, the one last used in this project. A choice made here wins.
       const modelKey = 'cf.model:' + CF.state.backendId + ':' + projectId;
       let pickedModel = null;
-      modelSelect.addEventListener('change', () => { pickedModel = modelSelect.value; });
+      modelSelect.addEventListener('change', () => { pickedModel = modelSelect.value; renderHeader(); });
       const applyModel = () => {
         let wanted = pickedModel;
         if (wanted === null && current.conversationId) {
@@ -627,7 +627,7 @@
           info ? CF.typeBadge(info.type, info.typeLabel) : null,
           // The container only needs mentioning when it is not running.
           info && info.state !== 'running' ? h('span.container-warn', h('span.dot.waiting'), '容器' + CF.stateText(info.state)) : null,
-          info ? CF.accounts.usagePill(info.account) : null,
+          info ? CF.accounts.usagePill(info.account, modelSelect.value) : null,
         );
         textarea.placeholder = info ? '给 ' + info.name + ' 发消息' : '描述你想做的事';
         welcome.querySelector('h2').textContent = info ? '在 ' + info.name + ' 里做点什么？' : '新对话';

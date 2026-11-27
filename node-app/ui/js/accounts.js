@@ -45,11 +45,14 @@
   const USAGE_ERRORS = {
     unauthorized: '登录已过期，重新登录后才能查额度', no_credentials: '还没有登录', rate_limited: '额度查询太频繁，稍后再试', network_error: '容器里连不上额度接口',
     no_running_container: '启动这个账号的一个项目后显示额度', probe_failed: '容器里的额度查询没有跑起来',
+    token_stale: '下次对话时更新额度',
   };
   /** Trying again cannot help these: the account has to be started or signed in first. */
-  const USAGE_NEEDS_ACTION = new Set(['unauthorized', 'no_credentials', 'no_running_container']);
+  const USAGE_NEEDS_ACTION = new Set(['unauthorized', 'no_credentials', 'no_running_container', 'token_stale']);
   const usageProblem = error => USAGE_ERRORS[error] || '额度没查到（' + (/^http_\d+$/.test(error) ? '额度接口返回 ' + error.slice(5) : error) + '）';
-  const windows = usage => [['5 小时', usage?.fiveHour], ['本周', usage?.sevenDay]].filter(([, value]) => value);
+  /** What an account's usage is measured in: Antigravity's pools (one per model family), else the two windows. */
+  const windows = usage => usage?.pools ? usage.pools.map(pool => [pool.label, pool])
+    : [['5 小时', usage?.fiveHour], ['本周', usage?.sevenDay]].filter(([, value]) => value);
 
   /** The account's subscription usage as a line of meters; null for accounts that have none (API key and others). */
   function usageLine(account) {
@@ -75,14 +78,19 @@
   }
 
   CF.accounts = {
-    /** A small pill for the chat top bar: the fuller of the account's two windows first. */
-    usagePill(name) {
+    /**
+     * A small pill for the chat top bar: the account's two windows, or, for an account with
+     * pools, the one `model` draws on (the fullest one while the model is the CLI's default).
+     */
+    usagePill(name, model) {
       const usage = CF.state.accounts.find(item => item.name === name)?.usage;
-      const shown = windows(usage);
-      if (!shown.length) return null;
-      const worst = Math.max(...shown.map(([, value]) => value.used));
-      return h('span.usage-pill' + level(worst), {
-        title: name + ' 的套餐额度\n' + shown.map(([label, value]) => label + ' 已用 ' + Math.round(value.used) + '%，' + resetText(value.resetsAt)).join('\n'),
+      const all = windows(usage);
+      if (!all.length) return null;
+      const worst = Math.max(...all.map(([, value]) => value.used));
+      const shown = !usage.pools ? all
+        : [all.find(([, pool]) => model && model.startsWith(pool.id)) || all.find(([, pool]) => pool.used === worst)];
+      return h('span.usage-pill' + level(Math.max(...shown.map(([, value]) => value.used))), {
+        title: name + ' 的套餐额度\n' + all.map(([label, value]) => [label + ' 已用 ' + Math.round(value.used) + '%', resetText(value.resetsAt)].filter(Boolean).join('，')).join('\n'),
         on: { click: () => CF.app.go({ name: 'accounts' }) },
       }, shown.map(([label, value]) => label + ' ' + Math.round(value.used) + '%').join(' · '));
     },

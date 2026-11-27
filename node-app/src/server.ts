@@ -724,7 +724,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     }],
     ['POST', /^accounts\/([\w-]+)\/usage$/, async (_request, [name]) => {
       const item = account(name as string);
-      if (!usageSupported(item)) throw new HttpError(400, '只有登录的 Claude Code 和 Codex 账号有套餐额度');
+      if (!usageSupported(item)) throw new HttpError(400, '只有登录的 Claude Code、Codex 和 Antigravity 账号有套餐额度');
       try { return await usage.refresh(item, readWorkspace(workspace).projects); } catch (error) {
         if (error instanceof NoContainerError) throw new HttpError(409, '先启动这个账号的一个项目，额度要从它的容器里查询');
         throw error;
