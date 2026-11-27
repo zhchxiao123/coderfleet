@@ -163,7 +163,7 @@ const DEVICE_ROUTES: readonly [string, RegExp][] = [
   ['GET', /^turns\/[\w-]+\/tools\/.+$/], ['GET', /^turns\/[\w-]+\/files$/], ['POST', /^turns\/[\w-]+\/(permission|cancel)$/],
   ['GET', /^system-llm$/], ['POST', /^translate$/],
   // 领航: its thread, the user's words and answers to it, and who keeps a conversation. Its switch stays on the computer.
-  ['GET', /^lead$/], ['GET', /^lead\/changes$/], ['POST', /^lead\/(messages|asks\/[\w-]+|undo\/[\w-]+)$/], ['PUT', /^conversations\/[\w-]+\/lead$/],
+  ['GET', /^lead$/], ['GET', /^lead\/changes$/], ['POST', /^lead\/(messages|stop|asks\/[\w-]+|undo\/[\w-]+)$/], ['PUT', /^conversations\/[\w-]+\/lead$/],
 ];
 export function deviceAllowed(method: string, path: string): boolean {
   return DEVICE_ROUTES.some(([allowed, pattern]) => allowed === method && pattern.test(path));
@@ -1440,6 +1440,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const input = await body(request);
       return { item: lead.say(text(input.text), leadAttachments(input.attachments)) };
     })],
+    // { run }: 停止 for the run the view named; `stopped: false` when that one is already over.
+    ['POST', /^lead\/stop$/, async request => leadCall(async () => ({ stopped: lead.stop(text((await body(request)).run)) }))],
     // Files for 领航, which belongs to no project: kept in the backend's state directory until handed to a conversation.
     ['POST', /^lead\/uploads$/, async (request, _params, url) => {
       const { file, ...saved } = await saveUpload(request, url, leadUploads(config.stateDirectory));

@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { type Changes, type Criterion, type Job } from './jobs.js';
 import { HELPER_CARD } from './helper-host.js';
 import { atomicJSON, active, entries, message, record, text, type Permission, type Question, type Turn } from './state.js';
-import { run, type Image, type ToolCall, type ToolSpec } from './lead-engine.js';
+import { run, StoppedError, type Image, type ToolCall, type ToolSpec } from './lead-engine.js';
 import { configured, type SystemLLMConfig } from './translate.js';
 
 /** How a file given to 领航 is referred to: this, then its name in the uploads directory. */
@@ -283,6 +283,8 @@ export class Lead {
   private readonly touched = new Map<string, string>();
   private readonly queue: Event[] = [];
   private busy: Event | undefined;
+  /** Stops the run going on (`busy`'s): the user's 停止. */
+  private halt: AbortController | undefined;
   /** Of the run going on: what the model is writing to the user, and what it is looking at. */
   private draft = '';
   private step = '';
@@ -392,6 +394,8 @@ export class Lead {
       working: this.busy ? (this.busy.type === 'user' ? '你的话' : this.conversationOf(this.busy)?.name ?? '') : null,
       // Its answer to the user as it is being written, and what it is looking at meanwhile.
       draft: this.draft, step: this.step,
+      // Which run that is, for 停止 to name (null when idle).
+      run: this.busy?.key ?? null,
     };
   }
 
@@ -450,6 +454,13 @@ export class Lead {
     this.queue.push({ key: 'u:' + item.id, type: 'user', text: words, attachments });
     void this.pump();
     return item;
+  }
+
+  /** The user's 停止: ends the run going on if it is still `run` (what the view showed); it is not carried on, and what is queued comes next. */
+  public stop(run: string): boolean {
+    if (!this.busy || this.busy.key !== run || !this.halt) return false;
+    this.halt.abort();
+    return true;
   }
 
   /** The user's answer to a card goes to the conversation that was waiting. */
@@ -550,13 +561,14 @@ export class Lead {
       const event = this.queue.shift();
       if (!event) return;
       this.busy = event;
+      this.halt = new AbortController();
       try { await this.handle(event); }
       catch (error) {
         console.error('Lead event not handled:', event.key, message(error));
         this.append({ ...this.stamp(), type: 'note', text: '这件事我没处理成：' + message(error) });
       } finally {
         if (event.type !== 'user') this.handled(event.key);
-        this.busy = undefined; this.draft = ''; this.step = '';
+        this.busy = undefined; this.halt = undefined; this.draft = ''; this.step = '';
       }
     }
   }
@@ -818,7 +830,7 @@ export class Lead {
     let acted = false;
     let asked: Outcome | undefined;
     const result = await run({
-      llm: this.host.llm(), directory: join(this.directory, 'engine'), system: SYSTEM, prompt, images, tools, limitMs: RUN_LIMIT_MS,
+      llm: this.host.llm(), directory: join(this.directory, 'engine'), system: SYSTEM, prompt, images, tools, limitMs: RUN_LIMIT_MS, signal: this.halt?.signal,
       onText: words => { if (live) this.draft = words; },
       onTool: call => { this.step = this.stepOf(call); },
       call: async call => {
@@ -854,7 +866,7 @@ export class Lead {
         [...LOOK, look, ...actions, ASK], conversation.id, evidence, act, true, false);
     } catch (error) {
       // Answered in the conversation while the model was thinking: nothing is left to ask.
-      if (!gone()) card('我没处理成（' + clip(message(error), 200) + '），这件你来', '', evidence);
+      if (!gone()) card(error instanceof StoppedError ? '你让我停下了，这件你来' : '我没处理成（' + clip(message(error), 200) + '），这件你来', '', evidence);
       return;
     }
     if (outcome.kind === 'acted' || gone()) return;
@@ -982,7 +994,7 @@ export class Lead {
         return false;
       }, false, true, seen?.images);
     } catch (error) {
-      this.append({ ...this.stamp(), type: 'note', text: '我没处理成：' + clip(message(error), 300) });
+      this.append({ ...this.stamp(), type: 'note', text: error instanceof StoppedError ? '你让我停下了，这一轮到此为止' : '我没处理成：' + clip(message(error), 300) });
       return;
     }
     const said = outcome.kind === 'ask' ? [outcome.question, outcome.lean].filter(Boolean).join('\n') : outcome.kind === 'none' ? outcome.text : '好了。';
