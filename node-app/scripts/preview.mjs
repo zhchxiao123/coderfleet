@@ -64,6 +64,7 @@ if (lead) {
     return names.includes('approve') ? (results ? [['approve', { reason: '只是跑检查，没有删除也没有推送' }]] : [['run_command', { command: 'git status --short | head -5; ls' }]])
       : names.includes('accept_job') ? [['ask_user', { question: '做完了，复审也过了，要不要收下并合并？', lean: '改动不大，我看可以收下；合并是大事，这次先问你。' }]]
       : names.includes('start_work') ? '现在这样：\n\n- **请运行检查并修复**（coderfleet）：在做，刚才要跑检查，我批了\n- **给启动流程补上集成测试**：有一条标准拿不准，卡片在上面\n- **端口改成读环境变量**：做完了，等你点头合并\n\n别的都停着，不需要你。'
+      : names.includes('nothing') && !/[?？]/.test(event.split('<对话内容>')[1] ?? '') ? [['nothing', {}]]
       : names.includes('ask_user') ? [['ask_user', { question: '它有一条标准拿不准，要你定', lean: /测试/.test(event) ? '我倾向先只测启动成功这一条。' : '' }]]
       : '我看一下。';
   }, { pace: 60 });

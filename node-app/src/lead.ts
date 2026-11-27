@@ -578,15 +578,19 @@ export class Lead {
       this.ask(conversation, { ...base, kind: 'failed', asked: '这一轮失败了：' + clip(turn.error || '没有说明原因', 400), why: '失败的回合由你定怎么办', lean: '', options: [RETRY, MINE], free: true });
       return;
     }
-    // Stopped by the user, or it ended on a statement: nothing waits.
-    if (turn.status !== 'done' || !/[?？]/.test(turn.answer.slice(-600))) return;
+    // Stopped by the user, or nothing was said: nothing waits. Whether the answer leaves something to the user is the model's to read.
+    if (turn.status !== 'done' || !turn.answer.trim()) return;
     const asked = tail(turn.answer.trim(), 600);
-    const card = (why: string, lean = '', evidence: readonly Evidence[] = []): void => this.ask(conversation, { ...base, kind: 'finished', asked, why, lean, evidence, options: [MINE], free: true });
-    if (this.streak(conversation.id) >= REPLY_STREAK) { card('这个对话里我已经连续回了 ' + REPLY_STREAK + ' 次，你还没出现过，这次你来'); return; }
+    // After a few replies in a row with no word from the user, what still waits is theirs.
+    const over = this.streak(conversation.id) >= REPLY_STREAK;
+    const card = (why: string, lean = '', evidence: readonly Evidence[] = []): void => this.ask(conversation, { ...base, kind: 'finished', asked,
+      why: over ? '这个对话里我已经连续回了 ' + REPLY_STREAK + ' 次，你还没出现过，这次你来' : why, lean, evidence, options: [MINE], free: true });
     const evidence: Evidence[] = [];
-    await this.decide(event, conversation, '对话「' + conversation.name + '」（ID ' + conversation.id + '）的这一轮结束了，回答的结尾可能在问用户：\n<对话内容>\n' + tail(turn.answer, 4000) + '\n</对话内容>', [
-      tool('reply', '替用户回一句话，让这个对话接着做。', { text: { ...str, description: '发给那个对话的话，像用户自己说的一样' }, ...reason }),
-      tool('nothing', '它没有在等用户回答（只是客套的收尾问句，或事情已经做完）。', {}),
+    await this.decide(event, conversation, '对话「' + conversation.name + '」（ID ' + conversation.id + '）的这一轮结束了。看它的回答是不是留了事情等用户：提了问题、给了几个方案让选、说「要的话我就做」、要用户确认或拍板才能往下走。问号有没有不重要。'
+      + (over ? '\n这个对话你已经连续回了 ' + REPLY_STREAK + ' 次，这次不能再替用户回：它在等，就 ask_user。' : '')
+      + '\n<对话内容>\n' + tail(turn.answer, 4000) + '\n</对话内容>', [
+      ...(over ? [] : [tool('reply', '替用户回一句话，让这个对话接着做。只有用户的规矩或前面说过的话能确定怎么回时才用。', { text: { ...str, description: '发给那个对话的话，像用户自己说的一样' }, ...reason })]),
+      tool('nothing', '它没有留事情给用户：只是汇报做完了，或客套的收尾。', {}),
     ], evidence, async call => {
       if (call.name === 'nothing') return true;
       if (call.name !== 'reply') return false;

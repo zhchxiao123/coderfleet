@@ -60,8 +60,9 @@ test('a phone may read and answer 领航, not switch it on or off', () => {
   assert.equal(deviceAllowed('PUT', 'lead/settings'), false);
 });
 
-const setup = async (script, options) => {
-  const llm = await systemModel(script, options);
+// A turn that ends is read by the model; `finished`: the test's script answers that too, otherwise nothing was left to the user.
+const setup = async (script, { finished = false, ...options } = {}) => {
+  const llm = await systemModel((prompt, results, body) => !finished && /这一轮结束了/.test(prompt.split('## 现在要你处理的事\n')[1] ?? '') ? [['nothing', {}]] : script(prompt, results, body), options);
   const env = await environment({
     accounts: 'NAME=claude-a TYPE=claude\n', projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\n`,
     containers: { 'claude-app': 'running' }, bins: { claude: fakeClaude },
@@ -110,6 +111,8 @@ test('领航 approves what the rules allow after looking, and records it', { tim
     assert.match(llm.requests[0].prompt, /用户的规矩[\s\S]*所有对话现在的状态[\s\S]*Bash/);
     assert.match(llm.requests[1].results[0], /checked-2/);
     // The same approval is never handled twice, also after a restart.
+    // (The turn the approval let finish is read once, like every answer.)
+    await until(async () => llm.requests.length, value => value === 3, 'the finished turn read');
     const calls = llm.requests.length;
     await env.restart();
     await new Promise(resolve => setTimeout(resolve, 1500));
@@ -189,26 +192,32 @@ test('what 领航 cannot settle becomes a card, and the user\'s answer goes back
   } finally { await close(); }
 });
 
-test('领航 answers a conversation that ended on a question, a few times in a row at most', { timeout: 120_000 }, async () => {
+test('领航 reads every answer a turn ends on, and replies a few times in a row at most', { timeout: 120_000 }, async () => {
   let replies = 0;
-  const { env, talk, items, close } = await setup((prompt, results) => {
-    if (/这一轮结束了/.test(event(prompt))) { replies += 1; return [['reply', { text: '第' + replies + '次：可以吗？', reason: '规矩里说了可以' }]]; }
-    return '好';
-  });
+  let read = 0;
+  const { env, talk, items, close } = await setup((prompt, results, body) => {
+    if (!/这一轮结束了/.test(event(prompt))) return '好';
+    read += 1;
+    // No question mark anywhere: the model is the one to see that it waits.
+    if (/够了/.test(event(prompt))) return [['nothing', {}]];
+    if (!body.tools.some(item => item.name === 'reply')) return [['ask_user', { question: '它还在等' }]];
+    replies += 1;
+    return [['reply', { text: '第' + replies + '次：要的话我就接着做', reason: '规矩里说了可以' }]];
+  }, { finished: true });
   try {
     await env.put('lead/settings', { enabled: true });
-    // The fake agent echoes the prompt: an answer that ends on a question.
-    const conversation = await talk('要不要继续？');
+    // The fake agent echoes the prompt: an answer that leaves the next step to the user, without a question mark.
+    const conversation = await talk('要的话我就做');
     // Three replies from 领航, each a turn of its own; the fourth question goes to the user.
     const [ask] = await until(() => items('ask'), value => value.length === 1, 'card after the streak', 600);
     assert.equal(ask.kind, 'finished');
     assert.match(ask.why, /连续回了 3 次/);
     const turns = (await env.get('conversations/' + conversation + '/turns')).body;
-    assert.deepEqual(turns.map(turn => turn.prompt), ['要不要继续？', '第1次：可以吗？', '第2次：可以吗？', '第3次：可以吗？']);
+    assert.deepEqual(turns.map(turn => turn.prompt), ['要的话我就做', '第1次：要的话我就接着做', '第2次：要的话我就接着做', '第3次：要的话我就接着做']);
     assert.deepEqual(turns.map(turn => turn.lead?.prompt ?? false), [false, true, true, true]);
     const dids = await items('did');
     assert.deepEqual(dids.map(item => item.action), ['reply', 'reply', 'reply']);
-    assert.equal(dids[0].said, '第1次：可以吗？');
+    assert.equal(dids[0].said, '第1次：要的话我就接着做');
     // The finished turns cannot be taken back.
     assert.equal(dids[0].undo, '');
     assert.equal((await env.post('lead/undo/' + dids[0].id)).status, 409);
@@ -217,8 +226,9 @@ test('领航 answers a conversation that ended on a question, a few times in a r
     const last = await until(() => lastTurn(env, conversation), value => value.prompt === '停下，够了。' && value.status === 'done', 'the user\'s turn');
     assert.equal(last.lead, undefined);
     assert.equal((await items('ask'))[0].resolved.answer, '停下，够了。');
-    // An answer that asks nothing is left alone.
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // That answer was read too, and left nothing to the user.
+    await until(async () => read, value => value === 5, 'the last answer read');
+    await new Promise(resolve => setTimeout(resolve, 500));
     assert.equal((await items('ask')).length, 1);
     assert.equal(replies, 3);
   } finally { await close(); }
