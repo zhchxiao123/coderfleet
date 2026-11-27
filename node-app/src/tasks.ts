@@ -221,6 +221,14 @@ export function applyEvent(turn: Turn, event: RecordValue): boolean {
         return true;
       }
       case 'coderfleet_interrupted': turn.interrupted = true; return true;
+      case 'coderfleet_background_stopped': {
+        // Said in the answer itself, so every client shows it without a field of its own.
+        const names = Array.isArray(event.tasks) ? event.tasks.filter((item): item is string => typeof item === 'string' && item !== '') : [];
+        const note = '> 这一轮结束时还有后台命令没跑完，已经停掉' + (names.length ? '：' + names.join('、') : '。');
+        turn.answer = (turn.answer + (turn.answer ? '\n\n' : '') + note).slice(0, MAX_ANSWER);
+        (turn.blocks ??= []).push({ kind: 'text', text: note });
+        return true;
+      }
       default: return false;
     }
   }

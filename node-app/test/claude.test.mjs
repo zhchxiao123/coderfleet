@@ -123,6 +123,16 @@ test('Claude turns run through the TypeScript Agent SDK inside the container', {
     const imageTool = (await env.get('turns/' + turn.id + '/tools/img-1')).body;
     assert.deepEqual([imageTool.output, imageTool.images], ['', [{ mime: 'image/png', data: 'iVBORw0KGgo=' }]]);
 
+    // A background command that ends soon after the answer: its report is part of the turn.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'background-short' });
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'background-short' && value.status === 'done', 'short background turn');
+    assert.equal(turn.answer, 'started\n\ninstalled');
+    // One that keeps running would keep Claude Code, and so the turn, from ending: it is stopped, and the answer says so.
+    await env.post('conversations/' + conversation + '/turns', { prompt: 'background' });
+    turn = await until(() => lastTurn(env, conversation), value => value.prompt === 'background' && value.status === 'done', 'background turn', 600);
+    assert.equal(turn.answer, 'started\n\n> 这一轮结束时还有后台命令没跑完，已经停掉：Reinstall dependencies');
+    assert.deepEqual(turn.blocks.at(-1), { kind: 'text', text: '> 这一轮结束时还有后台命令没跑完，已经停掉：Reinstall dependencies' });
+
     // Fork at a finished turn: a new conversation resumes it under a new session ID.
     const source = (await env.post('conversations', { projectId: 'app' })).body.id;
     await env.post('conversations/' + source + '/turns', { prompt: 'forkme' });

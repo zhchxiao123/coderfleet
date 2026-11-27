@@ -19,7 +19,7 @@ export interface ClaudeSpec extends BaseSpec {
 
 type Decision = { decision: 'allow' | 'deny'; answers?: Record<string, string>; message?: string };
 type PermissionResult = { behavior: 'allow'; updatedInput: Json } | { behavior: 'deny'; message: string };
-interface Query extends AsyncIterable<Json> { interrupt(): Promise<unknown> }
+interface Query extends AsyncIterable<Json> { interrupt(): Promise<unknown>; close(): void }
 type QueryFunction = (input: { prompt: AsyncIterable<Json>; options: Json }) => Query;
 
 /** The Python service's --append-system-prompt: files for the user are marked, and the App shows a card to save them. */
@@ -37,6 +37,11 @@ const CF_SEND_HINT = 'When the user asks you to send, share, or provide a file f
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan']);
 /** After a result, how long to wait for the run that answers a message sent mid-turn. */
 const FOLLOW_UP_WAIT = 5_000;
+/**
+ * After the answer, how long commands the agent left running in the background get to finish.
+ * Claude Code does not exit while one runs, and the turn is not over until it exits.
+ */
+const BACKGROUND_GRACE = 15_000;
 /** After an interrupt, how long the CLI gets to wind down before the worker exits anyway. */
 const INTERRUPT_GRACE = 15_000;
 /** Lifecycle states after which the CLI will not run a sent message (again). */
@@ -234,7 +239,18 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
     let result: Json | undefined;
     let announced = false;
     let settle: ReturnType<typeof setTimeout> | undefined;
-    const close = (): void => { clearTimeout(settle); settle = undefined; accepting = false; finished(); };
+    // Commands and agents still running in the background (background_tasks_changed replaces the list).
+    let background: string[] = [];
+    let linger: ReturnType<typeof setTimeout> | undefined;
+    const close = (): void => {
+      clearTimeout(settle); settle = undefined; accepting = false; finished();
+      clearTimeout(linger);
+      linger = background.length ? setTimeout(() => {
+        system(spec, 'coderfleet_background_stopped', { tasks: background });
+        // Ends Claude Code, which stops what it left running.
+        query?.close();
+      }, BACKGROUND_GRACE) : undefined;
+    };
     for await (const message of query) {
       if (message.type === 'command_lifecycle') {
         // The CLI reports each sent message as queued, started and ended; newer CLIs fold
@@ -244,6 +260,12 @@ export async function runClaude(spec: ClaudeSpec): Promise<number> {
         if (settle && !open.size) close();
         continue;
       }
+      if (message.type === 'system' && message.subtype === 'background_tasks_changed') {
+        background = list(message.tasks).map(task => str(task.description) || str(task.task_id));
+        if (!background.length) { clearTimeout(linger); linger = undefined; }
+      }
+      // A background command that finished is reported to the model, which answers in a run of its own.
+      if (linger && !message.parent_tool_use_id && ['assistant', 'stream_event'].includes(str(message.type))) { clearTimeout(linger); linger = undefined; }
       // Output after a result means a message sent mid-turn started its own run.
       if (settle && ['assistant', 'user', 'stream_event'].includes(str(message.type))) { clearTimeout(settle); settle = undefined; result = undefined; }
       const sessionId = str(message.session_id);

@@ -137,6 +137,19 @@ async function handle(message) {
     send({ type: 'user', session_id: sessionId, message: { content: [{ type: 'tool_result', tool_use_id: 'img-1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: process.env.FAKE_READ_IMAGE || 'iVBORw0KGgo=' } }] }] } });
     say('looked');
     finish();
+  } else if (prompt === 'background' || prompt === 'background-short') {
+    // A command left running in the background: the CLI does not exit while it runs, even with its input closed.
+    const task = { task_id: 'bg-1', task_type: 'local_bash', description: 'Reinstall dependencies' };
+    send({ type: 'system', subtype: 'background_tasks_changed', tasks: [task], session_id: sessionId });
+    say('started');
+    finish();
+    if (prompt === 'background') setInterval(() => undefined, 1000);
+    else setTimeout(() => {
+      // It finished: the model is told and answers in a run of its own.
+      send({ type: 'system', subtype: 'background_tasks_changed', tasks: [], session_id: sessionId });
+      say('installed');
+      finish();
+    }, 1000);
   } else if (prompt === 'forkme') {
     say('fork-source');
     finish();
