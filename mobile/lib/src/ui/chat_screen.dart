@@ -253,8 +253,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         child: Text('连接中断，正在重连…', style: TextStyle(color: palette.amber, fontSize: 13))),
                   Expanded(child: ListView.builder(
                     reverse: true, keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag, padding: const EdgeInsets.only(top: 8),
-                    itemCount: turns.length,
-                    itemBuilder: (context, index) => TurnView(
+                    itemCount: turns.length + (feed.earlier > 0 ? 1 : 0),
+                    // Above the oldest turn held: reaching it fetches the ones before.
+                    itemBuilder: (context, index) => index == turns.length ? _Earlier(key: ValueKey('earlier-${turns.last.id}'), onShown: feed.loadEarlier) : TurnView(
                       key: ValueKey(turns[index].id), turn: turns[index], client: widget.client, images: images, onChanged: () => feed.poke(),
                       canTranslate: translatable, onFork: _openFork,
                     ),
@@ -406,4 +407,24 @@ class _Welcome extends StatelessWidget {
       Text('对话在项目容器里运行，可以读写这个项目的文件。', textAlign: TextAlign.center, style: TextStyle(color: palette.text2)),
     ])));
   }
+}
+
+/// A spinner above the oldest turn on screen: `onShown` runs when it scrolls into view.
+class _Earlier extends StatefulWidget {
+  const _Earlier({super.key, required this.onShown});
+  final Future<void> Function() onShown;
+  @override
+  State<_Earlier> createState() => _EarlierState();
+}
+
+class _EarlierState extends State<_Earlier> {
+  @override
+  void initState() {
+    super.initState();
+    // A failed fetch is tried again when the row is next built (it is keyed by the oldest turn).
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) unawaited(widget.onShown().catchError((_) {})); });
+  }
+
+  @override
+  Widget build(BuildContext context) => const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator.adaptive(strokeWidth: 2))));
 }

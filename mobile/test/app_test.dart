@@ -18,8 +18,10 @@ void main() {
     await pumpApp(tester, backend);
     expect(find.text('请帮我梳理一下服务启动流程'), findsOneWidget);
     expect(find.text('修一下登录页的样式'), findsOneWidget);
-    expect(find.byTooltip('等你确认'), findsOneWidget);
-    expect(find.byTooltip('失败'), findsOneWidget);
+    // The one waiting for the user leads the list under its own heading; states are written out.
+    expect(find.text('等你确认'), findsNWidgets(2));
+    expect(find.text('失败'), findsOneWidget);
+    expect(find.text('今天'), findsOneWidget);
 
     await tester.tap(find.text('请帮我梳理一下服务启动流程'));
     await settle(tester);
@@ -49,7 +51,7 @@ void main() {
   testWidgets('a new conversation: pick a project, send, interject, see the answer', (tester) async {
     final backend = FakeBackend()..seedDemo();
     await pumpApp(tester, backend);
-    await tester.tap(find.text('新对话'));
+    await tester.tap(find.byTooltip('新对话'));
     await settle(tester, 3);
     // Running projects first; the stopped one says so.
     expect(find.text('Antigravity CLI · 容器未运行'), findsOneWidget);

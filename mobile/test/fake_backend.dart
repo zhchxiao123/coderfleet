@@ -13,6 +13,8 @@ class FakeBackend {
   final String token;
   final Set<String> reachable;
   final List<Map<String, dynamic>> requests = [];
+  /// Every request's URL, to see what was asked for (page sizes, searches).
+  final List<Uri> queries = [];
   int _version = 0, _ids = 0;
 
   final projects = <Map<String, dynamic>>[
@@ -49,6 +51,9 @@ class FakeBackend {
     summary['turns'] = turns[conversationId]!.length;
     summary['status'] = full['status'];
     summary['attention'] = full['permission'] != null;
+    // Like the backend: the line a finished answer ended on.
+    final last = (full['blocks'] as List).cast<Map<String, dynamic>>().where((block) => block['kind'] == 'text').lastOrNull;
+    summary['preview'] = full['status'] == 'done' ? '${last?['text'] ?? full['answer']}'.replaceAll(RegExp(r'[#*`\s]+'), ' ').trim() : '';
     _touch();
     return full;
   }
@@ -99,6 +104,7 @@ class FakeBackend {
     // An upload is the file itself, named in the query.
     final raw = request.headers['Content-Type'] == 'application/octet-stream';
     final body = raw || request.body.isEmpty ? <String, dynamic>{} : (jsonDecode(request.body) as Map).cast<String, dynamic>();
+    queries.add(request.url);
     requests.add({'method': request.method, 'path': path, 'body': body, if (raw) 'name': request.url.queryParameters['name'], if (raw) 'bytes': request.bodyBytes});
     final parts = path.split('/');
     switch ((request.method, parts)) {
@@ -112,9 +118,13 @@ class FakeBackend {
         return _json(id == 'coderfleet' ? [{'id': 'opus', 'label': 'Opus'}, {'id': 'sonnet', 'label': 'Sonnet'}] : []);
       case ('GET', ['conversations', 'changes']):
         _advance();
-        final etag = 'v$_version';
+        final limit = int.tryParse(request.url.queryParameters['limit'] ?? '') ?? conversations.length, q = request.url.queryParameters['q'] ?? '';
+        final found = conversations.where((item) => '${item['name']} ${item['projectId']}'.toLowerCase().contains(q)).toList();
+        final etag = 'v$_version-$limit-$q';
         if (request.url.queryParameters['since'] == etag) return _unchanged(request, etag);
-        return _json({'etag': etag, 'conversations': conversations});
+        // Like the backend: the ones waiting for the user first.
+        final ordered = [...found.where((item) => item['attention'] == true), ...found.where((item) => item['attention'] != true)];
+        return _json({'etag': etag, 'conversations': ordered.take(limit).toList(), 'total': found.length});
       case ('POST', ['conversations']):
         return _json(conversation(body['projectId'] as String, '新对话', status: ''), 201);
       case ('PUT', ['conversations', final id]):
@@ -125,8 +135,14 @@ class FakeBackend {
         _advance();
         final etag = 'v$_version';
         if (request.url.queryParameters['since'] == etag) return _unchanged(request, etag);
-        final list = turns[id] ?? [];
-        return _json({'etag': etag, 'full': true, 'order': [for (final turn in list) turn['id']], 'turns': list, 'followUps': followUps[id] ?? []});
+        final all = turns[id] ?? [], last = int.tryParse(request.url.queryParameters['last'] ?? '') ?? all.length;
+        final list = all.sublist(all.length > last ? all.length - last : 0);
+        return _json({'etag': etag, 'full': true, 'order': [for (final turn in list) turn['id']], 'turns': list, 'followUps': followUps[id] ?? [], 'earlier': all.length - list.length});
+      case ('GET', ['conversations', final id, 'turns']):
+        final all = turns[id] ?? [], end = all.indexWhere((turn) => turn['id'] == request.url.queryParameters['before']);
+        if (end < 0) return _json({'error': 'Turn not found'}, 404);
+        final start = end - (int.tryParse(request.url.queryParameters['limit'] ?? '') ?? end);
+        return _json({'turns': all.sublist(start < 0 ? 0 : start, end), 'earlier': start < 0 ? 0 : start});
       case ('POST', ['conversations', final id, 'turns']):
         final prompt = body['prompt'] as String, images = (body['images'] as List).cast<String>();
         final running = turns[id]!.where((turn) => turn['status'] == 'running').firstOrNull;

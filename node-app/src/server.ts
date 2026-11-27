@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { gzip } from 'node:zlib';
 import { ACCOUNT_TYPES, accountType } from './accounts.js';
 import {
   addAccount, addProject, envKeys, initWorkspace, readSettings, readWorkspace, removeAccount, setProjectActive, updateEnv, writeSettings, WorkspaceError, type WorkspaceProject, readProjectEnv, writeProjectEnv, projectHelperAccess, projectMountSpecs, setProjectHelper, setProjectMounts,
@@ -35,9 +36,23 @@ class HttpError extends Error {
   public constructor(public readonly status: number, message: string) { super(message); }
 }
 
-function reply(response: ServerResponse, status: number, data: unknown): void {
-  response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  response.end(JSON.stringify(data));
+/** Answers below this size are sent as they are: compressing them saves nothing. */
+const GZIP_FROM = 1024;
+
+function reply(request: IncomingMessage, response: ServerResponse, status: number, data: unknown): void {
+  const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+  const content = Buffer.from(JSON.stringify(data) ?? 'null');
+  if (content.length < GZIP_FROM || !/\bgzip\b/.test(String(request.headers['accept-encoding'] ?? ''))) {
+    response.writeHead(status, headers);
+    response.end(content);
+    return;
+  }
+  // Conversation lists and turns are repetitive JSON: about a fifth of the size over a phone's network.
+  gzip(content, (error, packed) => {
+    if (error) { response.writeHead(status, headers); response.end(content); return; }
+    response.writeHead(status, { ...headers, 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+    response.end(packed);
+  });
 }
 
 async function body(request: IncomingMessage, limit = 160_000): Promise<Record<string, unknown>> {
@@ -88,6 +103,13 @@ export function deviceAllowed(method: string, path: string): boolean {
 
 const digest = (value: unknown): string => createHash('sha1').update(JSON.stringify(value)).digest('hex').slice(0, 16);
 const LONG_POLL_MAX = 30_000;
+/** Turns in one page of earlier history when the phone names no size. */
+const EARLIER_PAGE = 10;
+/** A page size from the query: a whole number from 1 to 500, or 0 when absent or invalid (no paging). */
+const count = (value: string | null): number => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, 500) : 0;
+};
 
 type AuthedRequest = IncomingMessage & { device?: Device };
 
@@ -170,8 +192,8 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
   const jobs = new Jobs(config.stateDirectory, config.dockerPath);
   const schedules = new Schedules(config.stateDirectory);
   schedules.recover();
-  /** The conversation list (desktop and phone change feed). */
-  const conversationList = (archived = false) => {
+  /** The conversation list (desktop and phone change feed). `latest`, when given, receives each conversation's newest turn. */
+  const conversationList = (archived = false, latest?: Map<string, { id: string; finishedAt: string }>) => {
     // Like the Python service (Conversation.touch at a task's start and end): a conversation's time is
     // its latest activity — the newest turn's finish, or its start while it runs. Status is the newest turn's.
     const time = (value: string): number => Date.parse(value) || 0;
@@ -182,6 +204,7 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       const current = summaries.get(conversationId) ?? { updatedAt: '', latest: '', status: '', turns: 0, attention: false };
       const activity = time(item.finishedAt) > time(item.createdAt) ? item.finishedAt : item.createdAt;
       const newest = time(item.createdAt) >= time(current.latest);
+      if (newest) latest?.set(conversationId, { id: item.id, finishedAt: item.finishedAt });
       summaries.set(conversationId, {
         updatedAt: time(activity) > time(current.updatedAt) ? activity : current.updatedAt,
         latest: newest ? item.createdAt : current.latest,
@@ -203,16 +226,34 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         schedule: origins[item.id] ?? '' };
     }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   };
-  const conversationTurns = (id: string): Record<string, unknown>[] => {
+  /** What a finished turn ended on, as one plain line for the phone's list ('' while it runs). Kept per turn: a finished turn's log is read once. */
+  const previews = new Map<string, { finishedAt: string; text: string }>();
+  const preview = (latest?: { id: string; finishedAt: string }): string => {
+    if (!latest?.finishedAt) return '';
+    const kept = previews.get(latest.id);
+    if (kept?.finishedAt === latest.finishedAt) return kept.text;
+    const turn = store.turn(latest.id);
+    const last = [...(turn?.blocks ?? [])].reverse().find(block => block.kind === 'text');
+    const text = previewLine((last && 'text' in last ? last.text : '') || turn?.answer || '');
+    previews.set(latest.id, { finishedAt: latest.finishedAt, text });
+    if (previews.size > 2000) previews.delete(previews.keys().next().value as string);
+    return text;
+  };
+  /** The turns a conversation shows, oldest first, by id only (no log is read): a fork's inherited ones, then its own. */
+  const turnSequence = (id: string): { id: string; inherited: boolean }[] => {
     const conversation = store.conversation(id);
     if (!conversation) throw new HttpError(404, 'Conversation not found');
     // A fork shows the turns it branched from, read-only, before its own.
-    const inherited = (conversation.fork?.inherited_task_ids ?? []).flatMap(turnId => {
-      const turn = store.turn(turnId);
-      return turn ? [{ ...publicTurn(turn), inherited: true }] : [];
-    });
-    return [...inherited, ...turnsOf(id).map(publicTurn)];
+    return [
+      ...(conversation.fork?.inherited_task_ids ?? []).map(turnId => ({ id: turnId, inherited: true })),
+      ...store.turnIds(id).map(item => ({ id: item.id, inherited: false })),
+    ];
   };
+  const publicTurns = (sequence: { id: string; inherited: boolean }[]): Record<string, unknown>[] => sequence.flatMap(item => {
+    const turn = store.turn(item.id);
+    return turn ? [item.inherited ? { ...publicTurn(turn), inherited: true } : publicTurn(turn)] : [];
+  });
+  const conversationTurns = (id: string): Record<string, unknown>[] => publicTurns(turnSequence(id));
   /** Polls `check` until it returns a value, `wait` ms pass (at most 30 s), or the client goes away. */
   const waitFor = async <T>(request: IncomingMessage, url: URL, check: () => T | undefined): Promise<T | undefined> => {
     const wait = Math.min(Math.max(Number(url.searchParams.get('wait')) || 0, 0), LONG_POLL_MAX);
@@ -835,12 +876,25 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
     // ?archived=1: the archived ones (Python: include_archived), to restore or delete them.
     ['GET', /^conversations$/, async (_request, _params, url) => conversationList(url.searchParams.get('archived') === '1')],
     // Long poll for phones: answers at once when the list differs from `since`, else waits for a change.
+    // ?limit=N: only the N most recent (a phone shows a page and asks for more as it scrolls), with `total`;
+    // ?q=: only those whose name or project contains it. With either, the ones waiting for the user come
+    // first and each carries `preview`, the line its latest answer ended on.
     ['GET', /^conversations\/changes$/, async (request, _params, url) => {
       const since = url.searchParams.get('since') ?? '';
+      const limit = count(url.searchParams.get('limit'));
+      const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
       const result = await waitFor(request, url, () => {
-        const conversations = conversationList();
-        const etag = digest(conversations);
-        return etag === since ? undefined : { etag, conversations };
+        const latest = new Map<string, { id: string; finishedAt: string }>();
+        const all = conversationList(false, latest);
+        const found = query ? all.filter(item => item.name.toLowerCase().includes(query) || item.projectId.toLowerCase().includes(query)) : all;
+        if (!limit && !query) {
+          const etag = digest(found);
+          return etag === since ? undefined : { etag, conversations: found };
+        }
+        const ordered = [...found.filter(item => item.attention), ...found.filter(item => !item.attention)];
+        const conversations = (limit ? ordered.slice(0, limit) : ordered).map(item => ({ ...item, preview: preview(latest.get(item.id)) }));
+        const etag = digest([conversations, found.length]);
+        return etag === since ? undefined : { etag, conversations, total: found.length };
       });
       return result ?? { etag: since, unchanged: true };
     }],
@@ -877,23 +931,37 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
       store.deleteConversation(conversation.id);
       return { deleted: true };
     }],
-    ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id]) => conversationTurns(identifier(id))],
+    // ?before=<turn id>&limit=N: the N turns just before that one (a phone scrolling up), and how many are earlier still.
+    ['GET', /^conversations\/([\w-]+)\/turns$/, async (_request, [id], url) => {
+      const before = url.searchParams.get('before');
+      if (before === null) return conversationTurns(identifier(id));
+      const sequence = turnSequence(identifier(id));
+      const end = sequence.findIndex(item => item.id === before);
+      if (end < 0) throw new HttpError(404, 'Turn not found');
+      const start = Math.max(0, end - (count(url.searchParams.get('limit')) || EARLIER_PAGE));
+      return { turns: publicTurns(sequence.slice(start, end)), earlier: start };
+    }],
     // Long poll for phones: the turns that changed since `since` (all of them when it is unknown),
     // the turn order and queued messages; waits for a change when there is none.
+    // ?last=N: only the N latest turns are followed (and read from their logs); `earlier` counts the ones
+    // before them, which GET turns?before= returns.
     ['GET', /^conversations\/([\w-]+)\/changes$/, async (request, [id], url) => {
       const conversationId = identifier(id);
       const since = url.searchParams.get('since') ?? '';
+      const last = count(url.searchParams.get('last'));
       const result = await waitFor(request, url, () => {
-        const turns = conversationTurns(conversationId);
+        const sequence = turnSequence(conversationId);
+        const earlier = last ? Math.max(0, sequence.length - last) : 0;
+        const turns = publicTurns(sequence.slice(earlier));
         const queued = followUps.list(conversationId);
         const hashes = new Map(turns.map(turn => [String(turn.id), digest(turn)]));
-        const etag = digest([[...hashes], queued]);
+        const etag = digest(last ? [[...hashes], queued, earlier] : [[...hashes], queued]);
         if (etag === since) return undefined;
         const known = sentSnapshots.get(since);
         sentSnapshots.set(etag, hashes);
         if (sentSnapshots.size > 500) sentSnapshots.delete(sentSnapshots.keys().next().value as string);
         return {
-          etag, full: !known, order: turns.map(turn => turn.id), followUps: queued,
+          etag, full: !known, order: turns.map(turn => turn.id), followUps: queued, ...(last ? { earlier } : {}),
           turns: known ? turns.filter(turn => known.get(String(turn.id)) !== hashes.get(String(turn.id))) : turns,
         };
       });
@@ -1163,17 +1231,17 @@ export async function serve(configPath: string, options: ServeOptions = {}): Pro
         const match = pattern.exec(path);
         if (!match || method !== request.method) continue;
         const result = await handler(request, match.slice(1), url);
-        reply(response, request.method === 'POST' && /^(accounts|projects|conversations|schedules)$/.test(path) ? 201 : 200, result);
+        reply(request, response, request.method === 'POST' && /^(accounts|projects|conversations|schedules)$/.test(path) ? 201 : 200, result);
         return;
       }
       throw new HttpError(404, 'Unknown API endpoint');
     } catch (error) {
-      if (error instanceof HttpError) reply(response, error.status, { error: error.message });
-      else if (error instanceof WorkspaceError) reply(response, 400, { error: error.message });
-      else if (message(error) === 'Invalid identifier') reply(response, 400, { error: 'Invalid identifier' });
+      if (error instanceof HttpError) reply(request, response, error.status, { error: error.message });
+      else if (error instanceof WorkspaceError) reply(request, response, 400, { error: error.message });
+      else if (message(error) === 'Invalid identifier') reply(request, response, 400, { error: 'Invalid identifier' });
       else {
         console.error('Request failed:', message(error));
-        reply(response, 500, { error: message(error) || 'Backend request failed' });
+        reply(request, response, 500, { error: message(error) || 'Backend request failed' });
       }
     }
   });
@@ -1224,6 +1292,11 @@ function fileCall<T>(run: () => T): T {
     if (error instanceof FileAccessError) throw new HttpError(error.status, error.message);
     throw error;
   }
+}
+
+/** Markdown as one short plain line: no code blocks, markers or hidden comments. */
+function previewLine(markdown: string): string {
+  return markdown.replace(/```[\s\S]*?```|<!--[\s\S]*?-->/g, ' ').replace(/[#*`>|_~]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 140);
 }
 
 function publicTurn(turn: Turn): Record<string, unknown> {

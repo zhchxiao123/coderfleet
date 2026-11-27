@@ -1,5 +1,8 @@
-// Home: the backend's conversations, newest first, with status dots; search;
-// a new conversation starts from a project picker.
+// Home: the backend's conversations in sections (waiting for you, today,
+// yesterday, earlier), each with its state and the line its latest answer ended
+// on, a page at a time (more as the list is scrolled to its end); pulling down
+// refreshes; search runs on the backend; a new conversation starts from a
+// project picker.
 import 'dart:async';
 
 // flutter_markdown_plus builds on this library; one Material keeps one theme.
@@ -25,8 +28,8 @@ class ConversationsScreen extends StatefulWidget {
 
 class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsBindingObserver {
   ConversationFeed? feed;
-  String query = '';
   bool searching = false;
+  Timer? _typing;
   bool _chatOpen = false;
   late final BackgroundWatch? _watch = widget.notifier == null ? null : BackgroundWatch(widget.notifier!);
   StreamSubscription<String>? _taps;
@@ -51,6 +54,8 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
     _watch?.stop();
     feed?.removeListener(_openPending);
     feed?.dispose();
+    _typing?.cancel();
+    searching = false;
     final client = widget.state.client;
     feed = client == null ? null : (ConversationFeed(client, wait: widget.feedWait)..addListener(_openPending)..start());
   }
@@ -65,7 +70,10 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
       if (_watch == null) {
         feed?.stop();
       } else if (feed != null) {
-        _watch.start(feed!, current: !_chatOpen);
+        // A search shows part of the list: watch all of it, starting from its next answer.
+        final whole = feed!.query.isEmpty;
+        _endSearch();
+        _watch.start(feed!, current: !_chatOpen && whole);
         if (_chatOpen) feed!.resync();
         feed!.start();
       }
@@ -76,22 +84,37 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _taps?.cancel();
+    _typing?.cancel();
     _watch?.stop();
     feed?.dispose();
     super.dispose();
+  }
+
+  /// Searches once typing pauses, so each letter is not a request.
+  void _search(String value) {
+    _typing?.cancel();
+    _typing = Timer(const Duration(milliseconds: 250), () => feed?.search(value.trim().toLowerCase()));
+  }
+
+  void _endSearch() {
+    _typing?.cancel();
+    feed?.search('');
+    if (searching && mounted) setState(() => searching = false);
   }
 
   /// A tapped notification: back to the list, then into its conversation once the list has it.
   void _openTapped(String conversationId) {
     if (!mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
+    // What notified is among the latest conversations, which a search may hide.
+    _endSearch();
     _pendingOpen = conversationId;
     _openPending();
   }
 
   void _openPending() {
     final id = _pendingOpen, current = feed;
-    if (id == null || current == null || !current.loaded || !mounted) return;
+    if (id == null || current == null || !current.loaded || current.pending || !mounted) return;
     _pendingOpen = null;
     final conversation = current.conversations.where((item) => item.id == id).firstOrNull;
     if (conversation == null) {
@@ -198,18 +221,17 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
     return Scaffold(
       appBar: AppBar(
         title: searching
-            ? TextField(autofocus: true, decoration: const InputDecoration(hintText: '搜索对话', border: InputBorder.none, filled: false), onChanged: (value) => setState(() => query = value.trim().toLowerCase()))
+            ? TextField(autofocus: true, decoration: const InputDecoration(hintText: '搜索对话', border: InputBorder.none, filled: false), onChanged: _search)
             : GestureDetector(onTap: _backends, child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Text(widget.state.current?.name ?? 'CoderFleet'),
                 const SizedBox(width: 4),
                 Icon(Icons.expand_more, size: 20, color: palette.text3),
               ])),
         actions: [
-          IconButton(icon: Icon(searching ? Icons.close : Icons.search), onPressed: () => setState(() { searching = !searching; query = ''; })),
+          IconButton(icon: Icon(searching ? Icons.close : Icons.search), onPressed: () => searching ? _endSearch() : setState(() => searching = true)),
+          if (!searching) IconButton(icon: const Icon(Icons.edit_outlined), tooltip: '新对话', onPressed: _newChat),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-          onPressed: _newChat, backgroundColor: palette.ink, foregroundColor: palette.inkText, icon: const Icon(Icons.edit_outlined), label: const Text('新对话')),
       body: current == null
           ? const SizedBox()
           : ListenableBuilder(listenable: current, builder: (context, _) {
@@ -221,36 +243,73 @@ class _ConversationsScreenState extends State<ConversationsScreen> with WidgetsB
                     ? _Notice(icon: Icons.wifi_off, title: '连不上后端', text: '${current.error}\n会自动重试。也可以检查手机的网络，或在后端设置里调整地址。', action: ('后端设置', _backends))
                     : const Center(child: CircularProgressIndicator.adaptive());
               }
-              final list = current.conversations.where((item) => query.isEmpty || item.name.toLowerCase().contains(query) || (current.project(item.projectId)?.name.toLowerCase().contains(query) ?? false)).toList();
+              final list = current.conversations, query = current.query;
               return Column(children: [
                 if (current.error != null)
                   Container(width: double.infinity, color: palette.amber.withValues(alpha: 0.12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Text('连接中断，正在重连…', style: TextStyle(color: palette.amber, fontSize: 13))),
                 Expanded(child: list.isEmpty
-                    ? _Notice(icon: Icons.chat_bubble_outline, title: query.isEmpty ? '还没有对话' : '没有匹配的对话', text: query.isEmpty ? '点右下角「新对话」，选一个项目开始。' : '')
-                    : ListView.separated(
-                        padding: const EdgeInsets.only(bottom: 96),
-                        itemCount: list.length,
-                        separatorBuilder: (_, _) => Padding(padding: const EdgeInsets.only(left: 16), child: Divider(color: palette.line)),
-                        itemBuilder: (context, index) {
-                          final item = list[index];
-                          return ListTile(
-                            onTap: () => _open(conversation: item),
-                            title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w500, color: palette.text)),
-                            subtitle: Text('${current.project(item.projectId)?.name ?? item.projectId} · ${relativeTime(item.updatedAt)}',
-                                maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text3, fontSize: 12.5)),
-                            trailing: StatusDot(conversation: item),
-                          );
-                        })),
+                    ? _Notice(icon: Icons.chat_bubble_outline, title: query.isEmpty ? '还没有对话' : '没有匹配的对话', text: query.isEmpty ? '点右上角的笔，选一个项目开始。' : '')
+                    : RefreshIndicator.adaptive(
+                        onRefresh: current.refresh,
+                        child: ListView.builder(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            padding: const EdgeInsets.only(bottom: 24),
+                            itemCount: list.length + (current.hasMore ? 1 : 0),
+                            itemBuilder: (context, index) {
+                              // The row after the last conversation: reaching it asks for the next page.
+                              if (index == list.length) return _More(onShown: current.loadMore);
+                              final item = list[index], now = DateTime.now();
+                              final section = _section(item, now), first = index == 0 || _section(list[index - 1], now) != section;
+                              return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                                if (first)
+                                  Padding(padding: EdgeInsets.fromLTRB(16, index == 0 ? 8 : 20, 16, 4),
+                                      child: Text(section, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: item.attention ? palette.amber : palette.text3)))
+                                else
+                                  Padding(padding: const EdgeInsets.only(left: 16), child: Divider(color: palette.line)),
+                                _Row(conversation: item, project: current.project(item.projectId)?.name ?? item.projectId, onTap: () => _open(conversation: item)),
+                              ]);
+                            }))),
               ]);
             }),
     );
   }
 }
 
-class StatusDot extends StatelessWidget {
-  const StatusDot({super.key, required this.conversation});
+/// A spinner at the end of a list that has more: `onShown` runs when it scrolls into view.
+class _More extends StatefulWidget {
+  const _More({required this.onShown});
+  final VoidCallback onShown;
+  @override
+  State<_More> createState() => _MoreState();
+}
+
+class _MoreState extends State<_More> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) widget.onShown(); });
+  }
+
+  @override
+  Widget build(BuildContext context) => const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator.adaptive(strokeWidth: 2))));
+}
+
+/// The section a conversation is listed under: the ones waiting for the user first, the rest by day.
+String _section(Conversation conversation, DateTime now) {
+  if (conversation.attention) return '等你确认';
+  final local = conversation.updatedAt.toLocal(), today = DateTime(now.year, now.month, now.day);
+  if (!local.isBefore(today)) return '今天';
+  if (!local.isBefore(today.subtract(const Duration(days: 1)))) return '昨天';
+  return '更早';
+}
+
+/// One conversation: its name and time, the line its latest answer ended on, then its state (in words) and project.
+class _Row extends StatelessWidget {
+  const _Row({required this.conversation, required this.project, required this.onTap});
   final Conversation conversation;
+  final String project;
+  final VoidCallback onTap;
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
@@ -261,8 +320,28 @@ class StatusDot extends StatelessWidget {
             : conversation.status == 'failed'
                 ? (palette.red, '失败')
                 : (null, '');
-    if (color == null) return const SizedBox(width: 8);
-    return Tooltip(message: label, child: Container(width: 9, height: 9, decoration: BoxDecoration(color: color, shape: BoxShape.circle)));
+    final small = TextStyle(color: palette.text3, fontSize: 12.5);
+    return InkWell(onTap: onTap, child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+          Expanded(child: Text(conversation.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: palette.text))),
+          const SizedBox(width: 12),
+          Text(relativeTime(conversation.updatedAt), style: small),
+        ]),
+        if (conversation.preview.isNotEmpty)
+          Padding(padding: const EdgeInsets.only(top: 3), child: Text(conversation.preview, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: palette.text2, fontSize: 13.5))),
+        Padding(padding: const EdgeInsets.only(top: 4), child: Row(children: [
+          if (color != null) ...[
+            Container(width: 7, height: 7, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+            const SizedBox(width: 5),
+            Text(label, style: small.copyWith(color: color, fontWeight: FontWeight.w600)),
+            Text(' · ', style: small),
+          ],
+          Expanded(child: Text(project, maxLines: 1, overflow: TextOverflow.ellipsis, style: small)),
+        ])),
+      ]),
+    ));
   }
 }
 

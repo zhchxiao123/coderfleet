@@ -1,0 +1,89 @@
+// The list and a conversation hold only what is on screen and fetch the rest while scrolling.
+// ignore: deprecated_member_use
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'fake_backend.dart';
+import 'test_app.dart';
+
+List<String> _asked(FakeBackend backend, String path) =>
+    [for (final item in backend.queries) if (item.path == '/v1/$path') item.query];
+
+void main() {
+  testWidgets('the list shows the latest page, more at its end, and searches on the backend', (tester) async {
+    final backend = FakeBackend();
+    final now = DateTime.now();
+    // 第 1 条 is the newest, 第 70 条 the oldest.
+    for (var index = 70; index >= 1; index--) {
+      backend.conversation(index == 66 ? 'reminis-app' : 'coderfleet', '第 $index 条', updatedAt: now.subtract(Duration(minutes: index)));
+    }
+    await pumpApp(tester, backend);
+    expect(_asked(backend, 'conversations/changes').first, contains('limit=30'));
+    expect(find.text('第 1 条'), findsOneWidget);
+
+    Future<void> toEnd() async {
+      await tester.drag(find.byType(ListView), const Offset(0, -20000));
+      await settle(tester);
+    }
+    await toEnd();
+    // The end of the first page asked for the second one.
+    expect(find.text('第 31 条', skipOffstage: false), findsOneWidget);
+    expect(_asked(backend, 'conversations/changes').last, contains('limit=60'));
+    await toEnd();
+    await toEnd();
+    expect(find.text('第 70 条'), findsOneWidget);
+    await toEnd();
+    // Everything is here: nothing more is asked for.
+    expect(_asked(backend, 'conversations/changes').where((query) => query.contains('limit=120')), isEmpty);
+
+    await tester.tap(find.byIcon(Icons.search));
+    await settle(tester, 2);
+    await tester.enterText(find.byType(TextField), 'Reminis');
+    await settle(tester);
+    // Found by its project, though it was far down the list.
+    expect(find.text('第 66 条'), findsOneWidget);
+    expect(find.text('第 1 条'), findsNothing);
+    expect(_asked(backend, 'conversations/changes').last, allOf(contains('q=reminis'), contains('limit=30')));
+
+    await tester.tap(find.byIcon(Icons.close));
+    await settle(tester);
+    expect(find.text('第 1 条'), findsOneWidget);
+    await teardown(tester);
+  });
+
+  testWidgets('a conversation opens on its latest turns and fetches earlier ones when scrolled up', (tester) async {
+    final backend = FakeBackend();
+    final chat = backend.conversation('coderfleet', '长对话')['id'] as String;
+    for (var index = 1; index <= 25; index++) {
+      backend.addTurn(chat, {'prompt': '问题 $index', 'answer': '回答 $index', 'blocks': [{'kind': 'text', 'text': '回答 $index'}]});
+    }
+    await pumpApp(tester, backend);
+    await tester.tap(find.text('长对话'));
+    await settle(tester);
+    expect(_asked(backend, 'conversations/$chat/changes').first, contains('last=10'));
+    expect(find.text('回答 25'), findsOneWidget);
+    expect(_asked(backend, 'conversations/$chat/turns'), isEmpty);
+
+    Future<void> toTop() async {
+      await tester.drag(find.byType(ListView), const Offset(0, 20000));
+      await settle(tester);
+    }
+    await toTop();
+    expect(_asked(backend, 'conversations/$chat/turns'), hasLength(1));
+    await toTop();
+    await toTop();
+    expect(find.text('问题 1'), findsOneWidget);
+    await toTop();
+    // 15 earlier turns came in two pages; at the first turn nothing more is fetched.
+    expect(_asked(backend, 'conversations/$chat/turns'), hasLength(2));
+
+    // A new turn while far up: the earlier ones stay.
+    await tester.runAsync(() async => backend.addTurn(chat, {'prompt': '问题 26', 'answer': '回答 26', 'blocks': [{'kind': 'text', 'text': '回答 26'}]}));
+    await settle(tester);
+    expect(find.text('问题 1'), findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -40000));
+    await settle(tester);
+    expect(find.text('回答 26'), findsOneWidget);
+    await teardown(tester);
+  });
+}

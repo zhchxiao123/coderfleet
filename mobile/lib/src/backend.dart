@@ -140,15 +140,27 @@ class BackendClient {
       parseList(await _call('GET', 'projects/${Uri.encodeComponent(projectId)}/models'), (item) => ModelOption(item['id'] as String? ?? '', item['label'] as String? ?? ''));
 
   /// Long poll of the conversation list: returns null when nothing changed within [wait].
-  Future<({String etag, List<Conversation> conversations})?> conversationChanges(String since, {Duration wait = const Duration(seconds: 25)}) async {
-    final data = asMap(await _call('GET', 'conversations/changes?since=${Uri.encodeQueryComponent(since)}&wait=${wait.inMilliseconds}', timeout: wait + const Duration(seconds: 15)));
+  /// Only the [limit] most recent conversations (matching [query], when given) come back; `total` counts all of them.
+  Future<({String etag, List<Conversation> conversations, int total})?> conversationChanges(String since,
+      {Duration wait = const Duration(seconds: 25), required int limit, String query = ''}) async {
+    final data = asMap(await _call('GET',
+        'conversations/changes?since=${Uri.encodeQueryComponent(since)}&wait=${wait.inMilliseconds}&limit=$limit${query.isEmpty ? '' : '&q=${Uri.encodeQueryComponent(query)}'}',
+        timeout: wait + const Duration(seconds: 15)));
     if (data['unchanged'] == true) return null;
-    return (etag: data['etag'] as String? ?? '', conversations: parseList(data['conversations'], Conversation.fromJson));
+    final conversations = parseList(data['conversations'], Conversation.fromJson);
+    // A backend from before paging sends everything and no total.
+    return (etag: data['etag'] as String? ?? '', conversations: conversations, total: data['total'] is int ? data['total'] as int : conversations.length);
   }
 
-  /// Long poll of one conversation's turns.
-  Future<TurnChanges> turnChanges(String conversationId, String since, {Duration wait = const Duration(seconds: 25)}) async => TurnChanges.fromJson(asMap(await _call(
-      'GET', 'conversations/$conversationId/changes?since=${Uri.encodeQueryComponent(since)}&wait=${wait.inMilliseconds}', timeout: wait + const Duration(seconds: 15))));
+  /// Long poll of one conversation's [last] latest turns.
+  Future<TurnChanges> turnChanges(String conversationId, String since, {Duration wait = const Duration(seconds: 25), required int last}) async => TurnChanges.fromJson(asMap(await _call(
+      'GET', 'conversations/$conversationId/changes?since=${Uri.encodeQueryComponent(since)}&wait=${wait.inMilliseconds}&last=$last', timeout: wait + const Duration(seconds: 15))));
+
+  /// The [limit] turns just before turn [before], oldest first, and how many are earlier still.
+  Future<({List<Turn> turns, int earlier})> earlierTurns(String conversationId, String before, {required int limit}) async {
+    final data = asMap(await _call('GET', 'conversations/$conversationId/turns?before=${Uri.encodeQueryComponent(before)}&limit=$limit'));
+    return (turns: parseList(data['turns'], Turn.fromJson), earlier: data['earlier'] is int ? data['earlier'] as int : 0);
+  }
 
   Future<Conversation> createConversation(String projectId) async => Conversation.fromJson(asMap(await _call('POST', 'conversations', body: {'projectId': projectId})));
 

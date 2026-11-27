@@ -91,6 +91,67 @@ test('change feeds answer at once on a change and wait otherwise', { timeout: 12
   } finally { await env.close(); }
 });
 
+test('a phone asks for a page of conversations and the latest turns, then for more', { timeout: 120_000 }, async () => {
+  const env = await environment({
+    accounts: 'NAME=claude-a TYPE=claude\n', projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\n`,
+    containers: { 'claude-app': 'running' }, bins: { claude: fakeClaude },
+  });
+  try {
+    const ids = [];
+    for (const name of ['alpha', 'beta', 'gamma']) ids.push((await env.post('conversations', { projectId: 'app', name })).body.id);
+    const everything = (await env.get('conversations/changes')).body;
+    assert.equal(everything.conversations.length, 3);
+    assert.equal(everything.total, undefined, 'without a limit the answer is what it always was');
+
+    const page = (await env.get('conversations/changes?limit=2')).body;
+    assert.deepEqual([page.conversations.length, page.total], [2, 3]);
+    assert.deepEqual(page.conversations.map(item => item.id), everything.conversations.slice(0, 2).map(item => item.id));
+    const found = (await env.get('conversations/changes?limit=2&q=GAM')).body;
+    assert.deepEqual([found.conversations.map(item => item.name), found.total], [['gamma'], 1]);
+    // An unchanged page waits; a conversation that becomes active moves into it.
+    assert.equal((await env.get('conversations/changes?limit=2&since=' + page.etag + '&wait=600')).body.unchanged, true);
+    await env.put('conversations/' + everything.conversations[2].id, { name: 'renamed' });
+    const moved = (await env.get('conversations/changes?limit=2&since=' + page.etag + '&wait=5000')).body;
+    assert.deepEqual([moved.conversations[0].name, moved.conversations.length, moved.total], ['renamed', 2, 3]);
+
+    const conversation = ids[0];
+    for (const prompt of ['one', 'two', 'three']) {
+      await env.post('conversations/' + conversation + '/turns', { prompt });
+      await until(async () => (await env.get('conversations/' + conversation + '/turns')).body.at(-1), turn => turn?.prompt === prompt && turn.status === 'done', prompt);
+    }
+    const all = (await env.get('conversations/' + conversation + '/turns')).body.map(turn => turn.id);
+    const feed = (await env.get('conversations/' + conversation + '/changes?last=2')).body;
+    assert.deepEqual([feed.full, feed.earlier, feed.order, feed.turns.map(turn => turn.prompt)], [true, 1, all.slice(1), ['two', 'three']]);
+    assert.equal((await env.get('conversations/' + conversation + '/changes?last=2&since=' + feed.etag + '&wait=600')).body.unchanged, true);
+    const earlier = (await env.get('conversations/' + conversation + '/turns?before=' + feed.order[0] + '&limit=5')).body;
+    assert.deepEqual([earlier.turns.map(turn => turn.prompt), earlier.earlier], [['one'], 0]);
+    assert.deepEqual((await env.get('conversations/' + conversation + '/turns?before=' + all[2] + '&limit=1')).body.turns.map(turn => turn.prompt), ['two']);
+    assert.equal((await env.get('conversations/' + conversation + '/turns?before=nope')).status, 404);
+    assert.equal((await env.get('conversations/' + conversation + '/changes')).body.earlier, undefined);
+    // The list tells what each conversation's latest answer ended on; one that never ran has nothing to tell.
+    const answered = (await env.get('conversations/' + conversation + '/turns')).body.at(-1).answer;
+    const listed = (await env.get('conversations/changes?limit=3')).body.conversations;
+    assert.ok(answered && listed.find(item => item.id === conversation).preview === answered.replace(/\s+/g, ' ').trim().slice(0, 140), 'preview of the last answer');
+    assert.equal(listed.find(item => item.id === ids[1]).preview, '');
+    assert.equal((await env.get('conversations/changes')).body.conversations[0].preview, undefined);
+  } finally { await env.close(); }
+});
+
+test('large answers are compressed for clients that accept it', async () => {
+  const env = await environment({ accounts: 'NAME=claude-a TYPE=claude\n', projects: project => `NAME=app ACCOUNT=claude-a PATH=${project}\n` });
+  try {
+    for (let index = 0; index < 12; index += 1) await env.post('conversations', { projectId: 'app', name: 'conversation ' + index });
+    const call = (path, encoding) => fetch('http://127.0.0.1:' + env.port + '/v1/' + path, { headers: { Authorization: 'Bearer synthetic-node-test-token-0000000', 'Accept-Encoding': encoding } });
+    const packed = await call('conversations', 'gzip');
+    assert.equal(packed.headers.get('content-encoding'), 'gzip');
+    assert.equal((await packed.json()).length, 12);
+    const plain = await call('conversations', 'identity');
+    assert.equal(plain.headers.get('content-encoding'), null);
+    assert.equal((await plain.json()).length, 12);
+    assert.equal((await call('health', 'gzip')).headers.get('content-encoding'), null, 'small answers stay as they are');
+  } finally { await env.close(); }
+});
+
 test('phone addresses: https anywhere, http only to private and mesh hosts', () => {
   assert.equal(phoneUrl('https://cf.example.com/'), 'https://cf.example.com');
   assert.equal(phoneUrl('http://192.168.1.20:8877'), 'http://192.168.1.20:8877');

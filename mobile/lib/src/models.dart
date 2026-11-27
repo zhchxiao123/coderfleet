@@ -23,12 +23,13 @@ class ModelOption {
 }
 
 class Conversation {
-  Conversation({required this.id, required this.projectId, required this.name, required this.status, required this.attention, required this.updatedAt, required this.turns});
+  Conversation({required this.id, required this.projectId, required this.name, required this.status, required this.attention, required this.updatedAt, required this.turns, this.preview = ''});
   factory Conversation.fromJson(Map<String, dynamic> json) => Conversation(
         id: _text(json['id']), projectId: _text(json['projectId']), name: _text(json['name']), status: _text(json['status']),
         attention: json['attention'] == true, updatedAt: DateTime.tryParse(_text(json['updatedAt'])) ?? DateTime.fromMillisecondsSinceEpoch(0),
-        turns: json['turns'] is int ? json['turns'] as int : 0);
-  final String id, projectId, name, status;
+        turns: json['turns'] is int ? json['turns'] as int : 0, preview: _text(json['preview']));
+  /// `preview`: the line the latest answer ended on ('' while it runs or when there is none).
+  final String id, projectId, name, status, preview;
   final bool attention;
   final DateTime updatedAt;
   final int turns;
@@ -163,15 +164,18 @@ class FollowUp {
 
 /// One answer of the conversation change feed (GET conversations/:id/changes).
 class TurnChanges {
-  TurnChanges({required this.etag, required this.unchanged, required this.full, required this.order, required this.turns, required this.followUps});
+  TurnChanges({required this.etag, required this.unchanged, required this.full, required this.order, required this.turns, required this.followUps, this.earlier = 0});
   factory TurnChanges.fromJson(Map<String, dynamic> json) => TurnChanges(
         etag: _text(json['etag']), unchanged: json['unchanged'] == true, full: json['full'] == true, order: _strings(json['order']),
-        turns: _maps(json['turns']).map(Turn.fromJson).toList(), followUps: _maps(json['followUps']).map(FollowUp.fromJson).toList());
+        turns: _maps(json['turns']).map(Turn.fromJson).toList(), followUps: _maps(json['followUps']).map(FollowUp.fromJson).toList(),
+        earlier: json['earlier'] is int ? json['earlier'] as int : 0);
   final String etag;
   final bool unchanged, full;
   final List<String> order;
   final List<Turn> turns;
   final List<FollowUp> followUps;
+  /// Turns before the first of `order` that the feed does not follow (fetched as the user scrolls up).
+  final int earlier;
 }
 
 /// Outcome of sending a message: a new turn, taken into the running turn, or queued after it.

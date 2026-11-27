@@ -1,6 +1,8 @@
 // App state: saved backends (in the Keychain / Keystore) and the two long-poll
 // feeds (conversation list, one conversation's turns). Feeds pause while the
-// app is in the background and resume at once when it comes back.
+// app is in the background and resume at once when it comes back. Both follow
+// only what is on screen: a page of the list, the latest turns of a conversation;
+// the rest is fetched as the user scrolls.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -174,11 +176,47 @@ class ConversationFeed extends Feed {
   ConversationFeed(this.client, {this.wait = const Duration(seconds: 25)});
   final BackendClient client;
   final Duration wait;
+  /// Conversations asked for at first, and added each time the list is scrolled to its end.
+  static const page = 30;
   String _etag = '';
   List<Conversation> conversations = [];
   List<Project> projects = [];
   bool loaded = false;
   DateTime _projectsAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _limit = page;
+  /// Conversations on the backend (matching [query]); [conversations] holds the most recent of them.
+  int total = 0;
+  /// What the list is searched for ('' = everything), lower case.
+  String query = '';
+  /// The answer on screen is for an earlier page size or search; the new one is on its way.
+  bool pending = false;
+
+  bool get hasMore => conversations.length < total;
+
+  /// Asks for one more page (when the list is scrolled to its end).
+  void loadMore() {
+    if (!hasMore || pending) return;
+    _limit += page;
+    _ask();
+  }
+
+  /// Searches names and projects on the backend; '' shows everything again.
+  void search(String value) {
+    if (value == query) return;
+    query = value;
+    _limit = page;
+    _ask();
+  }
+
+  void _ask() {
+    pending = true;
+    notifyListeners();
+    // The poll in flight asks for the old page: start a new one.
+    if (_running) {
+      stop();
+      start();
+    }
+  }
 
   @override
   Future<void> step() async {
@@ -188,16 +226,42 @@ class ConversationFeed extends Feed {
       _projectsAt = DateTime.now();
       if (loaded) notifyListeners();
     }
-    final changes = await client.conversationChanges(_etag, wait: loaded ? wait : Duration.zero);
-    if (changes == null) return;
+    final limit = _limit, query = this.query;
+    final changes = await client.conversationChanges(_etag, wait: loaded && !pending ? wait : Duration.zero, limit: limit, query: query);
+    // An answer to a question no longer asked (the page grew, the search changed) is dropped.
+    if (limit != _limit || query != this.query) return;
+    if (changes == null) {
+      if (pending) {
+        pending = false;
+        notifyListeners();
+      }
+      return;
+    }
     _etag = changes.etag;
     conversations = changes.conversations;
+    total = changes.total;
+    pending = false;
     loaded = true;
     notifyListeners();
   }
 
   /// Asks for the whole list on the next step, even when it has not changed.
   void resync() => _etag = '';
+
+  /// Fetches the list and the projects again now (pull to refresh); done when the answer or an error is in.
+  Future<void> refresh() {
+    resync();
+    _projectsAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _ask();
+    final done = Completer<void>();
+    void settled() {
+      if (pending && error == null) return;
+      removeListener(settled);
+      if (!done.isCompleted) done.complete();
+    }
+    addListener(settled);
+    return done.future.timeout(const Duration(seconds: 15), onTimeout: () => removeListener(settled));
+  }
 
   Future<void> refreshProjects() async {
     projects = await client.projects();
@@ -213,19 +277,37 @@ class ChatFeed extends Feed {
   final BackendClient client;
   final String conversationId;
   final Duration wait, pace;
+  /// Turns the feed follows (the latest ones), and the size of a page of earlier ones.
+  static const window = 10;
   String _etag = '';
   final Map<String, Turn> _turns = {};
+  /// The followed turns, oldest first.
   List<String> _order = [];
+  /// Earlier turns already fetched, oldest first; they are finished and no longer change.
+  List<Turn> _older = [];
   List<FollowUp> followUps = [];
   bool loaded = false;
+  /// Turns before the oldest one held here.
+  int earlier = 0;
+  bool loadingEarlier = false;
 
-  List<Turn> get turns => [for (final id in _order) if (_turns[id] != null) _turns[id]!];
-  Turn? get activeTurn => turns.where((turn) => turn.active).firstOrNull;
+  List<Turn> get turns => [..._older, for (final id in _order) if (_turns[id] != null) _turns[id]!];
+  Turn? get activeTurn => _order.map((id) => _turns[id]).where((turn) => turn != null && turn.active).firstOrNull;
 
   @override
   Future<void> step() async {
-    final changes = await client.turnChanges(conversationId, _etag, wait: loaded ? wait : Duration.zero);
+    final changes = await client.turnChanges(conversationId, _etag, wait: loaded ? wait : Duration.zero, last: window);
     if (changes.unchanged) return;
+    final first = changes.order.firstOrNull;
+    if (_order.contains(first)) {
+      // New turns pushed the oldest followed ones out: they stay, as earlier turns.
+      final left = _order.takeWhile((id) => id != first).map((id) => _turns[id]).whereType<Turn>().toList();
+      _older = [..._older, ...left];
+    } else {
+      // Nothing in common with what is held (first answer, or a long time away): start from the latest again.
+      _older = [];
+      earlier = changes.earlier;
+    }
     if (changes.full) _turns.clear();
     for (final turn in changes.turns) {
       _turns[turn.id] = turn;
@@ -238,6 +320,23 @@ class ChatFeed extends Feed {
     notifyListeners();
     // While an answer streams, changes come many times a second: batch them a little.
     if (activeTurn != null) await Future<void>.delayed(pace);
+  }
+
+  /// Fetches the page of turns before the oldest one held (when the user scrolls up to it).
+  Future<void> loadEarlier() async {
+    final oldest = _older.firstOrNull?.id ?? _order.firstOrNull;
+    if (loadingEarlier || earlier == 0 || oldest == null) return;
+    loadingEarlier = true;
+    try {
+      final more = await client.earlierTurns(conversationId, oldest, limit: window);
+      // The feed may have started over meanwhile: only add to the list this page continues.
+      if ((_older.firstOrNull?.id ?? _order.firstOrNull) != oldest) return;
+      _older = [...more.turns, ..._older];
+      earlier = more.earlier;
+    } finally {
+      loadingEarlier = false;
+      notifyListeners();
+    }
   }
 
   /// Asks for everything again on the next step (after sending, so the new turn shows at once).

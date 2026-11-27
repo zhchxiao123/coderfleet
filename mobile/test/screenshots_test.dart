@@ -49,7 +49,7 @@ void main() {
       await tester.pageBack();
       await settle(tester, 2);
 
-      await tester.tap(find.text('新对话'));
+      await tester.tap(find.byTooltip('新对话'));
       await settle(tester, 3);
       await screenshot(tester, '$out/$name-6-project-picker.png');
       await tester.tap(find.text('coderfleet').last);
