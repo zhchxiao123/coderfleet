@@ -33,6 +33,8 @@ class FakeBackend {
 
   String _id() => (++_ids).toRadixString(16).padLeft(12, '0');
   void _touch() => _version++;
+  /// After a test changed a turn in place: the feeds see it.
+  void changed() => _touch();
 
   Map<String, dynamic> conversation(String projectId, String name, {String status = 'done', bool attention = false, DateTime? updatedAt}) {
     final item = {'id': _id(), 'projectId': projectId, 'name': name, 'status': status, 'attention': attention,

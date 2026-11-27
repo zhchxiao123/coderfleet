@@ -14,6 +14,7 @@ import 'package:image_picker/image_picker.dart';
 import '../backend.dart';
 import '../models.dart';
 import '../state.dart';
+import 'steady_scroll.dart';
 import 'theme.dart';
 import 'turn_view.dart';
 
@@ -99,6 +100,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   late final UploadCache images = UploadCache(widget.client, widget.projectId);
   final input = TextEditingController();
   final attachments = <_Attachment>[];
+  final scroller = ScrollController();
+  final growth = Growth();
+  /// Far enough from the end of the conversation for the button that goes back there.
+  final away = ValueNotifier(false);
   ChatFeed? chat;
   String? conversationId;
   String title = '新对话';
@@ -117,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     title = widget.conversation?.name ?? '新对话';
     if (conversationId != null) _follow(conversationId!);
     input.addListener(() => setState(() {}));
+    scroller.addListener(() => away.value = scroller.hasClients && scroller.offset > 240);
     autos.get(autoKey).then((value) { if (mounted) setState(() => auto = value); });
     widget.client.canTranslate().then((value) { if (mounted) setState(() => translatable = value); }).catchError((_) {});
     widget.client.models(widget.projectId).then((list) { if (mounted) setState(() => models = list); }).catchError((_) {});
@@ -149,6 +155,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     chat?.dispose();
     input.dispose();
+    scroller.dispose();
+    away.dispose();
     super.dispose();
   }
 
@@ -192,6 +200,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       if (delivery == Delivery.queued && mounted) showMessage(context, '已排队，这一轮结束后自动发出');
       chat?.poke();
+      // What was just sent is at the end.
+      if (scroller.hasClients) scroller.jumpTo(0);
     } on BackendError catch (error) {
       if (mounted) showMessage(context, error.message);
     } finally {
@@ -252,15 +262,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     Container(width: double.infinity, color: palette.amber.withValues(alpha: 0.12), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                         child: Text('连接中断，正在重连…', style: TextStyle(color: palette.amber, fontSize: 13))),
                   // A conversation shorter than the screen starts at the top; a longer one stays at its end.
-                  Expanded(child: Align(alignment: Alignment.topCenter, child: ListView.builder(
-                    reverse: true, shrinkWrap: true, keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag, padding: const EdgeInsets.only(top: 8),
-                    itemCount: turns.length + (feed.earlier > 0 ? 1 : 0),
-                    // Above the oldest turn held: reaching it fetches the ones before.
-                    itemBuilder: (context, index) => index == turns.length ? _Earlier(key: ValueKey('earlier-${turns.last.id}'), onShown: feed.loadEarlier) : TurnView(
-                      key: ValueKey(turns[index].id), turn: turns[index], client: widget.client, images: images, onChanged: () => feed.poke(),
-                      canTranslate: translatable, onFork: _openFork,
-                    ),
-                  ))),
+                  // At the end the view follows the text being written; scrolled up, what is on screen stays put.
+                  Expanded(child: Stack(children: [
+                    Align(alignment: Alignment.topCenter, child: ListView.builder(
+                      controller: scroller, physics: SteadyPhysics(growth),
+                      reverse: true, shrinkWrap: true, keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag, padding: const EdgeInsets.only(top: 8),
+                      itemCount: turns.length + (feed.earlier > 0 ? 1 : 0),
+                      // Above the oldest turn held: reaching it fetches the ones before.
+                      itemBuilder: (context, index) => index == turns.length ? _Earlier(key: ValueKey('earlier-${turns.last.id}'), onShown: feed.loadEarlier) : TrackGrowth(
+                        key: ValueKey(turns[index].id), growth: index == 0 ? growth : null,
+                        child: TurnView(turn: turns[index], client: widget.client, images: images, onChanged: () => feed.poke(), canTranslate: translatable, onFork: _openFork),
+                      ),
+                    )),
+                    Positioned(left: 0, right: 0, bottom: 8, child: Center(child: ValueListenableBuilder<bool>(
+                      valueListenable: away,
+                      builder: (context, shown, child) => IgnorePointer(ignoring: !shown, child: AnimatedOpacity(opacity: shown ? 1 : 0, duration: const Duration(milliseconds: 150), child: child)),
+                      child: Material(
+                        color: palette.surface, shape: CircleBorder(side: BorderSide(color: palette.line)), elevation: 2, shadowColor: Colors.black26,
+                        child: IconButton(icon: Icon(Icons.arrow_downward_rounded, size: 20, color: palette.text), tooltip: '回到底部', visualDensity: VisualDensity.compact,
+                            onPressed: () => scroller.animateTo(0, duration: const Duration(milliseconds: 260), curve: Curves.easeOut)),
+                      ),
+                    ))),
+                  ])),
                 ]);
               })),
         if (feed != null) ListenableBuilder(listenable: feed, builder: (context, _) => _composer(palette, feed.activeTurn, feed.followUps)) else _composer(palette, null, const []),

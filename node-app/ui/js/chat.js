@@ -751,22 +751,38 @@
       let lastTop = 0;
       let gliding = 0;
       const still = matchMedia('(prefers-reduced-motion: reduce)');
+      const gapBelow = () => transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop;
+      const toEnd = h('button.to-end', { title: '回到底部', hidden: true }, CF.icon('send', 15));
+      const markEnd = () => { toEnd.hidden = following || gapBelow() < 160; };
+      // The user's own move up lets go at once, before the next step of a glide can pull the view back.
+      const letGo = () => {
+        following = false;
+        if (gliding) { cancelAnimationFrame(gliding); gliding = 0; }
+      };
+      transcript.addEventListener('wheel', event => { if (event.deltaY < 0) letGo(); }, { passive: true });
+      transcript.addEventListener('touchmove', letGo, { passive: true });
+      transcript.addEventListener('keydown', event => { if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) letGo(); });
+      // A press on the scrollbar (right of the content) is a drag of it.
+      transcript.addEventListener('mousedown', event => { if (event.target === transcript && event.offsetX >= transcript.clientWidth) letGo(); });
       transcript.addEventListener('scroll', () => {
         const top = transcript.scrollTop;
-        if (top + transcript.clientHeight >= transcript.scrollHeight - 40) following = true;
-        else if (top < lastTop - 1) following = false;
+        // Following starts again only at the very end, not on the way there.
+        if (gapBelow() <= 4) following = true;
+        else if (top < lastTop - 1) letGo();
         lastTop = top;
+        markEnd();
       }, { passive: true });
       const glide = () => {
         gliding = 0;
         if (!following || session !== current) return;
-        const gap = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop;
+        const gap = gapBelow();
         if (gap < 1) return;
         if (gap > transcript.clientHeight || still.matches) { transcript.scrollTop = transcript.scrollHeight; return; }
         transcript.scrollTop += Math.ceil(gap * 0.18);
         gliding = requestAnimationFrame(glide);
       };
-      current.keepUp = () => { if (following && !gliding) glide(); };
+      current.keepUp = () => { if (following && !gliding) glide(); markEnd(); };
+      toEnd.addEventListener('click', () => { following = true; markEnd(); glide(); });
 
       // Each job of the conversation says where its work happens (above the turn that started
       // it: the conversation may have been going before) and how it ended (below its last turn:
@@ -1033,7 +1049,7 @@
       container.replaceChildren(chatRow);
       chatRow.append(
         (chatColumn.append(rail, current.conversationId ? transcript : welcome,
-          h('div.composer-wrap', notice, followHost, h('div.composer', {
+          h('div.composer-wrap', toEnd, notice, followHost, h('div.composer', {
             on: {
               dragover: event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); event.currentTarget.classList.add('dragging'); } },
               dragleave: event => event.currentTarget.classList.remove('dragging'),
